@@ -3,6 +3,8 @@
 title="$1"
 message="$2"
 
-notify-send "$title" "$message"
-
-echo "$title :: $message" | nc -w1 localhost 9999 2>/dev/null &
+if netstat -tunl4 | grep -q 9999; then
+  echo "$title :: $message" | nc -w1 localhost 9999 2>/dev/null
+else
+  notify-send "$title" "$message"
+fi

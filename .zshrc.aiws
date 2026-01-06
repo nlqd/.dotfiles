@@ -52,10 +52,12 @@ alias pbcopy='xclip -sel c'
 alias pbpaste='xclip -sel c -o'
 alias nr='newsraft'
 alias cr='ENABLE_LSP_TOOL=true claude -r'
+alias claude='ENABLE_LSP_TOOL=true claude'
 
 function gdiff() {
   branch=${1:-main}
-  git diff -w $(git merge-base @ $branch) --stat -p
+  [[ $branch -ne main ]] && shift
+  git diff -w $(git merge-base @ $branch) --stat -p "$@"
 }
 
 # usage: pn [client | api | domain] command
@@ -89,6 +91,8 @@ function pn() {
       ;;
 
     start-cc-dev)
+      ln -s ~/dev/datum-monorepo/rules/ rules/
+      ln -s ~/dev/datum-monorepo/sgconfig.yml sgconfig.yml
       ln -s ~/dev/datum-monorepo/.nvim.lua .nvim.lua
       ln -s ~/dev/datum-monorepo/.mcp.json .mcp.json
       ln -s ~/dev/datum-monorepo/.claude/CLAUDE.md .claude/
