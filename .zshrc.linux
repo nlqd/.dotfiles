@@ -54,6 +54,7 @@ y() {
 #   tlmgr update --self
 #
 #   building the latex can be done by vimtex
+#   or actually just run lmc -C && lmk -xelatex
 # }
 
 xm6() {
@@ -70,7 +71,8 @@ sshaiws() {
   done &
   pid=$!
 
-  ssh aiws -L 6006:localhost:6006 -R 9999:localhost:9999
+  # ssh aiws -L 6006:localhost:6006 -R 9999:localhost:9999
+  ssh aiws -L 3000:localhost:3000 -L 8000:localhost:8000 -R 9999:localhost:9999
 
   kill $pid
   wait $pid 2> /dev/null

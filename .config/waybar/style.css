@@ -45,7 +45,7 @@
 /* Reset all styles */
 * {
     border: none;
-    font-family: "JetBrainsMono Nerd Font";
+    font-family: "Iosevka NF";
     font-weight: bold;
     border-radius: 0;
     min-height: 0;
@@ -55,10 +55,9 @@
 
 /* The whole bar */
 #waybar {
-    border-radius: 5px;
     background: @background;
     color: @foreground;
-    font-size: 13px;
+    font-size: 14px;
 }
 
 /* Each module */

@@ -24,6 +24,7 @@ config.warn_about_missing_glyphs = false
 
 config.keys = {
   { mods = 'SHIFT | CTRL', key = '^', action = wezterm.action.DisableDefaultAssignment, },
+  { mods = 'CTRL', key = 'Return', action = wezterm.action.DisableDefaultAssignment, },
 }
 
 config.window_padding = {
