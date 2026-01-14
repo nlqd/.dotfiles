@@ -91,6 +91,7 @@ function pn() {
       ;;
 
     start-cc-dev)
+      mkdir rules/
       ln -s ~/dev/datum-monorepo/rules/ rules/
       ln -s ~/dev/datum-monorepo/sgconfig.yml sgconfig.yml
       ln -s ~/dev/datum-monorepo/.nvim.lua .nvim.lua
@@ -130,6 +131,20 @@ function y() {
 # For fzf
 source /usr/share/doc/fzf/examples/key-bindings.zsh
 source /usr/share/doc/fzf/examples/completion.zsh
+
+function __tmux_fzf_autocomplete__() {
+  tmux capture-pane -pS -100000 \
+    | awk 'BEGIN { RS = "[ \t\n]" } length($0) > 4 && !seen[$0]++' \
+    | fzf --no-sort --exact +i --tac --layout reverse --height 20
+}
+
+function __tmux_fzf_autocomplete_widget__() {
+  LBUFFER+="$(__tmux_fzf_autocomplete__)"
+  zle redisplay
+}
+
+zle -N __tmux_fzf_autocomplete_widget__
+bindkey '^n' __tmux_fzf_autocomplete_widget__
 
 # Automatically create a new session
 tmux has-session -t main 2> /dev/null || tmux new-session -d -s main

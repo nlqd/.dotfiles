@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
-# require: fzf jq nvim gum
+# https://github.com/jake-stewart/inline
+# require: fzf jq nvim gum inline
 # require(custom): aidd parker diffix jwt
 
 set -o pipefail
@@ -285,7 +286,7 @@ start_chat_session() {
     fi
 
     if [[ -z "$MESSAGE" ]]; then
-      nvim $(QUERY_FILE)
+      inline nvim $(QUERY_FILE)
       MESSAGE=$(cat $(QUERY_FILE))
     else
       echo "$MESSAGE"
@@ -300,7 +301,7 @@ start_chat_session() {
     # use aidd prompt
     if [[ "$MESSAGE" =~ ^/u ]]; then
       aidd ${MESSAGE#* } >$(QUERY_FILE)
-      nvim "$(QUERY_FILE)"
+      inline nvim "$(QUERY_FILE)"
       MESSAGE=$(cat "$(QUERY_FILE)")
     fi
 

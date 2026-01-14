@@ -6,7 +6,7 @@
 )
 
 (deflayer default
-  @tbl   _      _      _      _      _      _      _       _      _     _      _
+  @tarr  _      _      _      _      _      _      _       _      _     _      @snum
   lctl   _      _      _      _      _      _      _       _      _     _      _
   _      _      _      _      _      _      _      _       _      _     _      _
   _      _      _                    _             _       _
@@ -42,9 +42,6 @@
   (o p) bspc $chord-timeout first-release ()
   (l ;) ret  $chord-timeout first-release ()
 
-  ;; (N)umber (L)ayer, if I can really grok it
-  (n l) (layer-toggle numbers) $chord-timeout first-release ()
-
   ;; Lateral combos
   (j k) -   $chord-timeout first-release ()
   (m ,) =   $chord-timeout first-release ()
@@ -71,7 +68,8 @@
 )
 
 (defalias
-  tbl (tap-hold $tap-time $hold-time tab (layer-toggle arrows))
+  tarr (tap-hold $tap-time $hold-time tab (layer-toggle arrows))
+  snum (tap-hold $tap-time $hold-time [ (layer-toggle numbers))
 
   alctl (tap-hold $tap-time $hold-time a lctl)
   slsft (tap-hold $tap-time $hold-time s lsft)

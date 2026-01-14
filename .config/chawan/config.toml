@@ -1,0 +1,5 @@
+[buffer]
+images = true
+
+[external]
+editor = 'nvim'

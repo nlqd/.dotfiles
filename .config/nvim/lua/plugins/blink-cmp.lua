@@ -23,6 +23,12 @@ return {
         },
         sources = {
             default = { 'lsp', 'snippets', 'buffer', 'path' },
+            per_filetype = {
+                sql = { 'dadbod', 'snippets', 'buffer' },
+            },
+            providers = {
+                dadbod = { module = 'vim_dadbod_completion.blink' },
+            },
         },
         signature = { enabled = true },
     },

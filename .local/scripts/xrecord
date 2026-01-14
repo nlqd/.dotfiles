@@ -5,21 +5,21 @@ start() {
     read -r X Y W H G ID <<< $SLOP
     REGION="-s ${W}x${H} -i ${DISPLAY}+${X},${Y}"
 
-    format="mp4"
+    audio=false
+    output_gif=true
+    output=~/Videos/rec-$(date +%Y%m%d-%H%M)
+    [[ "$output_gif" == "true" ]] && echo "$output" > /tmp/recgif
 
     # ### https://kerkour.com/video-formats-codecs-containers
     # ffmpeg -i [VIDEO_SOURCE] -map_metadata -1 -b:v 0 -movflags +faststart \
     #     -c:v libsvtav1 -preset 6 -crf 30 -c:a libopus -b:a 128k \
     #     [VIDEO_DESTINATION.mkv]
 
-    # ffmpeg -f x11grab $REGION \
-    #     -map_metadata -1 -b:v 0 -movflags +faststart -c:v libsvtav1 -preset 6 -crf 30 -c:a libopus -b:a 128k \
-    #     ~/Videos/rec-$(date +%Y%m%d-%H%M).mkv &
+    opts=(-c:v h264)
+    [[ "$audio" == "true" ]] && opts+=(-f pulse -i default)
+    # opts+=(-map_metadata -1 -b:v 0 -movflags +faststart -c:v libsvtav1 -preset 6 -crf 30 -c:a libopus -b:a 128k)
 
-    ### no audio
-    ffmpeg -f x11grab $REGION -c:v h264 ~/Videos/rec-$(date +%Y%m%d-%H%M).$format &
-    ### yes audio
-    # ffmpeg -f x11grab $REGION -f pulse -i default -c:v h264 ~/Videos/rec-$(date +%Y%m%d-%H%M).$format &
+    ffmpeg -f x11grab $REGION "${opts[@]}" "$output.mp4" &
     echo $! > /tmp/recpid
 
     # width and height of the window, x and y are where window start on the monitor
@@ -34,9 +34,34 @@ end() {
     kill -15 $(cat /tmp/recpid /tmp/screenkeypid) && rm -f /tmp/recpid /tmp/screenkeypid
     notify-send -t 1000 "Recording stopped"
 
-    command -v dragon && {
-        ls ~/Videos/rec-* | tail -1 | dragon --and-exit --stdin
-    }
+    if [[ -f /tmp/recgif ]]; then
+        output=$(cat /tmp/recgif)
+        rm -f /tmp/recgif
+        notify-send -t 1000 "Converting to gif..."
+
+        gen_opts=()
+        gen_opts+=(fps=10)              # reduce framerate (default ~30)
+        gen_opts+=(scale=iw/2:-1)       # halve resolution
+        gen_opts+=(max_colors=128)      # reduce palette (default 256)
+
+        use_opts=()
+        use_opts+=(dither=bayer)        # fast grid dithering to simulate missing colors
+        # use_opts+=(diff_mode=rectangle)  # only encode changed regions (no improvement in tests)
+
+        gen_filter=$(IFS=,; echo "${gen_opts[*]}")
+        use_filter=$(IFS=,; echo "${use_opts[*]}")
+
+        ffmpeg -i "$output.mp4" -filter_complex \
+            "[0:v]${gen_filter},palettegen[pal];[0:v]${gen_filter}[vid];[vid][pal]paletteuse=${use_filter}" \
+            "$output.gif"
+
+        # command -v gifsicle && gifsicle --optimize=3 --lossy=80 -o "$output.gif" "$output.gif"
+
+        notify-send -t 1000 "Gif ready"
+        command -v dragon && dragon --and-exit "$output.mp4" "$output.gif"
+    else
+        command -v dragon && ls ~/Videos/rec-* | tail -1 | dragon --and-exit --stdin
+    fi
 }
 
 [[ -f /tmp/recpid && -f /tmp/screenkeypid ]] && end || start

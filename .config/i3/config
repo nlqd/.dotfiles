@@ -38,7 +38,6 @@ bindsym  $mod+s        exec  --no-startup-id  slack
 bindsym  $mod+space    exec  --no-startup-id  ibus-toggle && $refresh_i3status
 bindsym  Print         exec  --no-startup-id  xscreenshot
 bindsym  Shift+Print   exec  --no-startup-id  xrecord     && $refresh_i3status
-bindsym  $mod+c        exec  "alacritty --command nvim $HOME/.config/i3/config"
 bindsym  $mod+Shift+e  exec  "i3-nagbar -t warning -m 'Do you really want to exit i3?' -B 'Yes, exit i3' 'i3-msg exit'"
 
 bindsym $mod+Shift+q kill
@@ -54,6 +53,7 @@ bindsym $mod+f fullscreen toggle
 bindsym $mod+w layout tabbed
 bindsym $mod+e layout toggle split
 bindsym $mod+Shift+t floating toggle
+bindsym $mod+p       sticky toggle
 
 bindsym $mod+h focus left
 bindsym $mod+j focus down
