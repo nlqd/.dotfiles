@@ -6,24 +6,24 @@
 )
 
 (deflayer default
-  @tarr  _      _      _      _      _      _      _       _      _     _      @snum
-  lctl   _      _      _      _      _      _      _       _      _     _      _
-  _      _      _      _      _      _      _      _       _      _     _      _
-  _      _      _                    _             _       _
+  @tarr  _      _      _      _      _      _      _      _      _     _      @snum
+  lctl   _      _      _      _      _      _      _      _      _     _      _
+  _      _      _      _      _      _      _      _      _      _     _      _
+  _      _      _                    _                    @arai  _
 )
 
-(deflayer arrows
-  _      _      _      _      _      _      _      _       _      _     _      _
-  _      _      _      _      _      _      left   down    up     right _      _
-  _      _      _      _      _      _      _      _       _      _     _      _
-  _      _      _                    _                     _      _
+(deflayer lower
+  _      _      _      _      _      _      _      _      _      _      _      _
+  _      _      _      _      _      _      left   down   up     right  _      _
+  _      _      _      _      _      _      _      _      _      _      _      _
+  _      _      _                    _                    _      _
 )
 
-(deflayer numbers
-  _      _      7      8      9      _      _      _       _      _     _      _
-  _      _      4      5      6      _      _      _       _      _     _      _
-  _      0      1      2      3      _      _      _       _      _     _      _
-  _      _      _                    _                     _      _
+(deflayer raise
+  _      _      7      8      9      _      _      _      _      _      _      _
+  _      _      4      5      6      _      _      _      _      _      _      _
+  _      0      1      2      3      _      _      _      _      _      _      _
+  _      _      _                    _                    _      _
 )
 
 
@@ -38,7 +38,7 @@
 )
 
 (defchordsv2
-  ;; TODO: what are these
+  (p [) del  $chord-timeout first-release ()
   (o p) bspc $chord-timeout first-release ()
   (l ;) ret  $chord-timeout first-release ()
 
@@ -68,8 +68,9 @@
 )
 
 (defalias
-  tarr (tap-hold $tap-time $hold-time tab (layer-toggle arrows))
-  snum (tap-hold $tap-time $hold-time [ (layer-toggle numbers))
+  tarr (tap-hold $tap-time $hold-time tab  (layer-toggle lower))
+  snum (tap-hold $tap-time $hold-time [    (layer-toggle raise))
+  arai (tap-hold $tap-time $hold-time ralt (layer-toggle raise))
 
   alctl (tap-hold $tap-time $hold-time a lctl)
   slsft (tap-hold $tap-time $hold-time s lsft)
@@ -82,4 +83,4 @@
   ;rctl (tap-hold $tap-time $hold-time ; rctl)
 )
 
-;; vim:ft=scheme:ts=2:sts
+;; vim:ft=scheme:ts=2:sts:cuc

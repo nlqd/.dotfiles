@@ -25,13 +25,16 @@ start() {
     # width and height of the window, x and y are where window start on the monitor
     # so screenkey should be relative to the width and height plus x and y
     screenkey -p fixed -g "$(($W * 23/100))x$(($H * 8/100))+$(($X + $W * 3/4))+$(($Y + $H * 9/10))" --opacity 0.4 &
-    echo $! > /tmp/screenkeypid
+    echo $! > /tmp/recscreenkeypid
 
     notify-send -t 1000 "Recording started"
 }
 
 end() {
-    kill -15 $(cat /tmp/recpid /tmp/screenkeypid) && rm -f /tmp/recpid /tmp/screenkeypid
+    recpid=$(cat /tmp/recpid)
+    kill -15 "$recpid" $(cat /tmp/recscreenkeypid)
+    tail --pid="$recpid" -f /dev/null  # wait for ffmpeg to finish writing
+    rm -f /tmp/recpid /tmp/recscreenkeypid
     notify-send -t 1000 "Recording stopped"
 
     if [[ -f /tmp/recgif ]]; then
@@ -39,29 +42,38 @@ end() {
         rm -f /tmp/recgif
         notify-send -t 1000 "Converting to gif..."
 
+        vf_opts=()
+        vf_opts+=(fps=10)               # reduce framerate (default ~30)
+        # vf_opts+=(scale=iw/2:-1)        # halve resolution
+
         gen_opts=()
-        gen_opts+=(fps=10)              # reduce framerate (default ~30)
-        gen_opts+=(scale=iw/2:-1)       # halve resolution
         gen_opts+=(max_colors=128)      # reduce palette (default 256)
 
         use_opts=()
         use_opts+=(dither=bayer)        # fast grid dithering to simulate missing colors
         # use_opts+=(diff_mode=rectangle)  # only encode changed regions (no improvement in tests)
 
-        gen_filter=$(IFS=,; echo "${gen_opts[*]}")
-        use_filter=$(IFS=,; echo "${use_opts[*]}")
+        vf=$(IFS=,; echo "${vf_opts[*]}")
+        gen=$(IFS=:; echo "${gen_opts[*]}")
+        use=$(IFS=:; echo "${use_opts[*]}")
 
-        ffmpeg -i "$output.mp4" -filter_complex \
-            "[0:v]${gen_filter},palettegen[pal];[0:v]${gen_filter}[vid];[vid][pal]paletteuse=${use_filter}" \
-            "$output.gif"
+        if command -v gifski &>/dev/null; then
+            ffmpeg -loglevel error -i "$output.mp4" -vf fps=10 -f yuv4mpegpipe - | \
+                gifski --fps 10 --quality 80 --output "$output.gif" -
+        else
+            ffmpeg -i "$output.mp4" -filter_complex \
+                "[0:v]${vf},palettegen=${gen}[pal];[0:v]${vf}[vid];[vid][pal]paletteuse=${use}" \
+                "$output.gif"
+        fi && notify-send -t 1000 "Gif ready"
 
-        # command -v gifsicle && gifsicle --optimize=3 --lossy=80 -o "$output.gif" "$output.gif"
-
-        notify-send -t 1000 "Gif ready"
-        command -v dragon && dragon --and-exit "$output.mp4" "$output.gif"
+        printf '%s\n' "$output.mp4" "$output.gif"
     else
-        command -v dragon && ls ~/Videos/rec-* | tail -1 | dragon --and-exit --stdin
-    fi
+        ls ~/Videos/rec-*.mp4 | tail -1
+    fi | dragon --and-exit --stdin
 }
 
-[[ -f /tmp/recpid && -f /tmp/screenkeypid ]] && end || start
+if [[ -f /tmp/recpid && -f /tmp/recscreenkeypid ]]; then
+    end
+else
+    start
+fi

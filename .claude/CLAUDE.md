@@ -180,6 +180,9 @@ Start each line of desc with a dash.
 
 If this commit handles other comments, paste the comment's url into the commit
 
+If your task is in Asana, add it add the end
+https://app.asana.com/0/0/<task_id>
+
 ### Pull Request Description Format
 
 Title: should be the task's name

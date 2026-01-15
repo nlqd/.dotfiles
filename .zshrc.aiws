@@ -70,17 +70,17 @@ function pn() {
   case "$1" in
     cl | client)
       shift
-      pnpm --filter=@Datum/client "$@"
+      pnpm -F client "$@"
       return
       ;;
     a | api)
       shift
-      pnpm --filter=@Datum/api "$@"
+      pnpm -F api "$@"
       return
       ;;
     d | domain)
       shift
-      pnpm --filter=@Datum/domain "$@"
+      pnpm -F domain "$@"
       return
       ;;
 
