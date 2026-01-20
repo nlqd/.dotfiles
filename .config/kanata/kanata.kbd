@@ -1,4 +1,5 @@
 (defsrc
+  grv
   tab    q      w      e      r      t      y      u      i      o      p      [
   caps   a      s      d      f      g      h      j      k      l      ;      '
   lsft   z      x      c      v      b      n      m      ,      .      /      rsft
@@ -6,13 +7,15 @@
 )
 
 (deflayer default
+  _
   _      _      _      _      _      _      _      _      _      _      _      _
   lctl   _      _      _      _      _      _      _      _      _      _      _
-  _      _      _      _      _      _      _      _      _      _      _      _
-  _      _      _                    @slow                @arai  _
+  _      _      _      _      _      _      _      _      _      _      _      @sgrv
+  caps   _      _                    @slow                @arai  _
 )
 
 (deflayer lower
+  _
   _      _      _      _      _      _      _      _      _      _      _      _
   _      _      _      _      _      _      left   down   up     right  _      _
   _      _      _      _      _      _      _      _      _      _      _      _
@@ -20,16 +23,17 @@
 )
 
 (deflayer raise
+  _
   _      _      1      2      3      _      _      _      S-9    S-0    _      _
-  _      _      4      5      6      _      _      _      [      ]      _      _
-  _      0      7      8      9      _      _      _      S-[    S-]    _      _
+  _      _      4      5      6      _      _      _      [      ]      S-\    _
+  _      0      7      8      9      _      _      _      S-[    S-]    \      _
   _      _      _                    _                    _      _
 )
 
 
 (defvar
-  tap-time 200
-  hold-time 150
+  tap-time 140
+  hold-time 200
   chord-timeout 30
 )
 
@@ -68,12 +72,15 @@
 )
 
 (defalias
-  tlow (tap-hold $tap-time $hold-time tab  (layer-toggle lower))
+  ;; thumb based layer switching
   slow (tap-hold $tap-time $hold-time spc  (layer-toggle lower))
-  snum (tap-hold $tap-time $hold-time [    (layer-toggle raise))
   arai (tap-hold $tap-time $hold-time ralt (layer-toggle raise))
 
-  tblck (tap-hold $tap-time $hold-time caps lctl)
+  ;; pinky based layer switching
+  tlow (tap-hold $tap-time $hold-time tab  (layer-toggle lower))
+  snum (tap-hold $tap-time $hold-time [    (layer-toggle raise))
+
+  sgrv (tap-hold $tap-time $hold-time grv rsft)
 
   alctl (tap-hold $tap-time $hold-time a lctl)
   slsft (tap-hold $tap-time $hold-time s lsft)
