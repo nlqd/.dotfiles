@@ -57,10 +57,14 @@ y() {
 #   or actually just run lmc -C && lmk -xelatex
 # }
 
-xm6() {
-  bluetoothctl power on
-  id=$(bluetoothctl paired-devices | rg XM6 | awk '{ print $2 }')
-  bluetoothctl connect $id
+function gdiff() {
+  branch=${1:-main}
+  [[ $branch -ne main ]] && shift
+  git diff -w $(git merge-base @ $branch) --stat -p "$@"
+}
+
+function duchs() {
+  du -chs -- * | sort -h
 }
 
 sshaiws() {

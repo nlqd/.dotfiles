@@ -2,10 +2,10 @@
     autoSetupRemote = true
 
 [includeIf "gitdir:~/Dev/personal/"]
-    path = ~/Dev/personal/.gitconfig.personal
+    path = ~/Dev/personal/.gitconfig
 
 [includeIf "gitdir:~/Dev/work/"]
-    path = ~/Dev/work/.gitconfig.work
+    path = ~/Dev/work/.gitconfig
 
 [includeIf "gitdir:~/dev/"]
     path = ~/.gitconfig.work
@@ -28,9 +28,6 @@
 
 [interactive]
     diffFilter = delta --color-only
-
-[merge]
-    conflictStyle = zdiff3
 
 [delta]
     navigate = true

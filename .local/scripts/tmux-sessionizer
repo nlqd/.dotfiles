@@ -5,7 +5,7 @@ if [[ $# -eq 1 ]]; then
 elif [ $USER = dungngo ]; then
   selected=$(find ~/dev ~/experiments -mindepth 1 -maxdepth 1 -type d | fzf)
 elif [ $USER = qd ]; then
-  selected=$(find ~/Dev/work ~/Dev/personal ~/Study ~/Documents ~/Documents/Obsidian-Vault/ ~/Dev/sides -mindepth 1 -maxdepth 1 -type d | fzf)
+  selected=$(find ~ ~/Dev/work ~/Dev/personal ~/Study ~/Documents ~/Documents/Obsidian-Vault/ ~/Dev/sides -mindepth 1 -maxdepth 1 -type d | fzf)
 elif [ $USER = vpn ]; then
   selected=$(find ~/Desktop/DungNgo -mindepth 1 -maxdepth 1 -type d | fzf)
 fi

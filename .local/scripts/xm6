@@ -1,6 +1,5 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
-bluetoothctl connect 58:18:62:01:E5:78
-# bluetoothctl disconnect 58:18:62:01:E5:78
-bluetoothctl info 58:18:62:01:E5:78
-
+bluetoothctl power on
+id=$(bluetoothctl paired-devices | rg XM6 | awk '{ print $2 }')
+bluetoothctl connect "$id"
