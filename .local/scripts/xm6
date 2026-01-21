@@ -2,4 +2,5 @@
 
 bluetoothctl power on
 id=$(bluetoothctl paired-devices | rg XM6 | awk '{ print $2 }')
+[[ -z "$id" ]] && id=$(bluetoothctl devices | rg XM6 | awk '{ print $2 }')
 bluetoothctl connect "$id"

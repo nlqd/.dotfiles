@@ -73,56 +73,61 @@ if $OUTPUT_JSON; then
   exit 0
 fi
 
-echo "$response" | jq -r '
-"PR Status: \(if .data.repository.pullRequest.merged then "MERGED" elif .data.repository.pullRequest.state == "OPEN" then "OPEN" else "CLOSED" end)",
-"Branch: \(.data.repository.pullRequest.headRefName) → \(.data.repository.pullRequest.baseRefName)",
-"Merge State: \(.data.repository.pullRequest.mergeStateStatus // "UNKNOWN")",
-"Mergeable: \(
-  if .data.repository.pullRequest.mergeable == "MERGEABLE" then "✓ No conflicts"
-  elif .data.repository.pullRequest.mergeable == "CONFLICTING" then "✗ HAS CONFLICTS"
-  elif .data.repository.pullRequest.mergeable == "UNKNOWN" then "? Checking..."
-  else .data.repository.pullRequest.mergeable // "UNKNOWN"
-  end
-)",
-"",
-"REVIEWS:",
-(.data.repository.pullRequest.latestReviews.nodes | if length > 0 then
-  map("  @\(.author.login): \(if .state == "APPROVED" then "✓ APPROVED" elif .state == "CHANGES_REQUESTED" then "✗ CHANGES REQUESTED" elif .state == "COMMENTED" then "💬 COMMENTED" elif .state == "DISMISSED" then "⊘ DISMISSED" else .state end) (\(.submittedAt))") | join("\n")
-else "  No reviews yet" end),
-"",
-"================================",
-"",
-(if (.data.repository.pullRequest.comments.nodes | map(select(.author.login != "claude")) | length) > 0 then
-"CONVERSATION COMMENTS:",
-"",
-(.data.repository.pullRequest.comments.nodes[] | select(.author.login != "claude") |
-"@\(.author.login) - \(.createdAt) [Comment ID: \(.databaseId)]",
-"  " + (.body | gsub("\n"; "\n  ")),
-""
-),
-"================================",
-""
-else "" end),
-(.data.repository.pullRequest.reviewThreads.nodes | map(select(.isResolved)) | length) as $resolved |
-(.data.repository.pullRequest.reviewThreads.nodes | map(select(.isResolved | not))) as $open |
-(if $resolved > 0 then "\($resolved) resolved comment\(if $resolved > 1 then "s" else "" end)" else "" end),
-"",
-(if ($open | length) > 0 then
-"OPEN REVIEW THREADS:",
-"",
-($open[] |
-"--------------------------------",
-"Thread ID: \(.id)",
-(if .comments.nodes[0].path then "File: \(.comments.nodes[0].path)" + (if .comments.nodes[0].line then ":\(.comments.nodes[0].line)" else "" end) else "" end),
-"",
-(.comments.nodes[] |
-  (if .replyTo then "> " else "" end) +
-  "@\(.author.login) - \(.createdAt) [Reply ID: \(.databaseId)]",
-  "  " + (.body | gsub("\n"; "\n  ")),
-  (if .diffHunk and .diffHunk != "" and (.replyTo | not) then "\n  Code context:\n" + ("  " + (.diffHunk | gsub("\n"; "\n  "))) else "" end),
-  ""
-),
-""
-)
-else "" end)
+echo "$response" | jq -r --arg num "$number" '
+.data.repository.pullRequest as $pr |
+($pr.latestReviews.nodes | length) as $review_count |
+[$pr.comments.nodes[] | select(.author.login != "claude")] as $conv |
+[$pr.reviewThreads.nodes[] | select(.isResolved)] as $resolved |
+[$pr.reviewThreads.nodes[] | select(.isResolved | not)] as $open |
+
+"PR #\($num) \(if $pr.merged then "MERGED" elif $pr.state == "OPEN" then "OPEN" else "CLOSED" end)
+\($pr.headRefName) → \($pr.baseRefName)
+Merge: \($pr.mergeStateStatus // "UNKNOWN") | Conflicts: \($pr.mergeable // "UNKNOWN")
+
+REVIEWER        STATE               DATE
+─────────────────────────────────────────────────────
+\(if $review_count == 0 then "  (no reviews yet)" else
+  [$pr.latestReviews.nodes[] |
+    "\(.author.login)\(" " * (15 - (.author.login | length))) \(
+      if .state == "APPROVED" then "✓ APPROVED"
+      elif .state == "CHANGES_REQUESTED" then "✗ CHANGES_REQ"
+      elif .state == "COMMENTED" then "💬 COMMENTED"
+      elif .state == "DISMISSED" then "⊘ DISMISSED"
+      else .state end
+    )\(" " * (19 - (
+      if .state == "APPROVED" then 10
+      elif .state == "CHANGES_REQUESTED" then 13
+      elif .state == "COMMENTED" then 11
+      elif .state == "DISMISSED" then 10
+      else (.state | length) end
+    ))) \(.submittedAt | split("T")[0])"
+  ] | join("\n")
+end)
+\(if ($conv | length) > 0 then "
+CONVERSATION COMMENTS
+─────────────────────────────────────────────────────
+\([$conv[] |
+  "@\(.author.login) [\(.databaseId)] \(.createdAt | split("T")[0])
+  \(.body | gsub("\n"; "\n  "))
+"] | join("\n"))
+" else "" end)\(if ($resolved | length) > 0 then "
+(\($resolved | length) resolved thread\(if ($resolved | length) > 1 then "s" else "" end))
+" else "" end)\(if ($open | length) > 0 then "
+OPEN REVIEW THREADS (\($open | length))
+═════════════════════════════════════════════════════
+\([$open[] |
+  "─────────────────────────────────────────────────────
+\(.comments.nodes[0].path // "(no file)")\(if .comments.nodes[0].line then ":\(.comments.nodes[0].line)" else "" end)
+
+\([.comments.nodes[] |
+  "\(if .replyTo then "↳ " else "" end)@\(.author.login) [\(.databaseId)] \(.createdAt | split("T")[0])
+  \(.body | gsub("\n"; "\n  "))\(
+    if .diffHunk and .diffHunk != "" and (.replyTo | not) then "
+
+  ```diff
+  \(.diffHunk | gsub("\n"; "\n  "))
+  ```" else "" end)
+"] | join("\n\n"))"
+] | join("\n\n"))
+" else "" end)"
 '

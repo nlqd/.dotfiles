@@ -8,10 +8,10 @@
 
 (deflayer default
   _
-  _      _      _      _      _      _      _      _      _      _      _      _
+  @tlow  _      _      _      _      _      _      _      _      _      _      _
   lctl   _      _      _      _      _      _      _      _      _      _      _
   _      _      _      _      _      _      _      _      _      _      _      @sgrv
-  caps   _      _                    @slow                @arai  _
+  caps   _      _                    _                    @arai  _
 )
 
 (deflayer lower
