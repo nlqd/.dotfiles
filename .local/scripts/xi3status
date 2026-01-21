@@ -59,5 +59,6 @@ do
     [[ -n "$corne_bat" ]] && status_items+=" ${corne_bat} |"
     [[ -n "$rec" ]] && status_items+=" ${rec} |"
 
-    echo "${line} | 🔆 $(xbrightness) | ${gpu_load} | ${weather} |${status_items}" || exit 1
+    # echo "${line} | 🔆 $(xbrightness) | ${gpu_load} | ${weather} |${status_items}" || exit 1
+    echo "${line} | 🔆 $(xbrightness) | ${gpu_load} |${status_items}" || exit 1
 done

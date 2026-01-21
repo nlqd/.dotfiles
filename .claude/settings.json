@@ -27,7 +27,9 @@
   "enabledPlugins": {
     "pyright-lsp@claude-plugins-official": true,
     "typescript-lsp@claude-plugins-official": true,
-    "hookify@claude-plugins-official": true
+    "hookify@claude-plugins-official": true,
+    "impeccable@impeccable": true,
+    "feature-dev@claude-code-plugins": true
   },
   "alwaysThinkingEnabled": true,
   "autoUpdates": true,

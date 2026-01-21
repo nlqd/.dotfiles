@@ -24,7 +24,7 @@ start() {
 
     # width and height of the window, x and y are where window start on the monitor
     # so screenkey should be relative to the width and height plus x and y
-    screenkey -p fixed -g "$(($W * 23/100))x$(($H * 8/100))+$(($X + $W * 3/4))+$(($Y + $H * 9/10))" --opacity 0.4 &
+    screenkey --mouse -p fixed -g "$(($W * 23/100))x$(($H * 8/100))+$(($X + $W * 3/4))+$(($Y + $H * 9/10))" --opacity 0.4 &
     echo $! > /tmp/recscreenkeypid
 
     notify-send -t 1000 "Recording started"
@@ -66,10 +66,10 @@ end() {
                 "$output.gif"
         fi && notify-send -t 1000 "Gif ready"
 
-        printf '%s\n' "$output.mp4" "$output.gif"
+        printf '%s\n' "$output.mp4" "$output.gif" | dragon --and-exit --stdin
     else
-        ls ~/Videos/rec-*.mp4 | tail -1
-    fi | dragon --and-exit --stdin
+        ls ~/Videos/rec-*.mp4 | tail -1 | dragon --and-exit --stdin
+    fi
 }
 
 if [[ -f /tmp/recpid && -f /tmp/recscreenkeypid ]]; then

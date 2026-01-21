@@ -92,14 +92,17 @@ function pn() {
 
     start-cc-dev)
       mkdir rules/
-      ln -s ~/dev/datum-monorepo/rules/ rules/
+      ln -s ~/dev/datum-monorepo/rules/ rules
       ln -s ~/dev/datum-monorepo/sgconfig.yml sgconfig.yml
       ln -s ~/dev/datum-monorepo/.nvim.lua .nvim.lua
       ln -s ~/dev/datum-monorepo/.mcp.json .mcp.json
       ln -s ~/dev/datum-monorepo/.claude/CLAUDE.md .claude/
       ln -s ~/dev/datum-monorepo/.claude/settings.local.json .claude/
       ln -s ~/dev/datum-monorepo/.claude/commands/ .claude/
-      pn i
+      pn i &
+      pn -F env generate-env development &
+      pn -F env generate-env test &
+      wait
       pn d build
       pn codegen
       return
