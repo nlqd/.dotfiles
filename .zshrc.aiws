@@ -99,9 +99,9 @@ function pn() {
       ln -s ~/dev/datum-monorepo/.claude/CLAUDE.md .claude/
       ln -s ~/dev/datum-monorepo/.claude/settings.local.json .claude/
       ln -s ~/dev/datum-monorepo/.claude/commands/ .claude/
-      pn i &
-      pn -F env generate-env development &
-      pn -F env generate-env test &
+      pn i
+      pn -F env generate-env development
+      pn -F env generate-env test
       wait
       pn d build
       pn codegen

@@ -5,6 +5,69 @@ set -euo pipefail
 CREDENTIALS_FILE="${HOME}/.config/asana/.credentials.json"
 CONFIG_FILE="${HOME}/.config/asana/config.json"
 API_BASE="https://app.asana.com/api/1.0"
+HEADER_WIDTH=50
+
+print_header() {
+  printf '=%.0s' $(seq 1 $HEADER_WIDTH)
+  echo
+}
+
+check_api_error() {
+  local response="$1"
+  if echo "$response" | jq -e '.errors' &>/dev/null; then
+    echo "API Error: $(echo "$response" | jq -r '.errors[0].message')" >&2
+    return 1
+  fi
+  echo "$response"
+}
+
+validate_date() {
+  [[ $1 =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || {
+    echo "Error: Invalid date format '$1'. Use YYYY-MM-DD (e.g., 2024-03-15)" >&2
+    return 1
+  }
+  # Verify date is actually valid (not 2024-13-45)
+  if ! date -d "$1" &>/dev/null; then
+    echo "Error: Invalid date '$1'. Check month/day values." >&2
+    return 1
+  fi
+}
+
+get_sections_list() {
+  get_project_config | jq -r '.sections | keys | join(" | ")' 2>/dev/null || echo "(unknown)"
+}
+
+# Case-insensitive section name resolution
+resolve_section_name() {
+  local input="$1" config="${2:-$(get_project_config)}"
+  local sections
+  sections=$(echo "$config" | jq -r '.sections | keys[]')
+
+  # Exact match first
+  for section in $sections; do
+    [[ "$section" == "$input" ]] && { echo "$section"; return 0; }
+  done
+
+  # Case-insensitive match
+  local input_lower
+  input_lower=$(echo "$input" | tr '[:upper:]' '[:lower:]')
+  for section in $sections; do
+    local section_lower
+    section_lower=$(echo "$section" | tr '[:upper:]' '[:lower:]')
+    [[ "$section_lower" == "$input_lower" ]] && { echo "$section"; return 0; }
+  done
+
+  # Partial match (prefix)
+  for section in $sections; do
+    local section_lower
+    section_lower=$(echo "$section" | tr '[:upper:]' '[:lower:]')
+    [[ "$section_lower" == "$input_lower"* ]] && { echo "$section"; return 0; }
+  done
+
+  echo "Error: Section '$input' not found" >&2
+  echo "Available sections: $(echo "$sections" | tr '\n' ' ' | sed 's/ $//')" >&2
+  return 1
+}
 
 is_interactive() {
   [[ -t 0 ]] && [[ -t 1 ]]
@@ -17,7 +80,12 @@ has_fzf() {
 get_token() {
   if [[ ! -f $CREDENTIALS_FILE ]]; then
     echo "Error: Credentials file not found at $CREDENTIALS_FILE" >&2
-    echo 'Please create it with: {"token": "YOUR_PERSONAL_ACCESS_TOKEN"}' >&2
+    echo "" >&2
+    echo "Create it with:" >&2
+    echo "  mkdir -p ~/.config/asana" >&2
+    echo '  echo '\''{"token": "YOUR_PERSONAL_ACCESS_TOKEN"}'\'' > ~/.config/asana/.credentials.json' >&2
+    echo "" >&2
+    echo "Get your token from: https://app.asana.com/0/my-apps" >&2
     exit 1
   fi
 
@@ -27,6 +95,29 @@ get_token() {
 get_config() {
   if [[ ! -f $CONFIG_FILE ]]; then
     echo "Error: Config file not found at $CONFIG_FILE" >&2
+    echo "" >&2
+    echo "Create it with your workspace/project info:" >&2
+    cat >&2 <<'EXAMPLE'
+{
+  "workspace_gid": "YOUR_WORKSPACE_GID",
+  "workspace_name": "Your Workspace",
+  "user_gid": "YOUR_USER_GID",
+  "user_name": "Your Name",
+  "default_project": "app-v1",
+  "projects": {
+    "app-v1": {
+      "gid": "PROJECT_GID",
+      "name": "App v1",
+      "sections": {
+        "Not-Started": "SECTION_GID",
+        "In-Progress": "SECTION_GID"
+      }
+    }
+  }
+}
+EXAMPLE
+    echo "" >&2
+    echo "Find GIDs in Asana URLs or via API explorer." >&2
     exit 1
   fi
   cat "$CONFIG_FILE"
@@ -54,7 +145,8 @@ get_project_config() {
       project_key: $pk,
       project_gid: .projects[$pk].gid,
       project_name: .projects[$pk].name,
-      sections: .projects[$pk].sections
+      sections: .projects[$pk].sections,
+      default_section: (.projects[$pk].default_section // (.projects[$pk].sections | keys | first))
     }'
   else
     # Legacy single-project format - just return as-is
@@ -69,7 +161,11 @@ list_projects() {
     local current="${ASANA_PROJECT_OVERRIDE:-${ASANA_PROJECT:-$default}}"
     echo "Available projects:"
     echo "$config" | jq -r --arg default "$default" --arg current "$current" '.projects | to_entries[] |
-      "  \(if .key == $current then ">" else " " end) \(.key) - \(.value.name)\(if .key == $default then " (default)" else "" end)"'
+      "  \(if .key == $current then ">" else " " end) \(.key) - \(.value.name)\(if .key == $default then " (default)" else "" end)\n      Sections: \(.value.sections | keys | join(" | "))"'
+    echo ""
+    echo "Switch project:"
+    echo "  asana-overview -p ocr           # one-off"
+    echo "  export ASANA_PROJECT=ocr        # session"
   else
     echo "Single project: $(echo "$config" | jq -r '.project_name')"
     echo "(Add 'projects' object to config to enable multi-project support)"
@@ -113,18 +209,22 @@ update_task_due_date() { api_put "/tasks/$1" "$(jq -n --arg due "$2" '{data: {du
 ### COMMANDS
 
 view_task() {
-  local details=$(get_task_details "$1") comments=$(get_task_comments "$1")
-  local dependencies=$(echo "$details" | jq -r '.data.dependencies // [] | if length > 0 then map("[\(.gid)] \(.name)") | join("\n           ") else "None" end')
-  local dependents=$(echo "$details" | jq -r '.data.dependents // [] | if length > 0 then map("[\(.gid)] \(.name)") | join("\n           ") else "None" end')
-  echo "==========================================
-Task Details
-==========================================
-
-Title:     $(echo "$details" | jq -r '.data.name')
-Section:   $(echo "$details" | jq -r '.data.memberships[0].section.name // "No section"')
-Assignee:  $(echo "$details" | jq -r '.data.assignee.name // "Unassigned"')
-Due:       $(echo "$details" | jq -r '.data.due_on // "No due date"')
-Completed: $(echo "$details" | jq -r '.data.completed')
+  local details comments
+  details=$(get_task_details "$1") || return 1
+  details=$(check_api_error "$details") || return 1
+  comments=$(get_task_comments "$1")
+  local dependencies=$(echo "$details" | jq -r '.data.dependencies // [] | if length > 0 then map("[\(.gid)] \(.name)") | join("\n            ") else "None" end')
+  local dependents=$(echo "$details" | jq -r '.data.dependents // [] | if length > 0 then map("[\(.gid)] \(.name)") | join("\n            ") else "None" end')
+  print_header
+  echo "Task Details"
+  print_header
+  echo "
+Title:      $(echo "$details" | jq -r '.data.name')
+URL:        https://app.asana.com/0/0/$1
+Section:    $(echo "$details" | jq -r '.data.memberships[0].section.name // "No section"')
+Assignee:   $(echo "$details" | jq -r '.data.assignee.name // "Unassigned"')
+Due:        $(echo "$details" | jq -r '.data.due_on // "No due date"')
+Completed:  $(echo "$details" | jq -r '.data.completed')
 
 Blocked by: ${dependencies}
 Blocking:   ${dependents}
@@ -138,10 +238,10 @@ $(echo "$comments" | jq -r '.data[] | select(.type == "comment") | "[\(.created_
 }
 
 search_tasks_interactive() {
-  echo "==========================================
-Search Results for: '$2'
-==========================================
-"
+  print_header
+  echo "Search Results for: '$2'"
+  print_header
+  echo
   search_tasks "$1" "$2" | jq -r '.data[] | "[\(.gid)] \(.name) - Due: \(.due_on // "None") - Assignee: \(.assignee.name // "Unassigned")"'
 }
 
@@ -149,7 +249,7 @@ move_task_interactive() {
   local section_gid=$(get_section_gid "$3")
   [[ -z $section_gid || $section_gid == "null" ]] && {
     echo "Error: Section '$3' not found" >&2
-    echo "Sections: Not-Started | In-Progress | Needs Review | Dev-Complete | QA-Accepted" >&2
+    echo "Available sections: $(get_sections_list)" >&2
     exit 1
   }
   echo "Moving task $1 to section '$3'..."
@@ -158,20 +258,6 @@ move_task_interactive() {
     echo "Error: $result" >&2
     exit 1
   }
-}
-
-toggle_assign_me_to_task() {
-  local task_gid="$1" user_gid="$2"
-  local details=$(get_task_details "$task_gid")
-  local task_name=$(echo "$details" | jq -r '.data.name')
-  local current_assignee=$(echo "$details" | jq -r '.data.assignee.gid // empty')
-  if [[ $current_assignee == "$user_gid" ]]; then
-    update_task_assignee "$task_gid" "null" >/dev/null
-    echo "[$task_gid] $task_name: Unassigned"
-  else
-    update_task_assignee "$task_gid" "$user_gid" >/dev/null
-    echo "[$task_gid] $task_name: Assigned"
-  fi
 }
 
 set_task_due_date() {
@@ -183,10 +269,10 @@ set_task_due_date() {
 }
 
 list_task_attachments() {
-  echo "==========================================
-Attachments for task $1
-==========================================
-"
+  print_header
+  echo "Attachments for task $1"
+  print_header
+  echo
   local attachments=$(get_task_attachments "$1")
   [[ $(echo "$attachments" | jq '.data | length') -eq 0 ]] && {
     echo "No attachments found."
@@ -211,15 +297,15 @@ download_task_attachments() {
     if [[ -n $download_url && $download_url != "null" ]]; then
       if curl -f -s -S -L "$download_url" -o "$output_file" 2>&1; then
         local file_size=$(stat -c%s "$output_file" 2>/dev/null || stat -f%z "$output_file" 2>/dev/null || echo "0")
-        [[ $file_size -gt 0 ]] && echo "  ✓ Saved ($file_size bytes)" || {
-          echo "  ✗ Empty file" >&2
+        [[ $file_size -gt 0 ]] && echo "  OK: Saved ($file_size bytes)" || {
+          echo "  FAIL: Empty file" >&2
           rm -f "$output_file"
         }
       else
-        echo "  ✗ Failed" >&2
+        echo "  FAIL: Download failed" >&2
       fi
     else
-      echo "  ⚠ No download URL" >&2
+      echo "  SKIP: No download URL" >&2
     fi
   done
   echo "Download complete!"
@@ -236,8 +322,35 @@ display_tasks() {
 
 select_tasks_with_fzf() {
   is_interactive && has_fzf || return 1
-  local tasks=$(get_tasks_in_section "$(get_section_gid "In-Progress")" "false")
-  local selected=$(echo "$tasks" | jq -r '.data[] | select(.completed == false) | "[\(.gid)] \(.name) - Due: \(.due_on // "None") - Assignee: \(.assignee.name // "Unassigned")"' | fzf -m --prompt="${1:-Select tasks (TAB for multiple)} > " --height=40% --reverse --border --ansi)
+  local prompt="${1:-Select tasks (TAB for multiple)}"
+  local section="${2:-}"
+  local config
+  config=$(get_project_config)
+
+  local tasks_data=""
+  if [[ -n $section ]]; then
+    # Single section
+    local section_gid
+    section_gid=$(echo "$config" | jq -r ".sections[\"$section\"]")
+    [[ -z $section_gid || $section_gid == "null" ]] && { echo "Error: Section '$section' not found" >&2; return 1; }
+    tasks_data=$(get_tasks_in_section "$section_gid" "false" | jq -r '.data[] | select(.completed == false) | "[\(.gid)] \(.name) - Due: \(.due_on // "None") - Assignee: \(.assignee.name // "Unassigned")"')
+  else
+    # All sections - collect tasks from each
+    local sections
+    sections=$(echo "$config" | jq -r '.sections | keys[]')
+    for sec in $sections; do
+      local section_gid
+      section_gid=$(echo "$config" | jq -r ".sections[\"$sec\"]")
+      [[ -z $section_gid || $section_gid == "null" ]] && continue
+      local sec_tasks
+      sec_tasks=$(get_tasks_in_section "$section_gid" "false" | jq -r --arg sec "$sec" '.data[] | select(.completed == false) | "[\(.gid)] [\($sec)] \(.name) - Due: \(.due_on // "None")"')
+      [[ -n $sec_tasks ]] && tasks_data+="$sec_tasks"$'\n'
+    done
+  fi
+
+  [[ -z $tasks_data ]] && { echo "No tasks found" >&2; return 1; }
+  local selected
+  selected=$(echo "$tasks_data" | fzf -m --prompt="$prompt > " --height=40% --reverse --border --ansi)
   [[ -n $selected ]] && echo "$selected" | grep -oP '^\[\K[0-9]+' || return 1
 }
 
@@ -248,96 +361,161 @@ get_section_tasks() {
 }
 
 parse_task_gids() {
-  if [[ $1 == --section ]]; then
+  if [[ ${1:-} == --section ]]; then
     get_section_tasks "$2"
-  elif [[ $1 == *,* ]]; then
+  elif [[ ${1:-} == *,* ]]; then
     echo "$1" | tr ',' '\n'
-  elif [[ -n $1 ]]; then
+  elif [[ -n ${1:-} ]]; then
     echo "$1"
   elif is_interactive && has_fzf; then
     select_tasks_with_fzf "${2:-Select tasks}"
   else
-    echo "Error: Task GID(s) required" >&2
+    echo "Error: Task GID required. GIDs are shown in [brackets] in task listings." >&2
+    echo "Example: asana-overview view 1234567890" >&2
     return 1
   fi
 }
 
 show_help() {
-  cat <<'EOF'
-Usage: asana-overview [-p PROJECT] [COMMAND] [ARGS]
+  local config="${1:-}"
+  local sections_list="(configure to see sections)"
+  if [[ -n $config ]]; then
+    sections_list=$(echo "$config" | jq -r '.sections | keys | join(" | ")' 2>/dev/null || echo "(unable to read)")
+  fi
+
+  cat <<EOF
+Usage: asana-overview [OPTIONS] [COMMAND] [ARGS]
 
 Options:
-  -p, --project PROJECT  Use specified project (overrides ASANA_PROJECT env)
+  -p, --project NAME    Switch project for this command
+  -d                    Show descriptions in list views (mine, all)
+  -h, --help            Show this help
 
 Commands:
-  (no args)                        Show my In-Progress tasks
-  -d                               Include descriptions
-  projects                         List available projects
-  all [SECTION] [-d]               Show all tasks in section
-  view [GID|GID,GID|--section SEC] View tasks (comma-sep or section, runs parallel)
-  comment [TASK_GID] TEXT          Add comment to task
-  search QUERY                     Search tasks
-  move [TASK_GID] SECTION          Move task to section
-  toggle-assign-me [GIDS]          Toggle assignment (comma-sep/section/fzf, parallel)
-  due [GIDS] DATE                  Set due date (comma-sep/section/fzf, parallel)
-  attachments [TASK_GID]           List task attachments
-  download [TASK_GID] [DIR]        Download attachments (default: current dir)
+  mine, m               All my tasks across sections
+  all, a [SECTION]      All tasks in section (default: In-Progress)
+  view, v [GIDS]        View task details + comments
+  search, s QUERY       Search tasks by text
+  move GID SECTION      Move task to section
+  assign, grab [GIDS]   Assign task(s) to me
+  unassign, drop [GIDS] Unassign task(s) from me
+  due [GIDS] DATE       Set due date (YYYY-MM-DD)
+  comment GID TEXT      Add comment to task
+  attachments [GID]     List task attachments
+  download [GID] [DIR]  Download attachments
+  projects              List available projects
 
 Task selection:
-  - Single: TASK_GID
-  - Multiple: GID1,GID2,GID3 (comma-separated, no spaces)
-  - Section: --section SECTION_NAME
-  - Interactive: omit GID to use fzf multi-select (TAB for multiple)
+  1234567890            Single GID (shown in [brackets] in output)
+  GID1,GID2,GID3        Multiple GIDs (comma-separated)
+  --section NAME        All tasks in a section
+  (omit)                Interactive picker with fzf (picks from all sections)
 
-Project selection (priority: flag > env > config default > app-v1):
-  asana-overview -p backend all      # one-off with flag
-  export ASANA_PROJECT=backend       # set for session
+Sections: ${sections_list}
+  (Section names are case-insensitive: "in-progress" matches "In-Progress")
 
-Sections: Not-Started | In-Progress | Needs Review | Dev-Complete | QA-Accepted
+Examples:
+  asana-overview                    Show my In-Progress tasks
+  asana-overview v 123456           View full task details
+  asana-overview m                  All my tasks across sections
+  asana-overview a not-started      All tasks in Not-Started (case-insensitive)
+  asana-overview assign 123,456     Assign multiple tasks to me
+  asana-overview -p ocr m           My tasks in 'ocr' project
+
+Environment variables (priority: flag > ASANA_PROJECT_OVERRIDE > ASANA_PROJECT > config default):
+  ASANA_PROJECT=name                Set default project for session
+  ASANA_PROJECT_OVERRIDE=name       Override project (highest priority)
 EOF
 }
 
+show_all_my_tasks() {
+  local show_desc="$1" config="$2"
+  local user_gid=$(echo "$config" | jq -r '.user_gid')
+  local sections=$(echo "$config" | jq -r '.sections | to_entries | sort_by(.key) | .[].key')
+
+  print_header
+  echo "All my tasks (across all sections)"
+  print_header
+  echo
+  local found_any=false
+  for section in $sections; do
+    local section_gid=$(echo "$config" | jq -r ".sections[\"${section}\"]")
+    [[ -z $section_gid || $section_gid == "null" ]] && continue
+
+    local tasks=$(get_tasks_in_section "$section_gid" "$show_desc")
+    local my_tasks=$(echo "$tasks" | jq -r --arg uid "$user_gid" '[.data[] | select(.assignee.gid == $uid and .completed == false)] | length')
+
+    [[ $my_tasks -gt 0 ]] && {
+      found_any=true
+      echo "--- ${section} (${my_tasks}) ---"
+      display_tasks "$tasks" "$show_desc" "$user_gid"
+      echo ""
+    }
+  done
+
+  [[ $found_any == false ]] && echo "No tasks assigned to you."
+}
+
 show_my_tasks() {
-  echo "===========================================
-My In Progress tasks (In-Progress section)
-===========================================
-"
-  local section_gid=$(get_section_gid "In-Progress")
+  local show_desc="$1" config="$2"
+  local default_section=$(echo "$config" | jq -r '.default_section // "In-Progress"')
+  print_header
+  echo "My tasks in ${default_section}"
+  print_header
+  echo
+  local section_gid=$(get_section_gid "$default_section")
   [[ -z $section_gid || $section_gid == "null" ]] && {
-    echo "Error: 'In-Progress' section not found" >&2
+    echo "Error: Section '${default_section}' not found" >&2
     exit 1
   }
-  local user_gid=$(echo "$2" | jq -r '.user_gid')
-  local tasks=$(get_tasks_in_section "$section_gid" "$1")
-  display_tasks "$tasks" "$1" "$user_gid"
+  local user_gid=$(echo "$config" | jq -r '.user_gid')
+  local tasks=$(get_tasks_in_section "$section_gid" "$show_desc")
+  display_tasks "$tasks" "$show_desc" "$user_gid"
   echo "
-Run 'asana-overview help' for more commands"
+Run 'asana-overview --help' for more commands"
 }
 
 show_all_tasks() {
-  echo "===========================================
-ALL tasks in $2 section
-===========================================
-"
-  local section_gid=$(get_section_gid "$2")
+  local show_desc="$1" section="${2:-}" config="$3"
+  [[ -z $section ]] && section=$(echo "$config" | jq -r '.default_section // "In-Progress"')
+  print_header
+  echo "ALL tasks in ${section}"
+  print_header
+  echo
+  local section_gid=$(get_section_gid "$section")
   [[ -z $section_gid || $section_gid == "null" ]] && {
-    echo "Error: Section '$2' not found" >&2
+    echo "Error: Section '$section' not found" >&2
     exit 1
   }
-  display_tasks "$(get_tasks_in_section "$section_gid" "$1")" "$1" ""
+  display_tasks "$(get_tasks_in_section "$section_gid" "$show_desc")" "$show_desc" ""
 }
 
 main() {
-  # Parse global flags first (-p/--project)
+  local show_desc="false" help_requested="false"
+
+  # Extract flags from anywhere in args (more flexible than strict getopts)
+  local positional=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
-    -p|--project)
-      export ASANA_PROJECT_OVERRIDE="$2"
-      shift 2
-      ;;
-    *) break ;;
+      -p|--project)
+        [[ -z ${2:-} ]] && { echo "Error: -p requires a project name" >&2; exit 1; }
+        export ASANA_PROJECT_OVERRIDE="$2"
+        shift 2
+        ;;
+      -d) show_desc="true"; shift ;;
+      -h|--help) help_requested="true"; shift ;;
+      -pd|-dp)  # combined short flags
+        show_desc="true"
+        [[ -z ${2:-} ]] && { echo "Error: -p requires a project name" >&2; exit 1; }
+        export ASANA_PROJECT_OVERRIDE="$2"
+        shift 2
+        ;;
+      --) shift; positional+=("$@"); break ;;
+      -*) echo "Error: Unknown option '$1'" >&2; exit 1 ;;
+      *)  positional+=("$1"); shift ;;
     esac
   done
+  set -- "${positional[@]}"
 
   local config=$(get_project_config)
   local workspace_name=$(echo "$config" | jq -r '.workspace_name')
@@ -345,99 +523,119 @@ main() {
   local workspace_gid=$(echo "$config" | jq -r '.workspace_gid')
   local project_gid=$(echo "$config" | jq -r '.project_gid')
 
-  echo "========================================
-Asana Overview: ${project_name} @ ${workspace_name}
-========================================
-"
+  print_header
+  echo "Asana Overview: ${project_name} @ ${workspace_name}"
+  print_header
+  echo
+
+  [[ $help_requested == "true" ]] && { show_help "$config"; exit 0; }
 
   [[ $# -eq 0 ]] && {
-    show_my_tasks "false" "$config"
-    return
-  }
-
-  local show_desc="false" command=""
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-    -d)
-      show_desc="true"
-      shift
-      ;;
-    projects | all | view | comment | search | move | toggle-assign-me | due | attachments | download | help)
-      command="$1"
-      shift
-      break
-      ;;
-    *)
-      echo "Error: Unknown option or command '$1'" >&2
-      show_help
-      exit 1
-      ;;
-    esac
-  done
-
-  [[ -z $command ]] && {
     show_my_tasks "$show_desc" "$config"
     return
   }
 
+  local command="$1"
+  shift
+
   case "$command" in
-  projects)
+  m|mine) #HELP All my tasks across sections:\nASANA mine [-d]
+    show_all_my_tasks "$show_desc" "$config"
+    ;;
+  projects) #HELP List available projects:\nASANA projects
     list_projects
     ;;
-  all)
-    while [[ $# -gt 0 && $1 == "-d" ]]; do show_desc="true"; shift; done
-    show_all_tasks "$show_desc" "${1:-In-Progress}"
+  a|all) #HELP All tasks in section (default In-Progress):\nASANA all [SECTION] [-d]
+    local section="${1:-}"
+    if [[ -n $section ]]; then
+      section=$(resolve_section_name "$section" "$config") || exit 1
+    fi
+    show_all_tasks "$show_desc" "$section" "$config"
     ;;
-  view)
-    parse_task_gids "$@" "Select tasks to view" | while read -r gid; do view_task "$gid" & done; wait
-    ;;
-  comment)
-    parse_task_gids "$1" "Select task to comment on" | while read -r gid; do
-      [[ -z $2 ]] && { echo "Error: Comment text required" >&2; exit 1; }
-      add_task_comment "$gid" "$2"
+  v|view) #HELP View task details + comments:\nASANA view [GIDS]
+    for gid in $(parse_task_gids "$@" "Select tasks to view"); do
+      view_task "$gid"
     done
     ;;
-  search)
+  comment) #HELP Add comment to task:\nASANA comment GID TEXT
+    local comment_text
+    if [[ ${1:-} == --section ]]; then
+      comment_text="${3:-}"
+      [[ -z $comment_text ]] && { echo "Error: Comment text required" >&2; exit 1; }
+      for gid in $(parse_task_gids "$1" "$2"); do
+        add_task_comment "$gid" "$comment_text"
+        echo "[$gid] Comment added"
+      done
+    else
+      comment_text="${2:-}"
+      [[ -z $comment_text ]] && { echo "Error: Comment text required" >&2; exit 1; }
+      [[ -z ${1:-} ]] && { echo "Error: Task GID required" >&2; exit 1; }
+      add_task_comment "$1" "$comment_text"
+      echo "[$1] Comment added"
+    fi
+    ;;
+  s|search) #HELP Search tasks by text:\nASANA search QUERY
     [[ $# -lt 1 ]] && { echo "Error: Search query required" >&2; exit 1; }
     search_tasks_interactive "$workspace_gid" "$1"
     ;;
-  move)
-    [[ -z $2 ]] && { echo "Error: Section name required" >&2; exit 1; }
-    parse_task_gids "$1" "Select task to move" | while read -r gid; do
-      move_task_interactive "$gid" "$project_gid" "$2"
+  move) #HELP Move task to section:\nASANA move GID SECTION
+    [[ -z ${1:-} ]] && { echo "Error: Task GID required" >&2; echo "Usage: asana-overview move GID SECTION" >&2; exit 1; }
+    [[ -z ${2:-} ]] && { echo "Error: Section name required" >&2; echo "Available sections: $(get_sections_list)" >&2; exit 1; }
+    local target_section
+    target_section=$(resolve_section_name "$2" "$config") || exit 1
+    for gid in $(parse_task_gids "$1" "Select task to move"); do
+      move_task_interactive "$gid" "$project_gid" "$target_section"
     done
     ;;
-  toggle-assign-me)
+  assign|grab) #HELP Assign task(s) to me:\nASANA assign [GIDS]
     local user_gid=$(echo "$config" | jq -r '.user_gid')
-    parse_task_gids "$@" "Select tasks to toggle assignment" | while read -r gid; do
-      toggle_assign_me_to_task "$gid" "$user_gid" &
-    done; wait
+    for gid in $(parse_task_gids "$@" "Select tasks to assign"); do
+      local details=$(get_task_details "$gid")
+      local task_name=$(echo "$details" | jq -r '.data.name')
+      update_task_assignee "$gid" "$user_gid" >/dev/null
+      echo "[$gid] $task_name: Assigned to you"
+    done
     ;;
-  due)
-    if [[ $1 == --section ]]; then
+  unassign|drop) #HELP Unassign task(s) from me:\nASANA unassign [GIDS]
+    for gid in $(parse_task_gids "$@" "Select tasks to unassign"); do
+      local details=$(get_task_details "$gid")
+      local task_name=$(echo "$details" | jq -r '.data.name')
+      update_task_assignee "$gid" "null" >/dev/null
+      echo "[$gid] $task_name: Unassigned"
+    done
+    ;;
+  due) #HELP Set due date (YYYY-MM-DD):\nASANA due [GIDS] DATE
+    if [[ ${1:-} == --section ]]; then
       local due_date="$3"
       [[ -z $due_date ]] && { echo "Error: Due date required (YYYY-MM-DD)" >&2; exit 1; }
-      parse_task_gids "$1" "$2" | while read -r gid; do set_task_due_date "$gid" "$due_date" & done; wait
+      validate_date "$due_date" || exit 1
+      for gid in $(parse_task_gids "$1" "$2"); do
+        set_task_due_date "$gid" "$due_date"
+      done
     else
-      local due_date="$2"
+      local due_date="${2:-}"
       [[ -z $due_date ]] && { echo "Error: Due date required (YYYY-MM-DD)" >&2; exit 1; }
-      parse_task_gids "$1" "Select tasks to set due date" | while read -r gid; do set_task_due_date "$gid" "$due_date" & done; wait
+      validate_date "$due_date" || exit 1
+      for gid in $(parse_task_gids "${1:-}" "Select tasks to set due date"); do
+        set_task_due_date "$gid" "$due_date"
+      done
     fi
     ;;
-  attachments)
+  attachments) #HELP List task attachments:\nASANA attachments [GID]
     parse_task_gids "$1" "Select task to view attachments" | while read -r gid; do
       list_task_attachments "$gid"
     done
     ;;
-  download)
+  download) #HELP Download attachments:\nASANA download [GID] [DIR]
     parse_task_gids "$1" "Select task to download attachments" | while read -r gid; do
       download_task_attachments "$gid" "${2:-.}"
     done
     ;;
-  help) show_help ;;
+  help) #HELP Show this help:\nASANA help
+    show_help "$config" ;;
   *)
     echo "Error: Unknown command '$command'" >&2
-    show_help
+    show_help "$config"
     exit 1
     ;;
   esac
