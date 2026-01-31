@@ -3,3 +3,9 @@ images = true
 
 [external]
 editor = 'nvim'
+
+### does not work even after enable. maybe somethign wrong w/ this website
+# [siteconf.kerkour]
+# url = 'https://kerkour\.com/.*'
+# scripting = true
+

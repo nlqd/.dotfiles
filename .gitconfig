@@ -4,6 +4,12 @@
 [includeIf "gitdir:~/Dev/personal/"]
     path = ~/Dev/personal/.gitconfig
 
+[includeIf "gitdir:~/Dev/sides/"]
+    path = ~/Dev/personal/.gitconfig
+
+[includeIf "gitdir:~/Documents/Obsidian-Vault/"]
+    path = ~/Dev/personal/.gitconfig
+
 [includeIf "gitdir:~/Dev/work/"]
     path = ~/Dev/work/.gitconfig
 

@@ -27,10 +27,11 @@ export FLYCTL_INSTALL="/home/qd/.fly"
 export PATH="$FLYCTL_INSTALL/bin:$PATH"
 
 alias v='nvim'
+alias vg='nvim +G'
 alias lmk='latexmk'
 alias nb='newsboat -r'
 alias nr='newsraft'
-alias upgrade='sudo apt update && sudo apt upgrade'
+alias upgrade='sudo apt update && sudo apt upgrade && flatpak update'
 alias ez='nvim ~/.zshrc'
 alias sz='. ~/.zshrc'
 alias ck='nvim ~/.sdai/cookies'
@@ -38,6 +39,8 @@ alias tma='tmux -2 a'
 alias lg='lazygit'
 alias ldk='lazydocker'
 alias dbui='nvim -c "DBUI"'
+
+alias sc-sush='sudo systemctl suspend-then-hibernate'
 
 y() {
   local tmp="$(mktemp -t "yazi-cwd.XXXXXX")" cwd
@@ -67,19 +70,23 @@ function duchs() {
   du -chs -- * | sort -h
 }
 
-sshaiws() {
-  while true; do
-    message="$(nc -l 9999 2> /dev/null)"
-    [ -z "$message" ] && continue
-    notify-send "SSH Notification" "$message"
-  done &
-  pid=$!
+function sshaiws() {
+  (
+    while true; do
+      nc -l 9999 -d | while read -r message; do
+      [ -n "$message" ] && notify-send "SSH Notification" "$message"
+    done
+  done
+  ) &
+  local pid=$!
 
-  # ssh aiws -L 6006:localhost:6006 -R 9999:localhost:9999
+  trap "kill $pid 2>/dev/null; wait $pid 2>/dev/null" EXIT
+
   ssh aiws -L 3000:localhost:3000 -L 8000:localhost:8000 -R 9999:localhost:9999
 
-  kill $pid
-  wait $pid 2> /dev/null
+  trap - EXIT
+  kill $pid 2>/dev/null
+  wait $pid 2>/dev/null
 }
 
 plugins=(

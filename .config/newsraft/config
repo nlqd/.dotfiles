@@ -5,7 +5,8 @@ list-entry-date-format "%Y %m %d"
 item-content-format "<b>Title</b>: %t<br>|<b>Author</b>: %a<br>|<b>Date</b>: %d<br>|<br>%c<br>|<br><hr>%L"
 
 bind ^B exec newsboat-bookmark-academic "%l" "%t" "" ""
-bind ^W exec rdrview -B w3m "%l"
+# bind ^W exec rdrview -B w3m "%l"
+bind ^W exec cha "%l"
 
 color-list-item-unread        cyan default
 color-list-item-important     blue default bold
