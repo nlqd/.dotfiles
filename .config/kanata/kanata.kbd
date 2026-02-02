@@ -74,7 +74,8 @@
 (defalias
   ;; thumb based layer switching
   slow (tap-hold $tap-time $hold-time spc  (layer-toggle lower))
-  arai (tap-hold $tap-time $hold-time ralt (layer-toggle raise))
+  ;; arai (tap-hold $tap-time $hold-time ralt (layer-toggle raise))
+  arai (layer-toggle raise)
 
   ;; pinky based layer switching
   tlow (tap-hold $tap-time $hold-time tab  (layer-toggle lower))
