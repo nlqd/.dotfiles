@@ -1,0 +1,67 @@
+#!/bin/bash
+# ghr - github release manager
+
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ghr"
+BIN_DIR="${HOME}/.local/bin"
+API="https://api.github.com/repos"
+
+mkdir -p "$CACHE_DIR" "$BIN_DIR"
+
+get_dir() { echo "$CACHE_DIR/$(echo "$1" | tr '/' '_')"; }
+
+install_repo() {
+  repo="$1"
+  dir=$(get_dir "$repo")
+  mkdir -p "$dir"
+
+  release=$(curl -sf "$API/$repo/releases/latest") || {
+    echo "No releases for $repo" >&2; return 1
+  }
+
+  ver=$(printf '%s' "$release" | jq -r '.tag_name')
+  echo "Latest: $ver"
+
+  assets=$(printf '%s' "$release" | jq -r '.assets[] | "\(.name)\t\(.browser_download_url)"')
+  [ -z "$assets" ] && { echo "No assets" >&2; return 1; }
+
+  echo "$assets" | cut -f1 | nl
+  printf "Select [1]: "; read -r n
+  n="${n:-1}"
+
+  url=$(echo "$assets" | sed -n "${n}p" | cut -f2)
+  name=$(echo "$assets" | sed -n "${n}p" | cut -f1)
+
+  echo "Downloading $name..."
+  curl -L -o "$dir/$name" "$url"
+
+  echo "$repo" > "$dir/.repo"
+  echo "$ver" > "$dir/.version"
+
+  case "$name" in
+    *.tar.gz|*.tgz) tar -xzf "$dir/$name" -C "$dir" ;;
+    *.zip) unzip -o "$dir/$name" -d "$dir" ;;
+    *) chmod +x "$dir/$name"; ln -sf "$dir/$name" "$BIN_DIR/" ;;
+  esac
+
+  echo "Installed $repo ($ver)"
+}
+
+list_all() {
+  {
+    printf "REPO\tINSTALLED\tLATEST\n"
+    for dir in "$CACHE_DIR"/*; do
+      [ -f "$dir/.repo" ] || continue
+      repo=$(cat "$dir/.repo")
+      local_ver=$(cat "$dir/.version")
+      remote_ver=$(curl -sf "$API/$repo/releases/latest" | jq -r '.tag_name')
+      printf "%s\t%s\t%s\n" "$repo" "$local_ver" "$remote_ver"
+    done
+  } | column -t -s $'\t' -o '  '
+}
+
+case "$1" in
+  install|i) install_repo "$2" ;;
+  update|u)  install_repo "$2" ;;
+  list|ls)   list_all ;;
+  *)         echo "Usage: ghr install|update|list <owner/repo>" >&2 ;;
+esac

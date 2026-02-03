@@ -40,32 +40,31 @@ get_sections_list() {
 # Case-insensitive section name resolution
 resolve_section_name() {
   local input="$1" config="${2:-$(get_project_config)}"
-  local sections
-  sections=$(echo "$config" | jq -r '.sections | keys[]')
 
   # Exact match first
-  for section in $sections; do
+  while IFS= read -r section; do
     [[ "$section" == "$input" ]] && { echo "$section"; return 0; }
-  done
+  done < <(echo "$config" | jq -r '.sections | keys[]')
 
   # Case-insensitive match
   local input_lower
   input_lower=$(echo "$input" | tr '[:upper:]' '[:lower:]')
-  for section in $sections; do
+  while IFS= read -r section; do
     local section_lower
     section_lower=$(echo "$section" | tr '[:upper:]' '[:lower:]')
     [[ "$section_lower" == "$input_lower" ]] && { echo "$section"; return 0; }
-  done
+  done < <(echo "$config" | jq -r '.sections | keys[]')
 
   # Partial match (prefix)
-  for section in $sections; do
+  while IFS= read -r section; do
     local section_lower
     section_lower=$(echo "$section" | tr '[:upper:]' '[:lower:]')
     [[ "$section_lower" == "$input_lower"* ]] && { echo "$section"; return 0; }
-  done
+  done < <(echo "$config" | jq -r '.sections | keys[]')
 
   echo "Error: Section '$input' not found" >&2
-  echo "Available sections: $(echo "$sections" | tr '\n' ' ' | sed 's/ $//')" >&2
+  local sections_list=$(echo "$config" | jq -r '.sections | keys[]' | tr '\n' ' ' | sed 's/ $//')
+  echo "Available sections: $sections_list" >&2
   return 1
 }
 
@@ -182,7 +181,7 @@ api_call() {
   local token=$(get_token)
   local args=(-s -X "$method" "${API_BASE}${endpoint}" -H "Authorization: Bearer ${token}" -H "Accept: application/json")
   [[ -n $data ]] && args+=(-H "Content-Type: application/json" -d "$data")
-  curl "${args[@]}"
+  curl --max-time 30 --connect-timeout 10 --retry 2 --retry-delay 1 "${args[@]}"
 }
 
 api_get() { api_call GET "$1"; }
@@ -250,22 +249,29 @@ move_task_interactive() {
   [[ -z $section_gid || $section_gid == "null" ]] && {
     echo "Error: Section '$3' not found" >&2
     echo "Available sections: $(get_sections_list)" >&2
-    exit 1
+    return 1
   }
   echo "Moving task $1 to section '$3'..."
   local result=$(move_task_to_section "$1" "$2" "$section_gid")
-  echo "$result" | jq -e '.data' &>/dev/null && echo "Task moved successfully!" || {
-    echo "Error: $result" >&2
-    exit 1
-  }
+  if echo "$result" | jq -e '.data' &>/dev/null; then
+    echo "Task moved successfully!"
+  else
+    echo "Error: Failed to move task" >&2
+    echo "$result" | jq -r '.errors[]?.message // "Unknown error"' >&2
+    return 1
+  fi
 }
 
 set_task_due_date() {
   local task_gid="$1" due_date="$2"
   local details=$(get_task_details "$task_gid")
   local task_name=$(echo "$details" | jq -r '.data.name')
-  update_task_due_date "$task_gid" "$due_date" >/dev/null
-  echo "[$task_gid] $task_name: Due set to $due_date"
+  if update_task_due_date "$task_gid" "$due_date" >/dev/null 2>&1; then
+    echo "[$task_gid] $task_name: Due set to $due_date"
+  else
+    echo "[$task_gid] $task_name: FAILED to set due date" >&2
+    return 1
+  fi
 }
 
 list_task_attachments() {
@@ -291,11 +297,17 @@ download_task_attachments() {
   mkdir -p "${2:-.}"
   echo "$attachments" | jq -r '.data[] | "\(.gid)\t\(.name)"' | while IFS=$'\t' read -r att_gid name; do
     echo "Downloading: $name"
-    local sanitized_name=$(echo "$name" | sed 's/[\/\0]/_/g')
-    local output_file="${2:-.}/${sanitized_name}"
+    # Use basename to strip path components, sanitize chars, limit length
+    local sanitized_name=$(basename "$name" | sed 's/[^a-zA-Z0-9._-]/_/g' | cut -c1-255)
+    local output_dir=$(cd "${2:-.}" && pwd) || { echo "  FAIL: Invalid output directory" >&2; continue; }
+    local output_file="${output_dir}/${sanitized_name}"
+    
+    # Verify file stays within target directory (prevent traversal)
+    [[ "$output_file" == "$output_dir"/* ]] || { echo "  SKIP: Invalid filename '$name'" >&2; continue; }
+    
     local download_url=$(api_get "/attachments/${att_gid}" | jq -r '.data.download_url // empty')
     if [[ -n $download_url && $download_url != "null" ]]; then
-      if curl -f -s -S -L "$download_url" -o "$output_file" 2>&1; then
+      if curl -f -s -S -L --max-time 300 --connect-timeout 10 "$download_url" -o "$output_file" 2>&1; then
         local file_size=$(stat -c%s "$output_file" 2>/dev/null || stat -f%z "$output_file" 2>/dev/null || echo "0")
         [[ $file_size -gt 0 ]] && echo "  OK: Saved ($file_size bytes)" || {
           echo "  FAIL: Empty file" >&2
@@ -336,16 +348,14 @@ select_tasks_with_fzf() {
     tasks_data=$(get_tasks_in_section "$section_gid" "false" | jq -r '.data[] | select(.completed == false) | "[\(.gid)] \(.name) - Due: \(.due_on // "None") - Assignee: \(.assignee.name // "Unassigned")"')
   else
     # All sections - collect tasks from each
-    local sections
-    sections=$(echo "$config" | jq -r '.sections | keys[]')
-    for sec in $sections; do
+    while IFS= read -r sec; do
       local section_gid
       section_gid=$(echo "$config" | jq -r ".sections[\"$sec\"]")
       [[ -z $section_gid || $section_gid == "null" ]] && continue
       local sec_tasks
       sec_tasks=$(get_tasks_in_section "$section_gid" "false" | jq -r --arg sec "$sec" '.data[] | select(.completed == false) | "[\(.gid)] [\($sec)] \(.name) - Due: \(.due_on // "None")"')
       [[ -n $sec_tasks ]] && tasks_data+="$sec_tasks"$'\n'
-    done
+    done < <(echo "$config" | jq -r '.sections | keys[]')
   fi
 
   [[ -z $tasks_data ]] && { echo "No tasks found" >&2; return 1; }
@@ -394,7 +404,7 @@ Options:
 Commands:
   mine, m               All my tasks across sections
   all, a [SECTION]      All tasks in section (default: In-Progress)
-  view, v [GIDS]        View task details + comments
+  view, v, task [GIDS]  View task details + comments
   search, s QUERY       Search tasks by text
   move GID SECTION      Move task to section
   assign, grab [GIDS]   Assign task(s) to me
@@ -431,14 +441,13 @@ EOF
 show_all_my_tasks() {
   local show_desc="$1" config="$2"
   local user_gid=$(echo "$config" | jq -r '.user_gid')
-  local sections=$(echo "$config" | jq -r '.sections | to_entries | sort_by(.key) | .[].key')
 
   print_header
   echo "All my tasks (across all sections)"
   print_header
   echo
   local found_any=false
-  for section in $sections; do
+  while IFS= read -r section; do
     local section_gid=$(echo "$config" | jq -r ".sections[\"${section}\"]")
     [[ -z $section_gid || $section_gid == "null" ]] && continue
 
@@ -451,7 +460,7 @@ show_all_my_tasks() {
       display_tasks "$tasks" "$show_desc" "$user_gid"
       echo ""
     }
-  done
+  done < <(echo "$config" | jq -r '.sections | to_entries | sort_by(.key) | .[].key')
 
   [[ $found_any == false ]] && echo "No tasks assigned to you."
 }
@@ -552,7 +561,7 @@ main() {
     fi
     show_all_tasks "$show_desc" "$section" "$config"
     ;;
-  v|view) #HELP View task details + comments:\nASANA view [GIDS]
+  v|view|t|task) #HELP View task details + comments:\nASANA view [GIDS]
     for gid in $(parse_task_gids "$@" "Select tasks to view"); do
       view_task "$gid"
     done
@@ -592,16 +601,22 @@ main() {
     for gid in $(parse_task_gids "$@" "Select tasks to assign"); do
       local details=$(get_task_details "$gid")
       local task_name=$(echo "$details" | jq -r '.data.name')
-      update_task_assignee "$gid" "$user_gid" >/dev/null
-      echo "[$gid] $task_name: Assigned to you"
+      if update_task_assignee "$gid" "$user_gid" >/dev/null 2>&1; then
+        echo "[$gid] $task_name: Assigned to you"
+      else
+        echo "[$gid] $task_name: FAILED to assign" >&2
+      fi
     done
     ;;
   unassign|drop) #HELP Unassign task(s) from me:\nASANA unassign [GIDS]
     for gid in $(parse_task_gids "$@" "Select tasks to unassign"); do
       local details=$(get_task_details "$gid")
       local task_name=$(echo "$details" | jq -r '.data.name')
-      update_task_assignee "$gid" "null" >/dev/null
-      echo "[$gid] $task_name: Unassigned"
+      if update_task_assignee "$gid" "null" >/dev/null 2>&1; then
+        echo "[$gid] $task_name: Unassigned"
+      else
+        echo "[$gid] $task_name: FAILED to unassign" >&2
+      fi
     done
     ;;
   due) #HELP Set due date (YYYY-MM-DD):\nASANA due [GIDS] DATE
