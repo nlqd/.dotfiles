@@ -2,6 +2,11 @@
 .config/alacritty/themes
 .config/alacritty/host_configs.toml
 
+.config/opencode/node_modules
+.config/opencode/package.json
+.config/opencode/bun.lock
+.config/opencode/.gitignore
+
 .claude/**
 !.claude/CLAUDE.md
 !.claude/agents/
