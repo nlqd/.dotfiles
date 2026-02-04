@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+
+# Colors
+WEEKDAY='\033[0;34m'  # Blue for weekdays (Mon-Fri)
+WEEKEND='\033[0;31m'  # Red for weekends (Sat-Sun)
+RESET='\033[0m'
+
+# Run ncal and capture output
+ncal_output=$(ncal -y "$@")
+
+# Process output line by line
+while IFS= read -r line; do
+  # Check if line starts with day labels (Vietnamese: T2-T7, CN)
+  if [[ "$line" =~ ^(T2|T3|T4|T5|T6) ]]; then
+    # Weekdays (Mon-Fri): Blue
+    echo -e "${WEEKDAY}${line}${RESET}"
+  elif [[ "$line" =~ ^(T7|CN) ]]; then
+    # Weekend (Sat-Sun): Red
+    echo -e "${WEEKEND}${line}${RESET}"
+  else
+    # Month/year headers and other lines
+    echo "$line"
+  fi
+done <<< "$ncal_output"
+
+# Vietnamese lunar calendar info
+echo ""
+echo -e "\033[0;33mÂm lịch hôm nay:\033[0m $(node ~/.local/scripts/lunar-date.js 2>/dev/null || echo 'Cài đặt: npm install -g vietnamese-lunar-calendar')"
