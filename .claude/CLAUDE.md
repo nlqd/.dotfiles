@@ -199,6 +199,9 @@ Title: should be the task's name
 - if the change is trivial, please don't add description
 ```
 
+Avoid using emojis except for when it's in task name.
+In PR description, for arrows, I prefer $\rightarrow$ instead of the unicode arrow. Try to use Latex variants for other unicode symbol if you can.
+
 ### Some provided wrappers
 
 - Bash(gh-pr-comments) gives all comments on the current PR. No need to run with any param as it works ootb.

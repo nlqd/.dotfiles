@@ -28,6 +28,9 @@ bindsym XF86AudioPlay         exec --no-startup-id playerctl   play-pause
 bindsym XF86AudioPause        exec --no-startup-id playerctl   play-pause
 bindsym XF86AudioNext         exec --no-startup-id playerctl   next
 bindsym XF86AudioPrev         exec --no-startup-id playerctl   previous
+# workaround on company keyboard
+bindsym XF86HomePage          exec --no-startup-id xbrightness -0.05             && $refresh_i3status
+bindsym XF86Mail              exec --no-startup-id xbrightness +0.05             && $refresh_i3status
 
 bindsym  $mod+d        exec  --no-startup-id  dmenu_run -fn "JetBrainsMono NF"
 bindsym  $mod+v        exec  --no-startup-id  clipmenu -fn "JetBrainsMono NF"

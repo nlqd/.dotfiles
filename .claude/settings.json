@@ -1,7 +1,11 @@
 {
   "cleanupPeriodDays": 99999999,
   "env": {
+    "__SCHEMA__": "https://code.claude.com/docs/en/settings#environment-variables",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "CLAUDE_CODE_EFFORT_LEVEL": "high",
+    "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR": "1",
     "BASH_DEFAULT_TIMEOUT_MS": "30000",
     "BASH_MAX_TIMEOUT_MS": "6000000"
   },

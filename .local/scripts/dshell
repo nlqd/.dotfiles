@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# # OFFICIAL DEMO SCRIPT FROM BUBBLEWRAP FOR REFERENCE
+# # Use bubblewrap to run /bin/sh reusing the host OS binaries (/usr), but with
+# # separate /tmp, /home, /var, /run, and /etc. For /etc we just inherit the
+# # host's resolv.conf, and set up "stub" passwd/group files.  Not sharing
+# # /home for example is intentional.  If you wanted to, you could design
+# # a bwrap-using program that shared individual parts of /home, perhaps
+# # public content.
+# (exec bwrap --ro-bind /usr /usr \
+#       --dir /tmp \
+#       --dir /var \
+#       --symlink ../tmp var/tmp \
+#       --proc /proc \
+#       --dev /dev \
+#       --ro-bind /etc/resolv.conf /etc/resolv.conf \
+#       --symlink usr/lib /lib \
+#       --symlink usr/lib64 /lib64 \
+#       --symlink usr/bin /bin \
+#       --symlink usr/sbin /sbin \
+#       --chdir / \
+#       --unshare-all \
+#       --share-net \
+#       --die-with-parent \
+#       --dir /run/user/$(id -u) \
+#       --setenv XDG_RUNTIME_DIR "/run/user/`id -u`" \
+#       --setenv PS1 "bwrap-demo$ " \
+#       --file 11 /etc/passwd \
+#       --file 12 /etc/group \
+#       /bin/sh) \
+#     11< <(getent passwd $UID 65534) \
+#     12< <(getent group $(id -g) 65534)
+
+exec /usr/bin/bwrap \
+    --tmpfs /tmp \
+    --dev /dev \
+    --dev-bind-try /dev/nvidia0 /dev/nvidia0 \
+    --dev-bind-try /dev/nvidiactl /dev/nvidiactl \
+    --dev-bind-try /dev/nvidia-modeset /dev/nvidia-modeset \
+    --dev-bind-try /dev/nvidia-uvm /dev/nvidia-uvm \
+    --dev-bind-try /dev/nvidia-uvm-tools /dev/nvidia-uvm-tools \
+    --dev-bind-try /dev/nvidia-caps /dev/nvidia-caps \
+    --proc /proc \
+    --hostname bubblewrap --unshare-uts \
+    --ro-bind /bin /bin \
+    --ro-bind /lib /lib \
+    --ro-bind /lib32 /lib32 \
+    --ro-bind /lib64 /lib64 \
+    --ro-bind /usr/bin /usr/bin \
+    --ro-bind /usr/lib /usr/lib \
+    --ro-bind /usr/local/bin /usr/local/bin \
+    --ro-bind /usr/local/lib /usr/local/lib \
+    --ro-bind /etc/alternatives /etc/alternatives \
+    --ro-bind /etc/resolv.conf /etc/resolv.conf \
+    --ro-bind /etc/profile.d /etc/profile.d \
+    --ro-bind /etc/bash_completion.d /etc/bash_completion.d \
+    --ro-bind /etc/ssl/certs /etc/ssl/certs \
+    --ro-bind /etc/ld.so.cache /etc/ld.so.cache \
+    --ro-bind /etc/ld.so.conf /etc/ld.so.conf \
+    --ro-bind /etc/ld.so.conf.d /etc/ld.so.conf.d \
+    --ro-bind /etc/localtime /etc/localtime \
+    --ro-bind /usr/share/terminfo /usr/share/terminfo \
+    --ro-bind /usr/share/ca-certificates /usr/share/ca-certificates \
+    --ro-bind /etc/nsswitch.conf /etc/nsswitch.conf \
+    --ro-bind /etc/hosts /etc/hosts \
+    --ro-bind /etc/ssl/openssl.cnf /etc/ssl/openssl.cnf \
+    --ro-bind /usr/share/zoneinfo /usr/share/zoneinfo \
+    --ro-bind /usr/share/doc /usr/share/doc \
+    --ro-bind /usr/share/zsh /usr/share/zsh \
+    --ro-bind $HOME/.bashrc $HOME/.bashrc \
+    --ro-bind $HOME/.profile $HOME/.profile \
+    --ro-bind $HOME/.gitconfig $HOME/.gitconfig \
+    --ro-bind $HOME/.local/bin $HOME/.local/bin \
+    --ro-bind $HOME/.local/scripts $HOME/.local/scripts \
+    --ro-bind $HOME/.local/share/fonts $HOME/.local/share/fonts \
+    --ro-bind $HOME/.zshrc $HOME/.zshrc \
+    --ro-bind $HOME/.zshrc.aiws $HOME/.zshrc.aiws \
+    --ro-bind $HOME/.oh-my-zsh $HOME/.oh-my-zsh \
+    --ro-bind $HOME/.cargo $HOME/.cargo \
+    --ro-bind $HOME/miniconda3 $HOME/miniconda3 \
+    --bind $HOME/.cache $HOME/.cache \
+    --bind "$PWD" "$PWD" \
+    zsh

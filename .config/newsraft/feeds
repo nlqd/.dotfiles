@@ -57,6 +57,37 @@ https://predictivehistory.substack.com/feed
 https://herman.bearblog.dev/feed/
 https://tech.marksblogg.com/feeds/all.atom.xml
 
+https://agentultra.com/feed.xml
+https://blog.sergeantbiggs.net/index.xml
+https://daeus.blog/feed/
+https://dataengineeringcentral.substack.com/feed
+https://denshi.org/blog/index.xml
+https://eli.thegreenplace.net/feeds/all.atom.xml
+https://jyn.dev/atom.xml
+https://karboosx.net/rss.xml
+https://kristofferbalintona.me/index.xml
+https://lalitm.com/index.xml
+https://linderud.dev/index.xml
+https://nohzafk.github.io/index.xml
+https://roscidus.com/blog/atom.xml
+https://shortdiv.com/index.xml
+https://simonwillison.net/atom/everything/
+https://thewinepress.substack.com/feed
+https://www.huy.rocks/rss.xml
+https://www.pgrs.net/feed.xml
+https://www.scd31.com/posts.rss
+https://www.thecodedmessage.com/index.xml
+https://walters.app/blog/feed.atom
+https://zserge.com/rss.xml
+https://peterullrich.com/feed.xml
+https://unixdigest.com/feed.rss
+https://terokarvinen.com/index.xml
+https://hakibenita.com/feeds/all.atom.xml
+https://kyo.iroiro.party/en/rss.xml
+https://phiresky.github.io/blog/atom.xml
+https://taylor.town/feed.xml
+https://tangled.sh/blog/feed.xml
+
 $(curl -sL 'http://export.arxiv.org/api/query?search_query=ti%3A%22continual+inspection%22+OR+ti%3A%22incremental+inspection%22+OR+ti%3A%22lifelong+learning%22+OR+ti%3A%22incremental+learning%22+OR+ti%3A%22continual+learning%22&sortBy=lastUpdatedDate&sortOrder=descending&start=0&max_results=200' | newsboat-arxiv-comments) "Continual Learning"
 
 $(curl -sL 'http://export.arxiv.org/api/query?search_query=ti%3Acontinual+AND+ti%3Acontrastive&sortBy=lastUpdatedDate&sortOrder=descending&start=0&max_results=200' | newsboat-arxiv-comments) "Continual Contrastive"
