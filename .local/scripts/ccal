@@ -8,17 +8,74 @@ RESET='\033[0m'
 # Run ncal and capture output
 ncal_output=$(ncal -y "$@")
 
+# Highlight today only when viewing the current year
+highlight_today=false
+current_year=$(date +%Y)
+first_line=$(head -1 <<< "$ncal_output")
+if [[ "$first_line" == *"$current_year"* ]]; then
+  highlight_today=true
+  today_day=$(date +%-d)
+  today_month=$(date +%-m)
+  today_dow=$(date +%u)
+  case $today_dow in
+    1) dow_label="T2" ;; 2) dow_label="T3" ;; 3) dow_label="T4" ;;
+    4) dow_label="T5" ;; 5) dow_label="T6" ;; 6) dow_label="T7" ;;
+    7) dow_label="CN" ;;
+  esac
+  target_block=$(( (today_month - 1) / 4 ))
+  hl_on=$(printf '\033[7m')
+  hl_off=$(printf '\033[27m')
+fi
+
+month_col_start=-1
+month_col_end=-1
+current_block=-1
+in_target_block=false
+
 # Process output line by line
 while IFS= read -r line; do
-  # Check if line starts with day labels (Vietnamese: T2-T7, CN)
+  # Detect month header lines (contain "Tháng" but aren't DOW rows)
+  if [[ "$line" == *"Tháng"* ]] && ! [[ "$line" =~ ^(T[2-7]|CN) ]]; then
+    current_block=$((current_block + 1))
+
+    if $highlight_today && [[ $current_block -eq $target_block ]]; then
+      in_target_block=true
+      # Find column range for the current month by locating "Tháng N " in header
+      month_str="Tháng ${today_month} "
+      before="${line%%${month_str}*}"
+      if [[ "$before" != "$line" ]]; then
+        month_col_start=${#before}
+        rest="${line:$((month_col_start + ${#month_str}))}"
+        next_before="${rest%%Tháng*}"
+        if [[ "$next_before" != "$rest" ]]; then
+          month_col_end=$((month_col_start + ${#month_str} + ${#next_before}))
+        else
+          month_col_end=${#line}
+        fi
+      fi
+    else
+      in_target_block=false
+    fi
+
+    echo "$line"
+    continue
+  fi
+
+  # Highlight today's date on the matching day-of-week line
+  if $in_target_block && [[ $month_col_start -ge 0 ]] && [[ "$line" =~ ^${dow_label}[[:space:]] ]]; then
+    prefix="${line:0:$month_col_start}"
+    portion="${line:$month_col_start:$((month_col_end - month_col_start))}"
+    suffix="${line:$month_col_end}"
+    portion=$(printf '%s' "$portion" | sed -E "s/(^| )(${today_day})( |$)/\1${hl_on}\2${hl_off}\3/")
+    line="${prefix}${portion}${suffix}"
+  fi
+
+  # Apply weekday/weekend coloring
   if [[ "$line" =~ ^(T2|T3|T4|T5|T6) ]]; then
-    # Weekdays (Mon-Fri): Blue
     echo -e "${WEEKDAY}${line}${RESET}"
   elif [[ "$line" =~ ^(T7|CN) ]]; then
-    # Weekend (Sat-Sun): Red
     echo -e "${WEEKEND}${line}${RESET}"
   else
-    # Month/year headers and other lines
     echo "$line"
   fi
 done <<< "$ncal_output"

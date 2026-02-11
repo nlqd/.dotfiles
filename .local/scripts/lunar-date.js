@@ -41,15 +41,42 @@ function getNewMoonDay(k, timeZone) {
   return Math.floor(JdNew + 0.5 + timeZone / 24);
 }
 
+function getSunLongitude(jdn, timeZone) {
+  let T = (jdn - 2451545.5 - timeZone / 24) / 36525;
+  let T2 = T * T;
+  let dr = Math.PI / 180;
+  let M = 357.5291 + 35999.0503 * T - 0.0001559 * T2 - 0.00000048 * T * T2;
+  let L0 = 280.46645 + 36000.76983 * T + 0.0003032 * T2;
+  let DL = (1.9146 - 0.004817 * T - 0.000014 * T2) * Math.sin(dr * M);
+  DL = DL + (0.019993 - 0.000101 * T) * Math.sin(dr * 2 * M) + 0.00029 * Math.sin(dr * 3 * M);
+  let L = L0 + DL;
+  L = L * dr;
+  L = L - Math.PI * 2 * Math.floor(L / (Math.PI * 2));
+  return Math.floor(L / Math.PI * 6);
+}
+
 function getLunarMonth11(yy, timeZone) {
   let off = jdFromDate(31, 12, yy) - 2415021;
   let k = Math.floor(off / 29.530588853);
   let nm = getNewMoonDay(k, timeZone);
-  let sunLong = Math.floor((nm - 2415021) / 365.25 + 0.5);
+  let sunLong = getSunLongitude(nm, timeZone);
   if (sunLong >= 9) {
     nm = getNewMoonDay(k - 1, timeZone);
   }
   return nm;
+}
+
+function getLeapMonthOffset(a11, timeZone) {
+  let k = Math.floor((a11 - 2415021.076998695) / 29.530588853 + 0.5);
+  let last;
+  let i = 1;
+  let arc = getSunLongitude(getNewMoonDay(k + i, timeZone), timeZone);
+  do {
+    last = arc;
+    i++;
+    arc = getSunLongitude(getNewMoonDay(k + i, timeZone), timeZone);
+  } while (arc !== last && i < 14);
+  return i - 1;
 }
 
 function convertSolar2Lunar(dd, mm, yy, timeZone) {
@@ -71,11 +98,15 @@ function convertSolar2Lunar(dd, mm, yy, timeZone) {
   }
   let lunarDay = dayNumber - monthStart + 1;
   let diff = Math.floor((monthStart - a11) / 29);
+  let lunarLeap = 0;
   let lunarMonth = diff + 11;
   if (b11 - a11 > 365) {
-    let leapMonthDiff = Math.floor((getLunarMonth11(yy, timeZone) - a11) / 29);
+    let leapMonthDiff = getLeapMonthOffset(a11, timeZone);
     if (diff >= leapMonthDiff) {
       lunarMonth = diff + 10;
+      if (diff === leapMonthDiff) {
+        lunarLeap = 1;
+      }
     }
   }
   if (lunarMonth > 12) {
@@ -84,7 +115,7 @@ function convertSolar2Lunar(dd, mm, yy, timeZone) {
   if (lunarMonth >= 11 && diff < 4) {
     lunarYear -= 1;
   }
-  return [lunarDay, lunarMonth, lunarYear];
+  return [lunarDay, lunarMonth, lunarYear, lunarLeap];
 }
 
 // Get today's date
@@ -96,7 +127,7 @@ const yy = today.getFullYear();
 // Vietnam timezone offset (GMT+7)
 const timeZone = 7;
 
-const [lunarDay, lunarMonth, lunarYear] = convertSolar2Lunar(dd, mm, yy, timeZone);
+const [lunarDay, lunarMonth, lunarYear, lunarLeap] = convertSolar2Lunar(dd, mm, yy, timeZone);
 
 // Can chi (Heavenly Stems and Earthly Branches)
 const can = ["Giáp", "Ất", "Bính", "Đinh", "Mậu", "Kỷ", "Canh", "Tân", "Nhâm", "Quý"];
@@ -105,4 +136,5 @@ const chi = ["Tý", "Sửu", "Dần", "Mão", "Thìn", "Tỵ", "Ngọ", "Mùi", 
 const yearCan = can[(lunarYear + 6) % 10];
 const yearChi = chi[(lunarYear + 8) % 12];
 
-console.log(`${lunarDay}/${lunarMonth}/${lunarYear} (${yearCan} ${yearChi})`);
+const leapStr = lunarLeap ? " nhuận" : "";
+console.log(`${lunarDay}/${lunarMonth}${leapStr}/${lunarYear} (${yearCan} ${yearChi})`);
