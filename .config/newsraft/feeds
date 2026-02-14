@@ -95,3 +95,13 @@ $(curl -sL 'http://export.arxiv.org/api/query?search_query=ti%3Acontinual+AND+ti
 $(curl -sL 'http://export.arxiv.org/api/query?search_query=ti%3A%28continual+OR+incremental+OR+lifelong%29+AND+ti%3A%28inspection+OR+defect%29&sortBy=lastUpdatedDate&sortOrder=descending&start=0&max_results=200' | newsboat-arxiv-comments) "Continual Inspection"
 
 $(curl -sL 'http://export.arxiv.org/api/query?search_query=ti%3A%28continual+OR+incremental+OR+lifelong%29+AND+ti%3A%28pretraining%29&sortBy=lastUpdatedDate&sortOrder=descending&start=0&max_results=200' | newsboat-arxiv-comments) "Continual Pretraining"
+
+$(curl -sL 'http://export.arxiv.org/api/query?search_query=ti%3A%28continual+OR+lifelong%29+AND+ti%3A%28adversarial+OR+game+OR+formulation%29&sortBy=lastUpdatedDate&sortOrder=descending&start=0&max_results=200' | newsboat-arxiv-comments) "Continual Game Theory"
+
+$(curl -sL 'http://export.arxiv.org/api/query?search_query=ti%3A%28multi-task%29+AND+ti%3A%28adversarial+OR+game+OR+formulation%29&sortBy=lastUpdatedDate&sortOrder=descending&start=0&max_results=200' | newsboat-arxiv-comments) "Multitask Game Theory"
+
+$(curl -sL --get 'http://export.arxiv.org/api/query' --data-urlencode 'search_query=ti:(multi-task learning OR continual learning) AND ti:(pareto OR nash OR stackelberg OR game OR formulation)' --data-urlencode 'sortBy=lastUpdatedDate' --data-urlencode 'sortOrder=descending' --data-urlencode 'start=0' --data-urlencode 'max_results=200' | newsboat-arxiv-comments) "Multitask Game Theory 2"
+
+$(curl -sL --get 'http://export.arxiv.org/api/query' --data-urlencode 'search_query=(ti:"multi-task" OR ti:continual) AND (deep OR neural) AND (pareto OR nash OR stackelberg OR equilibrium OR "multi-objective")' --data-urlencode 'sortBy=lastUpdatedDate' --data-urlencode 'sortOrder=descending' --data-urlencode 'start=0' --data-urlencode 'max_results=200' | newsboat-arxiv-comments) "Multitask Game Theory 3"
+
+$(curl -sL --get 'http://export.arxiv.org/api/query' --data-urlencode 'search_query=ti:"multi-task" AND (deep OR neural) AND (pareto OR "multi-objective" OR "gradient conflict" OR nash)' --data-urlencode 'sortBy=lastUpdatedDate' --data-urlencode 'sortOrder=descending' --data-urlencode 'start=0' --data-urlencode 'max_results=200' | newsboat-arxiv-comments) "Deep Learning Neural Conflict"

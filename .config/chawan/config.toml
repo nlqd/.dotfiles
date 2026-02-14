@@ -3,6 +3,7 @@ images = true
 
 [external]
 editor = 'nvim'
+copy-cmd = 'wl-copy'
 
 ### does not work even after enable. maybe somethign wrong w/ this website
 # [siteconf.kerkour]

@@ -13,7 +13,13 @@ def q(ns, tag):
 
 
 data = sys.stdin.buffer.read()
-root = ET.fromstring(data)
+if not data:
+    sys.exit(0)
+try:
+    root = ET.fromstring(data)
+except ET.ParseError:
+    sys.stdout.buffer.write(data)
+    sys.exit(0)
 
 for entry in root.findall("a:entry", NS):
     c = entry.find("arxiv:comment", NS)

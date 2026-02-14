@@ -16,6 +16,7 @@ PATH="$HOME/.local/bin:$PATH"
 PATH="$HOME/.local/scripts:$PATH"
 PATH="${ASDF_DATA_DIR:-$HOME/.asdf}/shims:$PATH"
 PATH="$DOTNET_ROOT:$DOTNET_ROOT/tools:$PATH"
+PATH="$HOME/.TinyTeX/bin/x86_64-linux/:$PATH"
 export PATH
 export EDITOR=nvim
 export MANPAGER='nvim +Man!'
@@ -40,7 +41,7 @@ alias lg='lazygit'
 alias ldk='lazydocker'
 alias dbui='nvim -c "DBUI"'
 
-alias sc-sush='sudo systemctl suspend-then-hibernate'
+alias duchs='du -chs -- * | sort -h'
 
 y() {
   local tmp="$(mktemp -t "yazi-cwd.XXXXXX")" cwd
@@ -92,10 +93,10 @@ function sshaiws() {
 plugins=(
   git
   docker
-  emoji
+  # emoji
   systemd
   vi-mode
-  colored-man-pages
+  # colored-man-pages
   # per-directory-history
   # qrcode
 )

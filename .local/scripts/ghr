@@ -18,10 +18,11 @@ install_repo() {
     echo "No releases for $repo" >&2; return 1
   }
 
-  ver=$(printf '%s' "$release" | jq -r '.tag_name')
+  ver=$(echo "$release" | jq -r '.tag_name')
   echo "Latest: $ver"
 
-  assets=$(printf '%s' "$release" | jq -r '.assets[] | "\(.name)\t\(.browser_download_url)"')
+  assets=$(echo "$release" | jq -r '.assets[] | "\(.name)\t\(.browser_download_url)"')
+
   [ -z "$assets" ] && { echo "No assets" >&2; return 1; }
 
   echo "$assets" | cut -f1 | nl
@@ -47,16 +48,14 @@ install_repo() {
 }
 
 list_all() {
-  {
-    printf "REPO\tINSTALLED\tLATEST\n"
-    for dir in "$CACHE_DIR"/*; do
-      [ -f "$dir/.repo" ] || continue
-      repo=$(cat "$dir/.repo")
-      local_ver=$(cat "$dir/.version")
-      remote_ver=$(curl -sf "$API/$repo/releases/latest" | jq -r '.tag_name')
-      printf "%s\t%s\t%s\n" "$repo" "$local_ver" "$remote_ver"
-    done
-  } | column -t -s $'\t' -o '  '
+  printf "REPO\tINSTALLED\tLATEST\n"
+  for dir in "$CACHE_DIR"/*; do
+    [ -f "$dir/.repo" ] || continue
+    repo=$(cat "$dir/.repo")
+    local_ver=$(cat "$dir/.version")
+    remote_ver=$(curl -sf "$API/$repo/releases/latest" | jq -r '.tag_name')
+    printf "%s\t%s\t%s\n" "$repo" "$local_ver" "$remote_ver"
+  done | column -t -s $'\t'
 }
 
 case "$1" in

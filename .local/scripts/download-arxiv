@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 
+PDF_PROGRAM="zathura"
+# PDF_PROGRAM="sioyek"
+
 usage() {
   echo "Usage: $0 <arxiv link or anything containing the arxiv id>"
   exit 1
 }
 
 is_downloaded() {
-  find "$HOME/Downloads/" "$HOME/Documents/Obsidian-Vault/200-Academic/Papers-pdfs/" -type f -name "$1"
+  find "$HOME/Downloads/" "$HOME/Documents/Obsidian-Vault/200-Academic/Papers-pdfs/" -type f -name "$1" | head -1
 }
 
 arg="$1"
@@ -20,10 +23,10 @@ downloadpath="$HOME/Downloads/$arxivid.pdf"
 isdownloadedpath="$(is_downloaded "$filename")"
 if [[ -z "$isdownloadedpath" ]]; then
   (
-    curl -sL "https://arxiv.org/pdf/$arxivid" -o "$downloadpath" && open "$downloadpath"
+    curl -sL "https://arxiv.org/pdf/$arxivid" -o "$downloadpath" && $PDF_PROGRAM "$downloadpath"
   ) &
 else
-  open "$isdownloadedpath" &
+  $PDF_PROGRAM "$isdownloadedpath" &
 fi
 
 echo "$arg"

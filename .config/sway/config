@@ -21,12 +21,26 @@ set $dot_local /home/qd/.local/scripts
 set $term /home/qd/.cargo/bin/alacritty
 
 set $dmenu_flags  -i -fn "Iosevka NF-16" -nb "#C4C6CD" -nf "#07080D" -sb "#004C63" -sf "#FFFFFF"
-set $menu         dmenu_run $dmenu_flags
+set $menu         sh -c 'dmenu_run $dmenu_flags'
 set $flatpak_menu i3-dmenu-desktop --dmenu='dmenu $dmenu_flags'
 
 set $ibus_toggle        $dot_local/ibus-toggle
 set $screenshot         $dot_local/wl-screenshot
 set $server_mode_toggle $dot_local/sway-server-mode-toggle
+set $sush               $dot_local/sush
+
+### from SergeantBiggs
+# set $mode_launcher "Start: [f]irefox [c]hat [k]eepassxc [q]uit"
+# mode $mode_launcher {
+#     bindsym f exec firefox
+#         bindsym c exec ~/.config/sway/scripts/social.sh
+#         bindsym k exec keepassxc
+#         bindsym Return mode "default"
+#         bindsym Escape mode "default"
+#         bindsym $mod+o mode "default"
+#         bindsym q mode "default"
+# }
+# bindsym $mod+o mode $mode_launcher
 
 # Laptop output
 set $laptop eDP-1
@@ -76,6 +90,7 @@ bindsym $mod+F12 exec $server_mode_toggle
 bindsym $mod+Shift+m exec swaymsg "output $laptop dpms toggle"
 bindsym $mod+Shift+e exec swaynag -t warning -m 'This will end your Wayland session.' -B 'Yes, exit sway' 'swaymsg exit'
 bindsym $mod+Shift+x exec swaynag -t warning -m 'Shut down the machine.' -B 'Yes, shutdown now' 'shutdown now' -B 'Yes, shutdown' 'shutdown'
+bindsym $mod+Shift+z exec $sush
 
 bindsym $mod+Shift+space exec $ibus_toggle
 bindsym $mod+Shift+p exec $screenshot
