@@ -1,0 +1,157 @@
+(defcfg
+  process-unmapped-keys yes
+  concurrent-tap-hold yes
+  chords-v2-min-idle 150 ;; suppress chords during typing streaks (≈ urob's require-prior-idle for combos)
+)
+
+(defsrc
+  grv
+  tab    q      w      e      r      t      y      u      i      o      p      [
+  caps   a      s      d      f      g      h      j      k      l      ;      '
+  lsft   z      x      c      v      b      n      m      ,      .      /      rsft
+  lctl   lmet   lalt                 spc                   ralt   rctl
+)
+
+(defvar
+  tap-time     200
+  idle-timeout 150
+
+  ;; Per-finger hold times for HRMs
+  hold-pinky   280
+  hold-ring    260
+  hold-middle  240
+  hold-index   220
+
+  ;; Hold time for homerow-mod-combo tap-holds
+  ;; (when you hold a chord to get the combined modifier)
+  combo-hold   200
+
+  ;; Chord timeout (slightly increased from 30 to give HRM interaction room)
+  chord-timeout 40
+
+  ;; Bilateral key groups for HRMs
+  left-hand-release (a s d f g)
+  left-hand-press   (q w e r t z x c v b)
+
+  right-hand-release (h j k l ;)
+  right-hand-press   (y u i o p n m , . /)
+)
+
+(deflayer base
+  _
+  @tlow  _      _      _      _      _      _      _      _      _      _      _
+  lctl   @a     @s     @d     @f     _      _      @j     @k     @l     @;     _
+  _      _      _      _      _      _      _      _      _      _      _      @sgrv
+  caps   _      _                    _                     @arai  lmet
+)
+
+;; nomods: HRM keys are plain letters. Active briefly after each HRM tap.
+(deflayer nomods
+  _
+  @tlow  _      _      _      _      _      _      _      _      _      _      _
+  lctl   a      s      d      f      _      _      j      k      l      ;      _
+  _      _      _      _      _      _      _      _      _      _      _      @sgrv
+  caps   _      _                    _                     @arai  lmet
+)
+
+(deflayer lower
+  _
+  _      _      _      _      _      _      _      _      _      _      _      _
+  _      _      _      _      _      _      left   down   up     right  _      _
+  _      _      _      _      _      _      _      _      _      _      _      _
+  _      _      _                    _                     _      _
+)
+
+(deflayer raise
+  _
+  _      _      1      2      3      _      _      _      S-9    S-0    _      _
+  _      _      4      5      6      _      _      _      [      ]      S-\    _
+  _      0      7      8      9      _      _      _      S-[    S-]    \      _
+  _      _      _                    _                     _      _
+)
+
+;; HRM infrastructure
+
+(deffakekeys
+  to-base (layer-switch base)
+)
+
+(defalias
+  ;; After each HRM tap, switch to nomods layer briefly.
+  ;; Return to base after $idle-timeout ms of idle.
+  tap (multi
+    (layer-switch nomods)
+    (on-idle-fakekey to-base tap $idle-timeout)
+  )
+
+  ;; ── Layer switching (preserved from your config) ──
+  tlow (tap-hold $tap-time 200 tab  (layer-toggle lower))
+  arai (layer-toggle raise)
+  sgrv (tap-hold $tap-time 200 grv rsft)
+
+  ;; ── Left hand HRMs ──
+  a (tap-hold-release-tap-keys-release $tap-time $hold-pinky
+      (multi a @tap) lctl
+      $left-hand-press $left-hand-release)
+
+  s (tap-hold-release-tap-keys-release $tap-time $hold-ring
+      (multi s @tap) lsft
+      $left-hand-press $left-hand-release)
+
+  d (tap-hold-release-tap-keys-release $tap-time $hold-middle
+      (multi d @tap) lalt
+      $left-hand-press $left-hand-release)
+
+  f (tap-hold-release-tap-keys-release $tap-time $hold-index
+      (multi f @tap) lmet
+      $left-hand-press $left-hand-release)
+
+  ;; ── Right hand HRMs ──
+  j (tap-hold-release-tap-keys-release $tap-time $hold-index
+      (multi j @tap) rmet
+      $right-hand-press $right-hand-release)
+
+  k (tap-hold-release-tap-keys-release $tap-time $hold-middle
+      (multi k @tap) ralt
+      $right-hand-press $right-hand-release)
+
+  l (tap-hold-release-tap-keys-release $tap-time $hold-ring
+      (multi l @tap) rsft
+      $right-hand-press $right-hand-release)
+
+  ; (tap-hold-release-tap-keys-release $tap-time $hold-pinky
+      (multi ; @tap) rctl
+      $right-hand-press $right-hand-release)
+)
+
+(defchordsv2
+  ;; LATERAL COMBOS — right hand
+  (o p) bspc                                                   $chord-timeout first-release ()
+  (p [) del                                                    $chord-timeout first-release ()
+  (j k) (tap-hold $tap-time $combo-hold - (multi rmet ralt))   $chord-timeout first-release ()
+  (l ;) (tap-hold $tap-time $combo-hold ret (multi rsft rctl)) $chord-timeout first-release ()
+  (m ,) =    $chord-timeout first-release ()
+
+  ;; LATERAL COMBOS — left hand
+  (w e) S-2  $chord-timeout first-release ()
+  (a s) (tap-hold $tap-time $combo-hold S-4 (multi lctl lsft)) $chord-timeout first-release ()
+  (s d) (tap-hold $tap-time $combo-hold S-5 (multi lsft lalt)) $chord-timeout first-release ()
+  (d f) (tap-hold $tap-time $combo-hold S-6 (multi lalt lmet)) $chord-timeout first-release ()
+
+  ;; VERTICAL COMBOS — left hand
+  (w s) (tap-hold $tap-time $combo-hold S-1 lsft) $chord-timeout first-release ()
+  (x s) (tap-hold $tap-time $combo-hold S-7 lsft) $chord-timeout first-release ()
+  (x c) S-8                                       $chord-timeout first-release ()
+
+  ;; VERTICAL COMBOS — right hand
+  (i k) (tap-hold $tap-time $combo-hold S-9 ralt) $chord-timeout first-release ()
+  (o l) (tap-hold $tap-time $combo-hold S-0 rsft) $chord-timeout first-release ()
+  (k ,) (tap-hold $tap-time $combo-hold [ ralt)   $chord-timeout first-release ()
+  (l .) (tap-hold $tap-time $combo-hold ] rsft)   $chord-timeout first-release ()
+  (u j) (tap-hold $tap-time $combo-hold S-[ rmet) $chord-timeout first-release ()
+  (j m) (tap-hold $tap-time $combo-hold S-] rmet) $chord-timeout first-release ()
+  (p ;) (tap-hold $tap-time $combo-hold S-\ rctl) $chord-timeout first-release ()
+  (; /) (tap-hold $tap-time $combo-hold \ rctl)   $chord-timeout first-release ()
+)
+
+;; vim:ft=scheme:ts=2:sts:cuc

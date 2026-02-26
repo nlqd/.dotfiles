@@ -45,13 +45,37 @@ get_xrecord() {
     fi
 }
 
+# Cache files for async updates
+_cache_dir="/tmp/xi3status_cache"
+mkdir -p "$_cache_dir"
+
+update_slow_data() {
+    get_bt_battery "58:18:62:01:E5:78" "🎧" > "$_cache_dir/xm6_bat" &
+    get_bt_battery "D3:AC:8D:04:52:D5" "⌨" > "$_cache_dir/corne_bat" &
+    get_gpu_load > "$_cache_dir/gpu_load" &
+    get_weather > "$_cache_dir/weather" &
+    wait
+}
+
+# Run initial background update
+update_slow_data &
+
+_slow_update_counter=0
+
 i3status "$@" | while :
 do
     read -r line
-    xm6_bat=$(get_bt_battery "58:18:62:01:E5:78" "🎧")
-    corne_bat=$(get_bt_battery "D3:AC:8D:04:52:D5" "⌨")
-    gpu_load=$(get_gpu_load)
-    weather=$(get_weather)
+
+    # Update slow data every 5 cycles instead of every cycle
+    if (( _slow_update_counter % 5 == 0 )); then
+        update_slow_data &
+    fi
+    (( _slow_update_counter++ ))
+
+    # Read from cache files (instant, never blocks)
+    xm6_bat=$(cat "$_cache_dir/xm6_bat" 2>/dev/null)
+    corne_bat=$(cat "$_cache_dir/corne_bat" 2>/dev/null)
+    gpu_load=$(cat "$_cache_dir/gpu_load" 2>/dev/null)
     rec=$(get_xrecord)
 
     status_items=""
@@ -59,6 +83,5 @@ do
     [[ -n "$corne_bat" ]] && status_items+=" ${corne_bat} |"
     [[ -n "$rec" ]] && status_items+=" ${rec} |"
 
-    # echo "${line} | 🔆 $(xbrightness) | ${gpu_load} | ${weather} |${status_items}" || exit 1
     echo "${line} | 🔆 $(xbrightness) | ${gpu_load} |${status_items}" || exit 1
 done

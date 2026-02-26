@@ -402,6 +402,7 @@ Options:
   -h, --help            Show this help
 
 Commands:
+  dash, d               Dashboard: unassigned not-started + my in-progress + my needs-review
   mine, m               All my tasks across sections
   all, a [SECTION]      All tasks in section (default: In-Progress)
   view, v, task [GIDS]  View task details + comments
@@ -425,6 +426,7 @@ Sections: ${sections_list}
   (Section names are case-insensitive: "in-progress" matches "In-Progress")
 
 Examples:
+  asana-overview d                  Dashboard: unassigned + my in-progress + needs review
   asana-overview                    Show my In-Progress tasks
   asana-overview v 123456           View full task details
   asana-overview m                  All my tasks across sections
@@ -436,6 +438,39 @@ Environment variables (priority: flag > ASANA_PROJECT_OVERRIDE > ASANA_PROJECT >
   ASANA_PROJECT=name                Set default project for session
   ASANA_PROJECT_OVERRIDE=name       Override project (highest priority)
 EOF
+}
+
+show_dashboard() {
+  local config="$1"
+  local user_gid=$(echo "$config" | jq -r '.user_gid')
+
+  _fetch_section() {
+    local name="$1" resolved gid
+    resolved=$(resolve_section_name "$name" "$config" 2>/dev/null) || { echo '{"data":[]}'; return 0; }
+    gid=$(echo "$config" | jq -r ".sections[\"${resolved}\"]")
+    get_tasks_in_section "$gid" "false"
+  }
+
+  _print_section() {
+    local label="$1" output="$2"
+    [[ -z $output ]] && return 0
+    print_header; echo "$label"; print_header
+    echo "$output"; echo
+  }
+
+  local tasks output
+
+  tasks=$(_fetch_section "Not-Started")
+  output=$(echo "$tasks" | jq -r '.data[] | select(.completed == false and .assignee == null) | "[\(.gid)] \(.name) - Due: \(.due_on // "None") - Assignee: Unassigned"')
+  _print_section "Unassigned / Not Started" "$output"
+
+  tasks=$(_fetch_section "In-Progress")
+  output=$(display_tasks "$tasks" "false" "$user_gid")
+  _print_section "My In-Progress" "$output"
+
+  tasks=$(_fetch_section "Needs Review")
+  output=$(display_tasks "$tasks" "false" "$user_gid")
+  _print_section "Needs Review" "$output"
 }
 
 show_all_my_tasks() {
@@ -548,6 +583,9 @@ main() {
   shift
 
   case "$command" in
+  d|dash) #HELP Dashboard view:\nASANA dash
+    show_dashboard "$config"
+    ;;
   m|mine) #HELP All my tasks across sections:\nASANA mine [-d]
     show_all_my_tasks "$show_desc" "$config"
     ;;
