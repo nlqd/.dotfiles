@@ -90,6 +90,55 @@ function sshaiws() {
   wait $pid 2>/dev/null
 }
 
+function moshaiws() {
+  (
+    while true; do
+      nc -l 9999 -d | while read -r message; do
+      [ -n "$message" ] && notify-send "SSH Notification" "$message"
+    done
+  done
+  ) &
+  local pid=$!
+
+  trap "kill $pid 2>/dev/null; wait $pid 2>/dev/null" EXIT
+
+  mosh aiws --ssh="ssh -L 3000:localhost:3000 -L 8000:localhost:8000 -R 9999:localhost:9999"
+
+  trap - EXIT
+  kill $pid 2>/dev/null
+  wait $pid 2>/dev/null
+}
+
+function hcloud-edit-zone() {
+  ### alternatively, do this
+  # hcloud zone rrset create $zone --name $sub --record $ipv4 --type A
+  # hcloud zone rrset create $zone --name $sub --record $ipv6 --type AAAA
+  # hcloud zone rrset delete $zone $sub A
+  # hcloud zone rrset delete $zone $sub AAAA
+
+  local zone=$(hcloud zone list --output noheader --output columns=name | head --lines 1)
+  local tmpdir=$(mktemp --directory)
+  local original="$tmpdir/original.zone"
+  local edited="$tmpdir/edited.zone"
+
+  hcloud zone export-zonefile "$zone" > "$original"
+  cp "$original" "$edited"
+  ${EDITOR:-vim} "$edited"
+
+  if diff --unified "$original" "$edited"; then
+    echo "No changes detected, skipping import."
+    rm --recursive "$tmpdir"
+    return 0
+  fi
+
+  echo ""
+  read -q "confirm? Import changes? [y/N] " || { echo "\nAborted."; rm --recursive "$tmpdir"; return 1; }
+  echo ""
+
+  hcloud zone import-zonefile "$zone" --zonefile "$edited"
+  rm --recursive "$tmpdir"
+}
+
 plugins=(
   git
   docker

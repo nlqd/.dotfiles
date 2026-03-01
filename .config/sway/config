@@ -6,7 +6,8 @@ output * background $wallpaper fill
 # Notification daemon
 # https://github.com/emersion/mako
 exec --no-startup-id mako
-exec --no-startup-id ibus-daemon --daemonize --replace
+# exec --no-startup-id ibus-daemon --daemonize --replace
+exec --no-startup-id fcitx5 -d --replace
 exec --no-startup-id nm-applet
 
 # Variables
@@ -16,18 +17,7 @@ set $down j
 set $up k
 set $right l
 set $dot_local /home/qd/.local/scripts
-
-# Executable
-set $term /home/qd/.cargo/bin/alacritty
-
 set $dmenu_flags  -i -fn "Iosevka NF-16" -nb "#C4C6CD" -nf "#07080D" -sb "#004C63" -sf "#FFFFFF"
-set $menu         sh -c 'dmenu_run $dmenu_flags'
-set $flatpak_menu i3-dmenu-desktop --dmenu='dmenu $dmenu_flags'
-
-set $ibus_toggle        $dot_local/ibus-toggle
-set $screenshot         $dot_local/wl-screenshot
-set $server_mode_toggle $dot_local/sway-server-mode-toggle
-set $sush               $dot_local/sush
 
 ### from SergeantBiggs
 # set $mode_launcher "Start: [f]irefox [c]hat [k]eepassxc [q]uit"
@@ -82,18 +72,20 @@ bindsym XF86AudioPrev         exec playerctl previous
 bindsym XF86MonBrightnessUp   exec light -A 5
 bindsym XF86MonBrightnessDown exec light -U 5
 
-bindsym $mod+t exec $term
-bindsym $mod+b exec firefox
-bindsym $mod+d exec $menu
-bindsym $mod+p exec $flatpak_menu
-bindsym $mod+F12 exec $server_mode_toggle
-bindsym $mod+Shift+m exec swaymsg "output $laptop dpms toggle"
-bindsym $mod+Shift+e exec swaynag -t warning -m 'This will end your Wayland session.' -B 'Yes, exit sway' 'swaymsg exit'
-bindsym $mod+Shift+x exec swaynag -t warning -m 'Shut down the machine.' -B 'Yes, shutdown now' 'shutdown now' -B 'Yes, shutdown' 'shutdown'
-bindsym $mod+Shift+z exec $sush
+bindsym Shift+Print exec $dot_local/wl-record
+bindsym Print       exec $dot_local/wl-screenshot
 
-bindsym $mod+Shift+space exec $ibus_toggle
-bindsym $mod+Shift+p exec $screenshot
+bindsym $mod+t           exec ~/.cargo/bin/alacritty
+bindsym $mod+b           exec firefox
+bindsym $mod+d           exec dmenu_run $dmenu_flags
+bindsym $mod+Shift+d     exec i3-dmenu-desktop --dmenu='dmenu $dmenu_flags'
+bindsym $mod+F12         exec $dot_local/sway-server-mode-toggle
+bindsym $mod+Shift+m     exec swaymsg "output $laptop dpms toggle"
+bindsym $mod+Shift+e     exec swaynag -t warning -m 'This will end your Wayland session.' -B 'Yes, exit sway' 'swaymsg exit'
+bindsym $mod+Shift+x     exec swaynag -t warning -m 'Shut down the machine.' -B 'Yes, shutdown now' 'shutdown now' -B 'Yes, shutdown' 'shutdown'
+bindsym $mod+Shift+z     exec $dot_local/sush
+# bindsym $mod+Shift+space exec $dot_local/ibus-toggle # ibus
+
 bindsym $mod+Shift+c reload
 bindsym $mod+Shift+q kill
 
@@ -101,14 +93,14 @@ floating_modifier $mod normal
 bindsym $mod+Shift+s floating toggle; resize set width 600px height 400px; move position 1300px 0px; sticky toggle
 
 # Moving around
-bindsym $mod+$left focus left
-bindsym $mod+$down focus down
-bindsym $mod+$up focus up
+bindsym $mod+$left  focus left
+bindsym $mod+$down  focus down
+bindsym $mod+$up    focus up
 bindsym $mod+$right focus right
 
-bindsym $mod+Shift+$left move left 70px
-bindsym $mod+Shift+$down move down 30px
-bindsym $mod+Shift+$up move up 30px
+bindsym $mod+Shift+$left  move left 70px
+bindsym $mod+Shift+$down  move down 30px
+bindsym $mod+Shift+$up    move up 30px
 bindsym $mod+Shift+$right move right 70px
 
 # Workspaces

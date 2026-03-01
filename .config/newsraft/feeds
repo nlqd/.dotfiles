@@ -38,7 +38,6 @@ https://ploum.net/atom_en.xml
 https://ryan.freumh.org/atom.xml
 https://sebastiano.tronto.net/blog/feed.xml
 https://sourcehut.org/blog/index.xml
-https://tangled.org/@oppi.li/journal/feed.atom
 https://theahura.substack.com/feed
 https://thenumb.at/index.xml
 https://tilde.town/~hush/index.xml
@@ -47,6 +46,7 @@ https://tratt.net/laurie/blog/blog.rss
 https://vkoskiv.com/atom.xml
 https://world.hey.com/dhh/feed.atom
 https://www.dannyguo.com/blog/feed.xml
+https://www.justinmklam.com/index.xml
 https://www.morling.dev/blog/index.xml
 https://www.quantamagazine.org/feed/
 https://xuanwo.io/index.xml
@@ -86,7 +86,6 @@ https://hakibenita.com/feeds/all.atom.xml
 https://kyo.iroiro.party/en/rss.xml
 https://phiresky.github.io/blog/atom.xml
 https://taylor.town/feed.xml
-https://tangled.sh/blog/feed.xml
 
 $(curl -sL 'http://export.arxiv.org/api/query?search_query=ti%3A%22continual+inspection%22+OR+ti%3A%22incremental+inspection%22+OR+ti%3A%22lifelong+learning%22+OR+ti%3A%22incremental+learning%22+OR+ti%3A%22continual+learning%22&sortBy=lastUpdatedDate&sortOrder=descending&start=0&max_results=200' | newsboat-arxiv-comments) "Continual Learning"
 
