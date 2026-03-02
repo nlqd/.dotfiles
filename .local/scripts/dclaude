@@ -2,6 +2,31 @@
 
 exec 3<$HOME/.claude.json
 
+# Build extra --ro-bind args for paths outside $PWD that bwrap would otherwise miss.
+extra_binds=()
+declare -A seen_binds
+
+# If .git is a file we're in a worktree. Bind the main repo's .git common dir
+# so git operations work (objects, refs, etc. all live there).
+if [ -f "$PWD/.git" ]; then
+    git_common_dir=$(git rev-parse --git-common-dir 2>/dev/null)
+    if [ -n "$git_common_dir" ]; then
+        git_common_dir=$(realpath "$git_common_dir")
+        extra_binds+=(--ro-bind "$git_common_dir" "$git_common_dir")
+        seen_binds[$git_common_dir]=1
+    fi
+fi
+
+# Find symlinks under $PWD (skip node_modules for speed) whose resolved targets
+# live outside $PWD, then ro-bind each unique target.
+while IFS= read -r -d '' link; do
+    target=$(realpath "$link" 2>/dev/null) || continue
+    [[ "$target" == "$PWD"/* ]] && continue
+    [ -z "${seen_binds[$target]}" ] || continue
+    extra_binds+=(--ro-bind "$target" "$target")
+    seen_binds[$target]=1
+done < <(find "$PWD" -not -path "*/node_modules/*" -type l -print0 2>/dev/null)
+
 exec /usr/bin/bwrap \
     --tmpfs /tmp \
     --dev /dev \
@@ -45,5 +70,6 @@ exec /usr/bin/bwrap \
     --bind $HOME/.claude $HOME/.claude \
     --bind $HOME/.cache $HOME/.cache \
     --file 3 $HOME/.claude.json \
+    "${extra_binds[@]}" \
     --bind "$PWD" "$PWD" \
     claude --dangerously-skip-permissions $@

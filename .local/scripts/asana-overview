@@ -426,7 +426,7 @@ Sections: ${sections_list}
   (Section names are case-insensitive: "in-progress" matches "In-Progress")
 
 Examples:
-  asana-overview d                  Dashboard: unassigned + my in-progress + needs review
+  asana-overview d                  Dashboard: unassigned not-started + my in-progress + my needs-review
   asana-overview                    Show my In-Progress tasks
   asana-overview v 123456           View full task details
   asana-overview m                  All my tasks across sections
