@@ -75,7 +75,8 @@ bindsym XF86MonBrightnessDown exec light -U 5
 bindsym Shift+Print exec $dot_local/wl-record
 bindsym Print       exec $dot_local/wl-screenshot
 
-bindsym $mod+t           exec ~/.cargo/bin/alacritty
+# bindsym $mod+t           exec ~/.cargo/bin/alacritty
+bindsym $mod+t           exec foot
 bindsym $mod+b           exec firefox
 bindsym $mod+d           exec dmenu_run $dmenu_flags
 bindsym $mod+Shift+d     exec i3-dmenu-desktop --dmenu='dmenu $dmenu_flags'
