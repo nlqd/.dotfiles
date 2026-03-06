@@ -1,0 +1,10 @@
+#!/usr/bin/bash
+cat >&2 <<EOF
+[bwrap] '$(basename "$0")' is blocked.
+The user does not want you to run this command without his direct supervision.
+You must:
+  1. State your plan clearly before proceeding.
+  2. Ask the user to monitor you and confirm before running '$(basename "$0")'.
+Do NOT attempt to work around this restriction.
+EOF
+exit 1

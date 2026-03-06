@@ -2,6 +2,21 @@
 
 exec 3<$HOME/.claude.json
 
+blocked=(gh rsync aws kubectl helm terraform docker heroku)
+localbin_args=$(mktemp)
+for f in /usr/local/bin/*; do
+    name=$(basename "$f")
+    for b in "${blocked[@]}"; do [[ "$name" == "$b" ]] && continue 2; done
+    printf '%s\0%s\0%s\0' '--ro-bind-try' "$f" "$f"
+done > "$localbin_args"
+exec 4<"$localbin_args"
+rm "$localbin_args"
+
+# FDs for /usr/bin blocked binaries (PATH shadow via /bwrap-bin).
+exec 5<$HOME/.local/scripts/bwrap-block  # gh
+exec 6<$HOME/.local/scripts/bwrap-block  # rsync
+exec 7<$HOME/.local/scripts/bwrap-block  # terraform
+
 # Build extra --ro-bind args for paths outside $PWD that bwrap would otherwise miss.
 extra_binds=()
 declare -A seen_binds
@@ -15,6 +30,7 @@ if [ -f "$PWD/.git" ]; then
         extra_binds+=(--ro-bind "$git_common_dir" "$git_common_dir")
         seen_binds[$git_common_dir]=1
     fi
+    extra_binds+=(--ro-bind $HOME/.gitconfig $HOME/.gitconfig)
 fi
 
 # Find symlinks under $PWD (skip node_modules for speed) whose resolved targets
@@ -28,7 +44,7 @@ while IFS= read -r -d '' link; do
 done < <(find "$PWD" -not -path "*/node_modules/*" -type l -print0 2>/dev/null)
 
 exec /usr/bin/bwrap \
-    --tmpfs /tmp \
+    --bind /tmp /tmp \
     --dev /dev \
     --proc /proc \
     --hostname bubblewrap --unshare-uts \
@@ -38,10 +54,14 @@ exec /usr/bin/bwrap \
     --ro-bind /lib64 /lib64 \
     --ro-bind /usr/bin /usr/bin \
     --ro-bind /usr/lib /usr/lib \
-    --ro-bind /usr/local/bin /usr/local/bin \
+    --tmpfs /usr/local/bin \
+    --args 4 \
+    --tmpfs /bwrap-bin \
+    --perms 0755 --ro-bind-data 5 /bwrap-bin/gh \
+    --perms 0755 --ro-bind-data 6 /bwrap-bin/rsync \
+    --perms 0755 --ro-bind-data 7 /bwrap-bin/terraform \
+    --setenv PATH /bwrap-bin:$PATH \
     --ro-bind /usr/local/lib /usr/local/lib \
-    --ro-bind /usr/share/tesseract-ocr/5/tessdata/ /usr/share/tesseract-ocr/5/tessdata/ \
-    --ro-bind /tmp/tmux-1002/ /tmp/tmux-1002/ \
     --ro-bind /etc/alternatives /etc/alternatives \
     --ro-bind /etc/resolv.conf /etc/resolv.conf \
     --ro-bind /etc/profile.d /etc/profile.d \
@@ -59,7 +79,6 @@ exec /usr/bin/bwrap \
     --ro-bind /usr/share/zoneinfo /usr/share/zoneinfo \
     --ro-bind $HOME/.bashrc $HOME/.bashrc \
     --ro-bind $HOME/.profile $HOME/.profile \
-    --ro-bind $HOME/.gitconfig $HOME/.gitconfig \
     --ro-bind $HOME/.local $HOME/.local \
     --ro-bind $HOME/.local/bin $HOME/.local/bin \
     --ro-bind $HOME/.cargo $HOME/.cargo \

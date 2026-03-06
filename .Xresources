@@ -1,0 +1,70 @@
+! Sixel support
+xterm*decTerminalID: vt340
+xterm*numColorRegisters: 256
+
+! Font
+xterm*faceName: BerkeleyMono Nerd Font Mono
+xterm*faceSize: 10
+xterm*renderFont: true
+xterm*scaleHeight: 1.2
+
+! Window
+xterm*internalBorder: 10
+xterm*title: xterm
+xterm*termName: xterm-256color
+xterm*locale: true
+xterm*utf8: 2
+
+! Shell
+xterm*loginShell: true
+xterm*shell: /usr/bin/zsh
+
+! Cursor
+xterm*cursorBlink: false
+xterm*cursorColor: #14161b
+
+! Scrolling
+xterm*saveLines: 10000
+xterm*scrollBar: false
+xterm*scrollKey: true
+xterm*scrollTtyOutput: false
+
+! Selection / clipboard
+xterm*selectToClipboard: true
+xterm*disallowedWindowOps: 20,21,SetXprop
+
+! Ctrl+Shift+C/V for copy/paste
+xterm*translations: #override \n\
+    Ctrl Shift <Key>C: copy-selection(CLIPBOARD) \n\
+    Ctrl Shift <Key>V: insert-selection(CLIPBOARD) \n\
+    Shift <Key>Insert: insert-selection(PRIMARY) \n\
+    Shift <Key>Return: string(0x1b) string(0x0d) \n\
+    Ctrl <Key>Return: string(0x1b) string(0x0d) \n\
+    <Key>F11: fullscreen(toggle)
+
+! nvim_light theme colors
+xterm*background: #E0E2EA
+xterm*foreground: #14161b
+
+! Normal colors
+xterm*color0: #C4C6CD
+xterm*color1: #590008
+xterm*color2: #005523
+xterm*color3: #6b5300
+xterm*color4: #004c63
+xterm*color5: #470045
+xterm*color6: #007373
+xterm*color7: #2c2e33
+
+! Bright colors
+xterm*color8: #9b9ea4
+xterm*color9: #640009
+xterm*color10: #006029
+xterm*color11: #765d00
+xterm*color12: #005574
+xterm*color13: #52004f
+xterm*color14: #008080
+xterm*color15: #4f5258
+
+! Bold is not bright
+xterm*boldColors: false

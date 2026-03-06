@@ -86,6 +86,10 @@ function pn() {
     dev)
       fuser -k 3000/tcp 8000/tcp 2>/dev/null
       pnpm dev "$@"
+      # To summarize what was done to make port 3001 work:
+      # 1. Ran pnpm codegen
+      # 2. Backend only allowed localhost:3000. Added a Vite proxy so the browser calls :3001 and Vite forwards to :8000
+      # 3. Updated .env: VITE_API_BASE_URL=http://localhost:3001/graphql + VITE_API_PROXY_TARGET=http://localhost:8000
       return
       ;;
 

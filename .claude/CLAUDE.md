@@ -44,7 +44,7 @@ IF THE WORK IS COMPLEX, break complex work into 3-5 stages. Document in `IMPLEME
 2. **Test** - Write test first (red)
 3. **Implement** - Minimal code to pass (green)
 4. **Refactor** - Clean up with tests passing
-5. **Commit** - With clear message linking to plan, only AFTER the human in the loop is satisfied, or if he explicitly allows you to run wild.
+5. **Commit** - With clear message linking to task, only AFTER the human in the loop is satisfied, or if he explicitly allows you to run wild.
 
 ### 3. When Stuck (After 3 Attempts)
 
@@ -151,6 +151,7 @@ When multiple valid approaches exist, choose based on:
 - Disable tests instead of fixing them
 - Commit code that doesn't compile
 - Make assumptions - verify with existing code
+- Push to remote or open PR without explicit permission
 
 **ALWAYS**:
 - Commit working code incrementally
