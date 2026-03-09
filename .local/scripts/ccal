@@ -5,8 +5,7 @@ WEEKDAY='\033[0;34m'  # Blue for weekdays (Mon-Fri)
 WEEKEND='\033[0;31m'  # Red for weekends (Sat-Sun)
 RESET='\033[0m'
 
-# Run ncal and capture output
-ncal_output=$(ncal -y "$@")
+ncal_output=$(ncal -M -y "$@")
 
 # Highlight today only when viewing the current year
 highlight_today=false
@@ -16,53 +15,48 @@ if [[ "$first_line" == *"$current_year"* ]]; then
   highlight_today=true
   today_day=$(date +%-d)
   today_month=$(date +%-m)
-  today_dow=$(date +%u)
-  case $today_dow in
-    1) dow_label="T2" ;; 2) dow_label="T3" ;; 3) dow_label="T4" ;;
-    4) dow_label="T5" ;; 5) dow_label="T6" ;; 6) dow_label="T7" ;;
-    7) dow_label="CN" ;;
-  esac
+  today_dow=$(date +%u)  # 1=Mon .. 7=Sun, matches ncal row order
   target_block=$(( (today_month - 1) / 4 ))
+  month_in_block=$(( (today_month - 1) % 4 ))
   hl_on=$(printf '\033[7m')
   hl_off=$(printf '\033[27m')
 fi
 
+line_num=0
+current_block=-1
 month_col_start=-1
 month_col_end=-1
-current_block=-1
-in_target_block=false
 
-# Process output line by line
+# ncal -y structure: line 1 = year, then 3 blocks of (1 month header + 7 day rows)
+# Day rows 1-5 = Mon-Fri, rows 6-7 = Sat-Sun
 while IFS= read -r line; do
-  # Detect month header lines (contain "Tháng" but aren't DOW rows)
-  if [[ "$line" == *"Tháng"* ]] && ! [[ "$line" =~ ^(T[2-7]|CN) ]]; then
-    current_block=$((current_block + 1))
+  line_num=$((line_num + 1))
+
+  if [[ $line_num -eq 1 ]]; then
+    echo "$line"
+    continue
+  fi
+
+  block_row=$(( (line_num - 2) % 8 ))
+
+  if [[ $block_row -eq 0 ]]; then
+    current_block=$(( (line_num - 2) / 8 ))
 
     if $highlight_today && [[ $current_block -eq $target_block ]]; then
-      in_target_block=true
-      # Find column range for the current month by locating "Tháng N " in header
-      month_str="Tháng ${today_month} "
-      before="${line%%${month_str}*}"
-      if [[ "$before" != "$line" ]]; then
-        month_col_start=${#before}
-        rest="${line:$((month_col_start + ${#month_str}))}"
-        next_before="${rest%%Tháng*}"
-        if [[ "$next_before" != "$rest" ]]; then
-          month_col_end=$((month_col_start + ${#month_str} + ${#next_before}))
-        else
-          month_col_end=${#line}
-        fi
+      col_width=$(( ${#line} / 4 ))
+      month_col_start=$(( month_in_block * col_width ))
+      if [[ $month_in_block -eq 3 ]]; then
+        month_col_end=${#line}
+      else
+        month_col_end=$(( (month_in_block + 1) * col_width ))
       fi
-    else
-      in_target_block=false
     fi
 
     echo "$line"
     continue
   fi
 
-  # Highlight today's date on the matching day-of-week line
-  if $in_target_block && [[ $month_col_start -ge 0 ]] && [[ "$line" =~ ^${dow_label}[[:space:]] ]]; then
+  if $highlight_today && [[ $current_block -eq $target_block ]] && [[ $block_row -eq $today_dow ]] && [[ $month_col_start -ge 0 ]]; then
     prefix="${line:0:$month_col_start}"
     portion="${line:$month_col_start:$((month_col_end - month_col_start))}"
     suffix="${line:$month_col_end}"
@@ -70,13 +64,10 @@ while IFS= read -r line; do
     line="${prefix}${portion}${suffix}"
   fi
 
-  # Apply weekday/weekend coloring
-  if [[ "$line" =~ ^(T2|T3|T4|T5|T6) ]]; then
+  if [[ $block_row -le 5 ]]; then  # rows 1-5 = Mon-Fri
     echo -e "${WEEKDAY}${line}${RESET}"
-  elif [[ "$line" =~ ^(T7|CN) ]]; then
-    echo -e "${WEEKEND}${line}${RESET}"
   else
-    echo "$line"
+    echo -e "${WEEKEND}${line}${RESET}"
   fi
 done <<< "$ncal_output"
 

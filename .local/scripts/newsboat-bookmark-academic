@@ -4,7 +4,8 @@ url="$1"
 title="$2"
 description="$3"
 category="$4"
+author="$5"
 
 file="$HOME/Documents/Obsidian-Vault/200-Academic/0000-TODO-PLEASE-READ.md"
 
-echo -e "Title: $title\nLink: $url\n\n---\n" >> "$file"
+echo -e "Title: $title\nLink: $url\nDescription: $description\n\n---\n" >> "$file"

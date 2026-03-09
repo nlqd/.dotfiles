@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+
+tmpfile=/tmp/foot-scrollback
+cat > "$tmpfile"
+
+foot -e sh -c "
+  awk 'BEGIN { RS = \"[ \t\n]\" } length(\$0) > 4 && !seen[\$0]++' '$tmpfile' \
+  | fzf --no-sort --exact +i --tac --layout reverse --height 20 \
+  | tr -d '\n' > /tmp/foot-result
+"
+cat /tmp/foot-result | wtype -
+
+# result=$(awk 'BEGIN { RS = "[ \t\n]" } length($0) > 4 && !seen[$0]++' "$tmpfile" \
+#   | fzf --no-sort --exact +i --tac --layout reverse --height 20)
+# [[ -n "$result" ]] && wtype -- "$result"
+

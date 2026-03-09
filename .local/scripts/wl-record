@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+export PATH="$HOME/.local/bin:$PATH"
+
+start() {
+    # Get region selection from slurp (format: x,y WIDTHxHEIGHT)
+    GEOMETRY=$(slurp) || exit 1
+
+    # Parse slurp output: "x,y WIDTHxHEIGHT"
+    read -r POS SIZE <<< "${GEOMETRY/ / }"
+    IFS=',' read -r X Y <<< "$POS"
+    IFS='x' read -r W H <<< "$SIZE"
+
+    format="mp4"
+
+    wf-recorder -g "$GEOMETRY" -f ~/Videos/rec-$(date +%Y%m%d-%H%M).$format &
+    echo $! > /tmp/recpid
+
+    notify-send -t 1000 "Recording started"
+}
+
+end() {
+    kill -INT $(cat /tmp/recpid) && rm -f /tmp/recpid
+    notify-send -t 1000 "Recording stopped"
+}
+
+[[ -f /tmp/recpid ]] && end || start

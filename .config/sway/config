@@ -80,7 +80,7 @@ bindsym $mod+t           exec foot
 bindsym $mod+b           exec firefox
 bindsym $mod+d           exec dmenu_run $dmenu_flags
 bindsym $mod+Shift+d     exec i3-dmenu-desktop --dmenu='dmenu $dmenu_flags'
-bindsym $mod+F12         exec $dot_local/sway-server-mode-toggle
+bindsym $mod+F7          exec $dot_local/sway-server-mode-toggle
 bindsym $mod+Shift+m     exec swaymsg "output $laptop dpms toggle"
 bindsym $mod+Shift+e     exec swaynag -t warning -m 'This will end your Wayland session.' -B 'Yes, exit sway' 'swaymsg exit'
 bindsym $mod+Shift+x     exec swaynag -t warning -m 'Shut down the machine.' -B 'Yes, shutdown now' 'shutdown now' -B 'Yes, shutdown' 'shutdown'
