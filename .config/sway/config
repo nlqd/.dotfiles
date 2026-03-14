@@ -62,6 +62,7 @@ bindswitch --locked lid:on output $laptop disable; exec systemctl suspend
 bindswitch --locked lid:off output $laptop enable
 
 # Key bindings
+bindsym $mod+XF86AudioMute    exec pactl     set-source-mute @DEFAULT_SOURCE@ toggle
 bindsym XF86AudioMute         exec pactl     set-sink-mute   @DEFAULT_SINK@ toggle
 bindsym XF86AudioRaiseVolume  exec pactl     set-sink-volume @DEFAULT_SINK@ +5%
 bindsym XF86AudioLowerVolume  exec pactl     set-sink-volume @DEFAULT_SINK@ -5%

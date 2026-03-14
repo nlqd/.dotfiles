@@ -159,6 +159,10 @@
     /* No styles */
 }
 
+#pulseaudio.source-muted {
+    color: red;
+}
+
 #custom-spotify {
     color: rgb(102, 220, 105);
 }
