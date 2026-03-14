@@ -142,10 +142,9 @@ function hcloud-edit-zone() {
 plugins=(
   git
   docker
-  # emoji
+  emoji
   systemd
   vi-mode
-  # colored-man-pages
   # per-directory-history
   # qrcode
 )
