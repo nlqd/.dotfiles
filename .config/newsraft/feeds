@@ -1,5 +1,6 @@
 https://arxiviq.substack.com/feed
 https://bearblog.dev/discover/feed/
+https://raw.githubusercontent.com/huangboming/huggingface-daily-paper-feed/refs/heads/main/feed.xml "HF Daily Papers"
 
 https://aaadaaam.com/feed.xml
 https://adamj.eu/tech/atom.xml
@@ -15,6 +16,7 @@ https://codemadness.org/rss.xml
 https://daniel.haxx.se/blog/feed/
 https://dev.jimgrey.net/feed
 https://dnhkng.github.io/feed.xml
+https://erock.prose.sh/rss
 https://eugene-andrienko.com/feed.xml
 https://ezhik.jp/feed.xml
 https://gluer.org/atom/
@@ -28,7 +30,6 @@ https://lcamtuf.substack.com/feed
 https://lervag.github.io/index.xml
 https://lilianweng.github.io/index.xml
 https://livesys.se/index.xml
-https://ln.ht/_/feed/
 https://lucumr.pocoo.org/feed.atom
 https://martinfowler.com/feed.atom
 https://maurycyz.com/index.xml
@@ -37,6 +38,7 @@ https://mitxela.com/feed.xml
 https://mtrsk.capivaras.dev/atom/
 https://ohadravid.github.io/index.xml
 https://ploum.net/atom_en.xml
+https://prose.sh/rss.atom
 https://ryan.freumh.org/atom.xml
 https://sebastiano.tronto.net/blog/feed.xml
 https://sourcehut.org/blog/index.xml
@@ -56,6 +58,7 @@ https://yobibyte.github.io/feed.xml
 
 
 https://predictivehistory.substack.com/feed
+https://alexanderdugin.substack.com/feed
 https://herman.bearblog.dev/feed/
 https://tech.marksblogg.com/feeds/all.atom.xml
 
@@ -82,7 +85,8 @@ https://www.thecodedmessage.com/index.xml
 https://walters.app/blog/feed.atom
 https://zserge.com/rss.xml
 https://peterullrich.com/feed.xml
-https://unixdigest.com/feed.rss
+https://unixdigest.com/articles.xml
+https://unixdigest.com/tutorials.xml
 https://terokarvinen.com/index.xml
 https://hakibenita.com/feeds/all.atom.xml
 https://kyo.iroiro.party/en/rss.xml
@@ -106,3 +110,10 @@ $(curl -sL --get 'http://export.arxiv.org/api/query' --data-urlencode 'search_qu
 $(curl -sL --get 'http://export.arxiv.org/api/query' --data-urlencode 'search_query=(ti:"multi-task" OR ti:continual) AND (deep OR neural) AND (pareto OR nash OR stackelberg OR equilibrium OR "multi-objective")' --data-urlencode 'sortBy=lastUpdatedDate' --data-urlencode 'sortOrder=descending' --data-urlencode 'start=0' --data-urlencode 'max_results=200' | newsboat-arxiv-comments) "Multitask Game Theory 3"
 
 $(curl -sL --get 'http://export.arxiv.org/api/query' --data-urlencode 'search_query=ti:"multi-task" AND (deep OR neural) AND (pareto OR "multi-objective" OR "gradient conflict" OR nash)' --data-urlencode 'sortBy=lastUpdatedDate' --data-urlencode 'sortOrder=descending' --data-urlencode 'start=0' --data-urlencode 'max_results=200' | newsboat-arxiv-comments) "Deep Learning Neural Conflict"
+
+$(curl -sL 'https://dblp.org/search/publ/api?q=continual+learning&h=200&format=xml' | newsboat-dblp) "DBLP: Continual Learning"
+$(curl -sL 'https://dblp.org/search/publ/api?q=incremental+learning&h=200&format=xml' | newsboat-dblp) "DBLP: Incremental Learning"
+$(curl -sL 'https://dblp.org/search/publ/api?q=continual+pretraining&h=200&format=xml' | newsboat-dblp) "DBLP: Continual Pretraining"
+$(curl -sL 'https://dblp.org/search/publ/api?q=multi-task+learning&h=200&format=xml' | newsboat-dblp) "DBLP: Multi-task Learning"
+$(curl -sL 'https://dblp.org/search/publ/api?q=defect+inspection&h=200&format=xml' | newsboat-dblp) "DBLP: Defect Inspection"
+$(curl -sL 'https://dblp.org/search/publ/api?q=game+theory+deep+learning&h=200&format=xml' | newsboat-dblp) "DBLP: Game Theory Deep Learning"

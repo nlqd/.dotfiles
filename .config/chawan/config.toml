@@ -1,6 +1,9 @@
 [buffer]
 images = true
 
+[display]
+image-mode = 'sixel'
+
 [external]
 editor = 'nvim'
 copy-cmd = 'wl-copy'

@@ -23,6 +23,7 @@
         "backlight",
         "pulseaudio",
         "pulseaudio#mic",
+        "custom/wireguard",
     ],
 
     // -------------------------------------------------------------------------
@@ -97,6 +98,15 @@
         "tooltip": true
     },
 
+    "custom/wireguard": {
+        "format": "{}",
+        "exec": "echo VPN",
+        "exec-if": "ip link show ea 2>/dev/null",
+        "interval": 30,
+        "return-type": "",
+        "tooltip": false
+    },
+
     "memory": {
         "interval": 5,
         "format": "󰍛 {}%", // Icon: memory
@@ -108,7 +118,8 @@
 
     "network": {
         "interval": 5,
-        "format-wifi": "  {signalStrength}%", // Icon: wifi
+        // "format-wifi": "  {signalStrength}%", // Icon: wifi
+        "format-wifi": "  {bandwidthDownBits}", // Icon: wifi
         "format-ethernet": "  {ifname}", // Icon: ethernet
         "format-disconnected": "⚠  Disconnected",
         "tooltip-format": "{essid}: {ifname}: {ipaddr}"

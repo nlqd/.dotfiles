@@ -1,0 +1,79 @@
+#!/usr/bin/env python
+
+import sys
+import xml.etree.ElementTree as ET
+from datetime import datetime
+
+data = sys.stdin.buffer.read()
+if not data:
+    sys.exit(0)
+
+try:
+    root = ET.fromstring(data)
+except ET.ParseError:
+    sys.exit(1)
+
+ATOM = "http://www.w3.org/2005/Atom"
+ET.register_namespace("", ATOM)
+
+feed = ET.Element(f"{{{ATOM}}}feed")
+ET.SubElement(feed, f"{{{ATOM}}}title").text = "DBLP Search"
+ET.SubElement(feed, f"{{{ATOM}}}updated").text = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+for hit in root.findall(".//hit"):
+    info = hit.find("info")
+    if info is None:
+        continue
+
+    title_el = info.find("title")
+    title = title_el.text.rstrip(".") if title_el is not None and title_el.text else "Untitled"
+
+    ee = info.find("ee")
+    link = ee.text if ee is not None and ee.text else ""
+    if not link:
+        url_el = info.find("url")
+        link = url_el.text if url_el is not None and url_el.text else ""
+
+    venue_el = info.find("venue")
+    venue = venue_el.text if venue_el is not None and venue_el.text else ""
+
+    year_el = info.find("year")
+    year = year_el.text if year_el is not None and year_el.text else ""
+
+    authors_el = info.find("authors")
+    authors = []
+    if authors_el is not None:
+        for a in authors_el.findall("author"):
+            if a.text:
+                authors.append(a.text)
+
+    # skip arxiv preprints — user already has arxiv feeds
+    key_el = info.find("key")
+    key = key_el.text if key_el is not None and key_el.text else ""
+    if key.startswith("journals/corr/"):
+        continue
+
+    entry = ET.SubElement(feed, f"{{{ATOM}}}entry")
+    display_title = f"[{venue}] {title}" if venue else title
+    ET.SubElement(entry, f"{{{ATOM}}}title").text = display_title
+    ET.SubElement(entry, f"{{{ATOM}}}id").text = link or key
+    link_tag = ET.SubElement(entry, f"{{{ATOM}}}link")
+    link_tag.set("href", link)
+
+    if year:
+        ET.SubElement(entry, f"{{{ATOM}}}updated").text = f"{year}-01-01T00:00:00Z"
+
+    summary_parts = []
+    if venue and year:
+        summary_parts.append(f"{venue} {year}")
+    elif venue:
+        summary_parts.append(venue)
+    if authors:
+        summary_parts.append(", ".join(authors))
+    ET.SubElement(entry, f"{{{ATOM}}}summary").text = "\n".join(summary_parts)
+
+    for author_name in authors:
+        author_tag = ET.SubElement(entry, f"{{{ATOM}}}author")
+        ET.SubElement(author_tag, f"{{{ATOM}}}name").text = author_name
+
+sys.stdout.buffer.write(ET.tostring(feed, encoding="utf-8", xml_declaration=True))

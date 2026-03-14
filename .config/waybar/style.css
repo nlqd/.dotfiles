@@ -1,7 +1,7 @@
 @define-color foreground #07080d;
 @define-color background #c4c6cd;
-@define-color color2 #004c63;
-@define-color color5 #590008;
+@define-color color2 #004c63; /* @color2 */
+@define-color color5 #590008; /* blue */
 
 /* =============================================================================
  *
@@ -17,22 +17,22 @@
 
 @keyframes blink-warning {
     70% {
-        color: white;
+        color: @background;
     }
 
     to {
-        color: white;
+        color: @background;
         background-color: @color2;
     }
 }
 
 @keyframes blink-critical {
     70% {
-      color: white;
+      color: @background;
     }
 
     to {
-        color: white;
+        color: @background;
         background-color: @color5;
     }
 }
@@ -117,7 +117,7 @@
 }
 
 #cpu.critical {
-    color: red;
+    color: @color2;
 }
 
 #memory {
@@ -131,20 +131,21 @@
 }
 
 #memory.critical {
-    color: red;
+    color: @color2;
     animation-name: blink-critical;
     animation-duration: 2s;
 }
 
 #mode {
     background: #64727D;
-    border-top: 2px solid white;
+    border-top: 2px solid @background;
     /* To compensate for the top border and still have vertical centering */
     padding-bottom: 2px;
 }
 
 #network {
     /* No styles */
+    min-width: 50px;
 }
 
 #network.disconnected {
@@ -160,7 +161,8 @@
 }
 
 #pulseaudio.source-muted {
-    color: red;
+    color: @background;
+    background-color: @color5;
 }
 
 #custom-spotify {
@@ -168,10 +170,16 @@
 }
 
 #custom-server-mode {
-    color: white;
+    color: @background;
     background-color: rgb(255, 0, 0);
     padding-left: 12px;
     padding-right: 12px;
+}
+
+#custom-wireguard {
+    color: @background;
+    background-color: @color2;
+    padding: 0px 12px;
 }
 
 #temperature {
@@ -179,7 +187,7 @@
 }
 
 #temperature.critical {
-    color: red;
+    color: @color2;
 }
 
 #tray {
