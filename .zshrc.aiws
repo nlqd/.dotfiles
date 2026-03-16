@@ -101,7 +101,10 @@ function pn() {
       ln -s ~/dev/datum-monorepo/.mcp.json .mcp.json
       ln -s ~/dev/datum-monorepo/.claude/CLAUDE.md .claude/
       ln -s ~/dev/datum-monorepo/.claude/settings.local.json .claude/
-      ln -s ~/dev/datum-monorepo/.claude/commands/ .claude/
+      ln -s ~/dev/datum-monorepo/.claude/commands/master-worktree-init.md .claude/commands/master-worktree-init.md
+      ln -s ~/dev/datum-monorepo/.claude/commands/start.md .claude/commands/start.md
+      ln -s ~/dev/datum-monorepo/.claude/commands/start-new-day.md .claude/commands/start-new-day.md
+      ln -s ~/dev/datum-monorepo/.claude/commands/rodney-datum.md .claude/commands/rodney-datum.md
       pn i
       pn -F env generate-env development
       pn -F env generate-env test
@@ -157,3 +160,4 @@ tmux has-session -t main 2> /dev/null || tmux new-session -d -s main
 
 eval "$(zoxide init zsh)"
 eval "$(starship init zsh)"
+eval "$(gh completion --shell zsh)"

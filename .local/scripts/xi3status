@@ -6,8 +6,6 @@ get_bt_battery() {
     local battery=$(bluetoothctl info "$device" 2>/dev/null | grep -oP 'Battery Percentage: 0x[0-9a-f]+ \(\K\d+')
     if [[ -n "$battery" ]]; then
         echo "${icon} ${battery}%"
-    else
-        echo ""
     fi
 }
 
@@ -15,14 +13,12 @@ get_gpu_load() {
     local gpu_load=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null)
     if [[ -n "$gpu_load" ]]; then
         printf "🤖 %3d%%" "$gpu_load"
-    else
-        echo ""
     fi
 }
 
 get_weather() {
     local cache_file="/tmp/wttr_cache"
-    local cache_time=600  # 10 minutes
+    local cache_time=600
 
     if [[ -f "$cache_file" ]] && [[ $(($(date +%s) - $(stat -c %Y "$cache_file"))) -lt $cache_time ]]; then
         cat "$cache_file"
@@ -39,49 +35,66 @@ get_weather() {
 
 get_xrecord() {
     if [[ -f "/tmp/recpid" ]]; then
-        echo "REC: ● "
-    else
-        echo ""
+        echo "REC: ●"
     fi
 }
 
-# Cache files for async updates
+# Write to cache only if command produced output, preserving last known value
+write_cache() {
+    local file=$1
+    shift
+    local result=$("$@")
+    if [[ -n "$result" ]]; then
+        echo "$result" > "$file"
+    fi
+}
+
 _cache_dir="/tmp/xi3status_cache"
 mkdir -p "$_cache_dir"
 
 update_slow_data() {
-    get_bt_battery "58:18:62:01:E5:78" "🎧" > "$_cache_dir/xm6_bat" &
-    get_bt_battery "D3:AC:8D:04:52:D5" "⌨" > "$_cache_dir/corne_bat" &
-    get_gpu_load > "$_cache_dir/gpu_load" &
-    get_weather > "$_cache_dir/weather" &
+    write_cache "$_cache_dir/xm6_bat" get_bt_battery "58:18:62:01:E5:78" "🎧" &
+    write_cache "$_cache_dir/corne_bat" get_bt_battery "D3:AC:8D:04:52:D5" "⌨" &
+    write_cache "$_cache_dir/gpu_load" get_gpu_load &
+    write_cache "$_cache_dir/weather" get_weather &
     wait
 }
 
-# Run initial background update
 update_slow_data &
-
 _slow_update_counter=0
 
 i3status "$@" | while :
 do
     read -r line
 
-    # Update slow data every 5 cycles instead of every cycle
     if (( _slow_update_counter % 5 == 0 )); then
         update_slow_data &
     fi
-    (( _slow_update_counter++ ))
+    _slow_update_counter=$(( _slow_update_counter + 1 ))
 
-    # Read from cache files (instant, never blocks)
     xm6_bat=$(cat "$_cache_dir/xm6_bat" 2>/dev/null)
     corne_bat=$(cat "$_cache_dir/corne_bat" 2>/dev/null)
     gpu_load=$(cat "$_cache_dir/gpu_load" 2>/dev/null)
+    weather=$(cat "$_cache_dir/weather" 2>/dev/null)
     rec=$(get_xrecord)
 
-    status_items=""
-    [[ -n "$xm6_bat" ]] && status_items+=" ${xm6_bat} |"
-    [[ -n "$corne_bat" ]] && status_items+=" ${corne_bat} |"
-    [[ -n "$rec" ]] && status_items+=" ${rec} |"
+    # Build segments, skip empties
+    segments=()
+    [[ -n "$weather" ]] && segments+=("$weather")
+    segments+=("🔆 $(xbrightness)")
+    [[ -n "$gpu_load" ]] && segments+=("$gpu_load")
+    [[ -n "$xm6_bat" ]] && segments+=("$xm6_bat")
+    [[ -n "$corne_bat" ]] && segments+=("$corne_bat")
+    [[ -n "$rec" ]] && segments+=("$rec")
 
-    echo "${line} | 🔆 $(xbrightness) | ${gpu_load} |${status_items}" || exit 1
+    # Join with " | "
+    custom=$(IFS='|'; echo "${segments[*]}" | sed 's/|/ | /g')
+
+    clock="$(date +'%a %Y-%m-%d %H:%M')"
+    trimmed="${line// /}"
+    if [[ -n "$trimmed" ]]; then
+        echo "${clock} | ${line} | ${custom}" || exit 1
+    else
+        echo "${clock} | ${custom}" || exit 1
+    fi
 done

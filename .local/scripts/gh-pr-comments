@@ -30,6 +30,7 @@ response=$(gh api graphql -f query='
           nodes {
             author { login }
             state
+            body
             submittedAt
           }
         }
@@ -67,7 +68,7 @@ if $OUTPUT_JSON; then
     baseRefName,
     headRefName,
     reviews: .latestReviews.nodes,
-    comments: [.comments.nodes[] | select(.author.login != "claude")],
+    comments: [.comments.nodes[] | select(.author.login != "claude" and .author.login != "github-actions")],
     reviewThreads: .reviewThreads.nodes
   }'
   exit 0
@@ -76,7 +77,7 @@ fi
 echo "$response" | jq -r --arg num "$number" '
 .data.repository.pullRequest as $pr |
 ($pr.latestReviews.nodes | length) as $review_count |
-[$pr.comments.nodes[] | select(.author.login != "claude")] as $conv |
+[$pr.comments.nodes[] | select(.author.login != "claude" and .author.login != "github-actions")] as $conv |
 [$pr.reviewThreads.nodes[] | select(.isResolved)] as $resolved |
 [$pr.reviewThreads.nodes[] | select(.isResolved | not)] as $open |
 
@@ -100,7 +101,7 @@ REVIEWER        STATE               DATE
       elif .state == "COMMENTED" then 11
       elif .state == "DISMISSED" then 10
       else (.state | length) end
-    ))) \(.submittedAt | split("T")[0])"
+    ))) \(.submittedAt | split("T")[0])\(if .body and .body != "" then "\n                \(.body | gsub("\n"; "\n                "))" else "" end)"
   ] | join("\n")
 end)
 \(if ($conv | length) > 0 then "
@@ -111,7 +112,16 @@ CONVERSATION COMMENTS
   \(.body | gsub("\n"; "\n  "))
 "] | join("\n"))
 " else "" end)\(if ($resolved | length) > 0 then "
-(\($resolved | length) resolved thread\(if ($resolved | length) > 1 then "s" else "" end))
+RESOLVED THREADS (\($resolved | length))
+─────────────────────────────────────────────────────
+\([$resolved[] |
+  "\(.comments.nodes[0].path // "(no file)")\(if .comments.nodes[0].line then ":\(.comments.nodes[0].line)" else "" end) (resolved by @\(.resolvedBy.login))
+
+\([.comments.nodes[] |
+  "\(if .replyTo then "↳ " else "" end)@\(.author.login) [\(.databaseId)] \(.createdAt | split("T")[0])
+  \(.body | gsub("\n"; "\n  "))"
+] | join("\n\n"))"
+] | join("\n\n─────────────────────────────────────────────────────\n"))
 " else "" end)\(if ($open | length) > 0 then "
 OPEN REVIEW THREADS (\($open | length))
 ═════════════════════════════════════════════════════

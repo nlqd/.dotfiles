@@ -195,7 +195,30 @@ get_tasks_in_section() {
   api_get "/sections/${section_gid}/tasks?opt_fields=${fields}"
 }
 get_task_details() { api_get "/tasks/$1?opt_fields=name,notes,html_notes,completed,due_on,assignee.name,assignee.gid,created_at,modified_at,memberships.section.name,dependencies.name,dependencies.gid,dependents.name,dependents.gid"; }
-get_task_comments() { api_get "/tasks/$1/stories?opt_fields=text,created_by.name,created_at,type"; }
+get_task_comments() { api_get "/tasks/$1/stories?opt_fields=text,html_text,created_by.name,created_at,type"; }
+
+format_comment_body() {
+  jq -r '.data[] | select(.type == "comment") |
+    "[\(.created_at)] \(.created_by.name): \(
+      (if .html_text then
+        .html_text
+        | gsub("<br\\s*/?>"; "\n")
+        | gsub("</?(body|p|div|ol|ul|li)[^>]*>"; "\n")
+        | gsub("<a[^>]*>"; "")
+        | gsub("</a>"; "")
+        | gsub("<[^>]*>"; "")
+        | gsub("&amp;"; "&")
+        | gsub("&lt;"; "<")
+        | gsub("&gt;"; ">")
+        | gsub("&nbsp;"; " ")
+        | gsub("\\n{3,}"; "\n\n")
+        | gsub("^\\n+"; "")
+        | gsub("\\n+$"; "")
+      else
+        .text // ""
+      end)
+    )\n"'
+}
 get_task_attachments() { api_get "/attachments?parent=$1&opt_fields=name,download_url,permanent_url,view_url,size,created_at,resource_subtype"; }
 search_tasks() { api_get "/workspaces/$1/tasks/search?text=$2&opt_fields=name,completed,due_on,assignee.name"; }
 
@@ -232,7 +255,7 @@ Description:
 $(echo "$details" | jq -r '.data.notes // "No description"')
 
 Comments:
-$(echo "$comments" | jq -r '.data[] | select(.type == "comment") | "[\(.created_at)] \(.created_by.name): \(.text)\n"')
+$(echo "$comments" | format_comment_body)
 "
 }
 

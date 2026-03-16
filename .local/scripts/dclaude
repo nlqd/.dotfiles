@@ -33,15 +33,16 @@ if [ -f "$PWD/.git" ]; then
     extra_binds+=(--ro-bind $HOME/.gitconfig $HOME/.gitconfig)
 fi
 
-# Find symlinks under $PWD (skip node_modules for speed) whose resolved targets
-# live outside $PWD, then ro-bind each unique target.
+# Find symlinks under $PWD and $HOME/.claude (skip node_modules for speed)
+# whose resolved targets live outside their root, then ro-bind each unique target.
 while IFS= read -r -d '' link; do
     target=$(realpath "$link" 2>/dev/null) || continue
     [[ "$target" == "$PWD"/* ]] && continue
+    [[ "$target" == "$HOME/.claude"/* ]] && continue
     [ -z "${seen_binds[$target]}" ] || continue
     extra_binds+=(--ro-bind "$target" "$target")
     seen_binds[$target]=1
-done < <(find "$PWD" -not -path "*/node_modules/*" -type l -print0 2>/dev/null)
+done < <(find "$PWD" "$HOME/.claude" -not -path "*/node_modules/*" -type l -print0 2>/dev/null)
 
 exec /usr/bin/bwrap \
     --bind /tmp /tmp \
