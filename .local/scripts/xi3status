@@ -39,18 +39,21 @@ get_xrecord() {
     fi
 }
 
-# Write to cache only if command produced output, preserving last known value
+_cache_dir="/tmp/xi3status_cache"
+_cache_ttl=30
+mkdir -p "$_cache_dir"
+
+# Write result to cache; if empty, keep old value up to TTL then expire
 write_cache() {
     local file=$1
     shift
     local result=$("$@")
     if [[ -n "$result" ]]; then
         echo "$result" > "$file"
+    elif [[ -f "$file" ]] && (( $(date +%s) - $(stat -c %Y "$file") > _cache_ttl )); then
+        rm -f "$file"
     fi
 }
-
-_cache_dir="/tmp/xi3status_cache"
-mkdir -p "$_cache_dir"
 
 update_slow_data() {
     write_cache "$_cache_dir/xm6_bat" get_bt_battery "58:18:62:01:E5:78" "🎧" &
@@ -80,6 +83,7 @@ do
 
     # Build segments, skip empties
     segments=()
+    segments+=("$(date +'%a %Y-%m-%d %H:%M')")
     [[ -n "$weather" ]] && segments+=("$weather")
     segments+=("🔆 $(xbrightness)")
     [[ -n "$gpu_load" ]] && segments+=("$gpu_load")
@@ -90,11 +94,10 @@ do
     # Join with " | "
     custom=$(IFS='|'; echo "${segments[*]}" | sed 's/|/ | /g')
 
-    clock="$(date +'%a %Y-%m-%d %H:%M')"
     trimmed="${line// /}"
     if [[ -n "$trimmed" ]]; then
-        echo "${clock} | ${line} | ${custom}" || exit 1
+        echo "${line} | ${custom}" || exit 1
     else
-        echo "${clock} | ${custom}" || exit 1
+        echo "${custom}" || exit 1
     fi
 done

@@ -1,0 +1,714 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""helpmine - mine structured data from CLI --help text
+
+A lightweight pattern-based parser with a vim-errorformat-inspired DSL.
+Define what help lines look like with {{ captures }}, and the engine
+extracts structured JSON from any CLI's help output.
+
+Usage:
+  helpmine learn <command>...          Generate a .helpfmt template
+  helpmine mine <command>...           Recursively extract all subcommands
+  helpmine parse <file>                Parse a saved help text file
+  helpmine setup zsh                   Wire completions into .zshrc
+  helpmine generate zsh <tool>...      Generate + cache zsh completions
+  helpmine default-template            Print the built-in template
+"""
+
+import re
+import sys
+import json
+import subprocess
+import argparse
+from dataclasses import dataclass
+from pathlib import Path
+
+
+# ── Pattern DSL ──────────────────────────────────────────────────
+#
+# Template syntax (in .helpfmt files):
+#
+#   @type
+#   pattern line
+#
+#   @type
+#   pattern line
+#
+# Where pattern line uses:
+#   {{ name }}     capture a single token (\S+)
+#   {{ name... }}  capture rest of line (.+)
+#   2+ spaces      gap separator (\s{2,})
+#   1 space        flexible whitespace (\s+)
+#   other chars    literal match
+#
+# Patterns are tried in order. First match wins.
+
+@dataclass
+class Pattern:
+    kind: str
+    template: str
+    regex: re.Pattern
+    captures: list[str]
+
+
+def compile_template(template: str) -> tuple[re.Pattern, list[str]]:
+    """Compile a template string into (regex, capture_names)."""
+    captures = []
+    parts = []
+
+    stripped = template.lstrip()
+    indent = len(template) - len(stripped)
+    if indent > 0:
+        parts.append(r"\s{" + str(max(1, indent)) + r",}")
+
+    pos = 0
+    while pos < len(stripped):
+        # {{ name }} or {{ name... }}
+        m = re.match(r"\{\{\s*(\w+)(\.{3})?\s*\}\}", stripped[pos:])
+        if m:
+            name = m.group(1)
+            rest = bool(m.group(2))
+            captures.append(name)
+            if rest:
+                parts.append(f"(?P<{name}>.+)")
+            else:
+                parts.append(f"(?P<{name}>\\S+)")
+            pos += m.end()
+            continue
+
+        # 2+ spaces → gap
+        ws = re.match(r" {2,}", stripped[pos:])
+        if ws:
+            parts.append(r"\s{2,}")
+            pos += ws.end()
+            continue
+
+        # single space → flexible
+        if stripped[pos] == " ":
+            parts.append(r"\s+")
+            pos += 1
+            continue
+
+        # literal
+        parts.append(re.escape(stripped[pos]))
+        pos += 1
+
+    return re.compile("^" + "".join(parts) + r"\s*$"), captures
+
+
+def parse_helpfmt(text: str) -> list[Pattern]:
+    """Parse a .helpfmt template into a list of Patterns."""
+    patterns = []
+    lines = text.strip().split("\n")
+    i = 0
+    while i < len(lines):
+        if lines[i].startswith("@"):
+            kind = lines[i][1:].strip()
+            i += 1
+            if i < len(lines) and lines[i].strip():
+                tmpl = lines[i]
+                regex, caps = compile_template(tmpl)
+                patterns.append(Pattern(kind, tmpl, regex, caps))
+            i += 1
+            while i < len(lines) and not lines[i].strip():
+                i += 1
+        else:
+            i += 1
+    return patterns
+
+
+# ── Default Template ─────────────────────────────────────────────
+
+DEFAULT_TEMPLATE = """\
+@usage
+Usage: {{ prog }} {{ rest... }}
+
+@usage
+usage: {{ prog }} {{ rest... }}
+
+@section
+{{ title... }}:
+
+@option
+ -{{ short }}, --{{ long }}={{ val }}  {{ desc... }}
+
+@option
+ -{{ short }}, --{{ long }} <{{ val }}>  {{ desc... }}
+
+@option
+ -{{ short }}, --{{ long }}  {{ desc... }}
+
+@option
+     --{{ long }}={{ val }}  {{ desc... }}
+
+@option
+     --{{ long }} <{{ val }}>  {{ desc... }}
+
+@option
+     --{{ long }}  {{ desc... }}
+
+@option
+ --{{ long }}={{ val }}  {{ desc... }}
+
+@option
+ --{{ long }} <{{ val }}>  {{ desc... }}
+
+@option
+ --{{ long }}  {{ desc... }}
+
+@option
+ -{{ short }} {{ val }}  {{ desc... }}
+
+@option
+ -{{ short }}  {{ desc... }}
+
+@option_nodesc
+ -{{ short }}, --{{ long }}={{ val }}
+
+@option_nodesc
+ -{{ short }}, --{{ long }} <{{ val }}>
+
+@option_nodesc
+ -{{ short }}, --{{ long }}
+
+@option_nodesc
+     --{{ long }}={{ val }}
+
+@option_nodesc
+     --{{ long }} <{{ val }}>
+
+@option_nodesc
+     --{{ long }}
+
+@option_nodesc
+ --{{ long }}={{ val }}
+
+@option_nodesc
+ --{{ long }} <{{ val }}>
+
+@option_nodesc
+ --{{ long }}
+
+@option_nodesc
+ -{{ short }}
+
+@command
+ {{ name }}  {{ desc... }}
+
+@continuation
+       {{ text... }}
+"""
+
+
+# ── Classifier ───────────────────────────────────────────────────
+
+@dataclass
+class Match:
+    kind: str
+    captures: dict[str, str]
+    raw: str
+    confidence: float = 1.0
+
+
+def classify_lines(lines: list[str], patterns: list[Pattern]) -> list[Match | None]:
+    out = []
+    for line in lines:
+        if not line.strip():
+            out.append(None)
+            continue
+        matched = False
+        for p in patterns:
+            m = p.regex.match(line)
+            if m:
+                out.append(Match(
+                    kind=p.kind,
+                    captures={n: m.group(n).strip() for n in p.captures},
+                    raw=line,
+                ))
+                matched = True
+                break
+        if not matched:
+            out.append(Match("unknown", {"text": line.strip()}, line, 0.0))
+    return out
+
+
+# ── Structure Builder ────────────────────────────────────────────
+
+def build_structure(matches: list[Match | None]) -> dict:
+    result: dict = {"options": [], "commands": [], "usage": [], "unknown": []}
+    section = None
+    last = None
+
+    for m in matches:
+        if m is None:
+            last = None
+            continue
+
+        if m.kind == "usage":
+            result["usage"].append(m.captures.get("rest", ""))
+        elif m.kind == "section":
+            section = m.captures.get("title", "").rstrip(":")
+        elif m.kind in ("option", "option_nodesc"):
+            entry = {**m.captures}
+            if section:
+                entry["section"] = section
+            result["options"].append(entry)
+            last = entry
+        elif m.kind == "command":
+            entry = {**m.captures}
+            if section:
+                entry["section"] = section
+            result["commands"].append(entry)
+            last = entry
+        elif m.kind == "continuation" and last:
+            text = m.captures.get("text", "")
+            last["desc"] = last.get("desc", "") + " " + text
+        elif m.kind == "unknown":
+            result["unknown"].append(m.raw.strip())
+
+    return {k: v for k, v in result.items() if v}
+
+
+# ── Scraper ──────────────────────────────────────────────────────
+
+def get_help(cmd: list[str]) -> str | None:
+    for variant in [[*cmd, "--help"], [*cmd, "-h"], [*cmd, "help"]]:
+        try:
+            r = subprocess.run(variant, capture_output=True, text=True, timeout=10)
+            text = r.stdout or r.stderr
+            if text and len(text.strip()) > 10:
+                return text
+        except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError):
+            continue
+    return None
+
+
+def mine(cmd: list[str], patterns: list[Pattern], depth: int = 3, _level: int = 0) -> dict:
+    text = get_help(cmd)
+    if not text:
+        return {"command": " ".join(cmd), "error": "no help text"}
+
+    matches = classify_lines(text.split("\n"), patterns)
+    result = build_structure(matches)
+    result["command"] = " ".join(cmd)
+
+    n_total = sum(1 for m in matches if m is not None)
+    n_unknown = len(result.get("unknown", []))
+    result["_stats"] = {"matched": n_total - n_unknown, "unknown": n_unknown, "total": n_total}
+
+    if _level < depth and "commands" in result:
+        subs = []
+        for c in result["commands"]:
+            name = c.get("name", "")
+            if name and not name.startswith("-"):
+                subs.append(mine([*cmd, name], patterns, depth, _level + 1))
+        if subs:
+            result["subcommands"] = subs
+
+    return result
+
+
+# ── Template Learner ─────────────────────────────────────────────
+
+def learn_heuristic(text: str) -> str:
+    lines = text.split("\n")
+
+    has_comma = any(re.search(r"^\s+-\w,\s+--", l) for l in lines)
+    has_slash = any(re.search(r"^\s+-\w/--", l) for l in lines)
+    has_eq = any(re.search(r"--[\w-]+=", l) for l in lines)
+    has_angle = any(re.search(r"--[\w-]+\s+<", l) for l in lines)
+    has_upper_val = any(re.search(r"--[\w-]+\s+[A-Z]{2,}\b", l) for l in lines)
+    # detect indentation
+    opt_indents = [len(m.group(1)) for l in lines if (m := re.match(r"^(\s+)-", l))]
+    indent = min(opt_indents) if opt_indents else 2
+    pad = " " * indent
+
+    # detect if some long options have no short form (indented with spaces)
+    has_long_only_aligned = any(
+        re.match(r"^\s{4,}--", l) for l in lines
+    )
+    long_pad = " " * (indent + 4) if has_long_only_aligned else pad
+
+    parts = []
+    parts.append("@usage\nUsage: {{ prog }} {{ rest... }}\n")
+    parts.append("@usage\nusage: {{ prog }} {{ rest... }}\n")
+    parts.append("@section\n{{ title... }}:\n")
+
+    # option patterns: most specific first
+    if has_comma:
+        if has_eq:
+            parts.append(f"@option\n{pad}-{{{{ short }}}}, --{{{{ long }}}}={{{{ val }}}}  {{{{ desc... }}}}\n")
+        if has_angle:
+            parts.append(f"@option\n{pad}-{{{{ short }}}}, --{{{{ long }}}} <{{{{ val }}}}>  {{{{ desc... }}}}\n")
+        if has_upper_val:
+            parts.append(f"@option\n{pad}-{{{{ short }}}}, --{{{{ long }}}} {{{{ val }}}}  {{{{ desc... }}}}\n")
+        parts.append(f"@option\n{pad}-{{{{ short }}}}, --{{{{ long }}}}  {{{{ desc... }}}}\n")
+
+    if has_slash:
+        parts.append(f"@option\n{pad}-{{{{ short }}}}/--{{{{ long }}}}  {{{{ desc... }}}}\n")
+
+    if has_long_only_aligned:
+        if has_eq:
+            parts.append(f"@option\n{long_pad}--{{{{ long }}}}={{{{ val }}}}  {{{{ desc... }}}}\n")
+        if has_angle:
+            parts.append(f"@option\n{long_pad}--{{{{ long }}}} <{{{{ val }}}}>  {{{{ desc... }}}}\n")
+        parts.append(f"@option\n{long_pad}--{{{{ long }}}}  {{{{ desc... }}}}\n")
+
+    if has_eq:
+        parts.append(f"@option\n{pad}--{{{{ long }}}}={{{{ val }}}}  {{{{ desc... }}}}\n")
+    if has_angle:
+        parts.append(f"@option\n{pad}--{{{{ long }}}} <{{{{ val }}}}>  {{{{ desc... }}}}\n")
+    parts.append(f"@option\n{pad}--{{{{ long }}}}  {{{{ desc... }}}}\n")
+    parts.append(f"@option\n{pad}-{{{{ short }}}}  {{{{ desc... }}}}\n")
+
+    parts.append(f"@command\n{pad}{{{{ name }}}}  {{{{ desc... }}}}\n")
+
+    cont_pad = " " * (indent + 6)
+    parts.append(f"@continuation\n{cont_pad}{{{{ text... }}}}")
+
+    return "\n".join(parts)
+
+
+# ── Zsh Completion Generator ─────────────────────────────────────
+
+VAL_ACTIONS = {
+    "file": "_files", "FILE": "_files", "path": "_files", "PATH": "_files",
+    "filename": "_files", "FILENAME": "_files",
+    "dir": "_directories", "DIR": "_directories", "directory": "_directories",
+    "DIRECTORY": "_directories", "folder": "_directories", "FOLDER": "_directories",
+    "command": "_command_names", "CMD": "_command_names", "COMMAND": "_command_names",
+    "host": "_hosts", "HOST": "_hosts", "hostname": "_hosts", "HOSTNAME": "_hosts",
+    "user": "_users", "USER": "_users", "username": "_users", "USERNAME": "_users",
+}
+
+
+def _extract_possible_values(desc: str) -> list[str] | None:
+    """Pull enum values from description like '[possible values: auto, always, never]'."""
+    m = re.search(r"\[possible values:\s*([^\]]+)\]", desc, re.IGNORECASE)
+    if not m:
+        m = re.search(r"\(one of:\s*([^)]+)\)", desc, re.IGNORECASE)
+    if not m:
+        m = re.search(r"\(values:\s*([^)]+)\)", desc, re.IGNORECASE)
+    if m:
+        return [v.strip() for v in m.group(1).split(",") if v.strip()]
+    return None
+
+
+def _escape_zsh(s: str) -> str:
+    """Escape characters that are special in zsh completion descriptions."""
+    return s.replace("'", "'\\''").replace("[", "\\[").replace("]", "\\]")
+
+
+def _opt_to_argspec(opt: dict) -> str:
+    """Convert one helpmine option dict to a zsh _arguments spec string."""
+    short = opt.get("short", "")
+    long = opt.get("long", "")
+    val = opt.get("val", "")
+    desc = opt.get("desc", "")
+
+    # strip trailing dots from clap-style flags like --quiet...
+    long = long.rstrip(".")
+    short = short.rstrip(".")
+
+    desc_clean = _escape_zsh(desc)
+
+    # value completion action
+    val_action = ""
+    if val:
+        possible = _extract_possible_values(desc) if desc else None
+        if possible:
+            val_action = f":{val}:({' '.join(possible)})"
+        elif val in VAL_ACTIONS:
+            val_action = f":{val}:{VAL_ACTIONS[val]}"
+        else:
+            val_action = f":{val}:"
+
+    if short and long:
+        excl = f"(-{short} --{long})"
+        return f"'{excl}'{{{'-' + short + ',--' + long}}}'[{desc_clean}]'{val_action}"
+    elif long:
+        return f"'--{long}[{desc_clean}]'{val_action}"
+    elif short:
+        return f"'-{short}[{desc_clean}]'{val_action}"
+    return ""
+
+
+def _funcname(cmd_path: list[str]) -> str:
+    """Generate zsh function name from command path: ['docker', 'container', 'ls'] -> _docker_container_ls."""
+    return "_" + "_".join(c.replace("-", "_") for c in cmd_path)
+
+
+def _generate_zsh_function(node: dict, cmd_path: list[str]) -> list[str]:
+    """Generate zsh completion function(s) for a command node. Returns lines."""
+    lines = []
+    fname = _funcname(cmd_path)
+    options = node.get("options", [])
+    commands = node.get("commands", [])
+    subcommands = node.get("subcommands", [])
+
+    # build lookup: subcommand name -> subcommand node
+    sub_lookup = {}
+    for sub in subcommands:
+        sub_cmd = sub.get("command", "")
+        sub_name = sub_cmd.split()[-1] if sub_cmd else ""
+        if sub_name:
+            sub_lookup[sub_name] = sub
+
+    lines.append(f"{fname}() {{")
+    lines.append("    local curcontext=\"$curcontext\" state line")
+    lines.append("    typeset -A opt_args")
+    lines.append("")
+
+    arg_specs = []
+    for opt in options:
+        spec = _opt_to_argspec(opt)
+        if spec:
+            arg_specs.append(spec)
+
+    if commands:
+        lines.append("    _arguments -C \\")
+        for spec in arg_specs:
+            lines.append(f"        {spec} \\")
+        lines.append("        '1:command:->commands' \\")
+        lines.append("        '*::arg:->args' \\")
+        lines.append("        && return")
+        lines.append("")
+        lines.append("    case $state in")
+        lines.append("        commands)")
+        lines.append("            local -a commands=(")
+        for cmd in commands:
+            name = cmd.get("name", "")
+            desc = _escape_zsh(cmd.get("desc", ""))
+            if name:
+                lines.append(f"                '{name}:{desc}'")
+        lines.append("            )")
+        lines.append("            _describe 'command' commands")
+        lines.append("            ;;")
+        lines.append("        args)")
+        lines.append("            case $line[1] in")
+        for cmd in commands:
+            name = cmd.get("name", "")
+            if not name:
+                continue
+            sub_node = sub_lookup.get(name)
+            if sub_node:
+                sub_fname = _funcname([*cmd_path, name])
+                lines.append(f"                {name}) {sub_fname} ;;")
+            else:
+                # no mined subcommand data — fall back to file completion
+                lines.append(f"                {name}) _default ;;")
+        lines.append("            esac")
+        lines.append("            ;;")
+        lines.append("    esac")
+    else:
+        if arg_specs:
+            lines.append("    _arguments \\")
+            for i, spec in enumerate(arg_specs):
+                trailing = " \\" if i < len(arg_specs) - 1 else ""
+                lines.append(f"        {spec}{trailing}")
+        else:
+            lines.append("    _default")
+
+    lines.append("}")
+    lines.append("")
+
+    # recurse into subcommands
+    for cmd in commands:
+        name = cmd.get("name", "")
+        sub_node = sub_lookup.get(name)
+        if sub_node:
+            lines.extend(_generate_zsh_function(sub_node, [*cmd_path, name]))
+
+    return lines
+
+
+def generate_zsh(node: dict) -> str:
+    """Generate a complete zsh completion script from a mined command tree."""
+    cmd_name = node.get("command", "").split()[0]
+    cmd_path = [cmd_name]
+
+    out = []
+    out.append(f"#compdef {cmd_name}")
+    out.append(f"# Generated by helpmine - https://github.com/helpmine")
+    out.append("")
+    out.extend(_generate_zsh_function(node, cmd_path))
+    out.append(f"{_funcname(cmd_path)} \"$@\"")
+    out.append("")
+
+    return "\n".join(out)
+
+
+# ── Setup & Cache ────────────────────────────────────────────────
+
+CACHE_DIR = Path.home() / ".cache" / "helpmine" / "completions"
+CONFIG_DIR = Path.home() / ".config" / "helpmine"
+
+ZSH_BLOCK = """\
+# ── helpmine completions ──
+fpath=(~/.cache/helpmine/completions $fpath)
+_helpmine_fallback() {
+    local cmd=$words[1]
+    local cache=~/.cache/helpmine/completions/_$cmd
+    [[ -f $cache ]] && { source $cache; _$cmd "$@"; return }
+    command -v helpmine &>/dev/null || return
+    helpmine generate zsh "$cmd" 2>/dev/null
+    [[ -f $cache ]] && { source $cache; _$cmd "$@" }
+}
+compdef _helpmine_fallback -p ''
+# ── end helpmine ──"""
+
+
+def setup_zsh() -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+    zshrc = Path.home() / ".zshrc"
+    if zshrc.exists():
+        content = zshrc.read_text()
+        if "helpmine" in content:
+            print("helpmine already in .zshrc, skipping", file=sys.stderr)
+            return
+    else:
+        content = ""
+
+    with open(zshrc, "a") as f:
+        f.write("\n" + ZSH_BLOCK + "\n")
+    print(f"added helpmine block to {zshrc}", file=sys.stderr)
+    print(f"completions cached in {CACHE_DIR}", file=sys.stderr)
+    print(f"per-tool templates go in {CONFIG_DIR}/<tool>.helpfmt", file=sys.stderr)
+    print("restart your shell or: source ~/.zshrc", file=sys.stderr)
+
+
+def _load_patterns_for(tool: str, explicit_template: str | None) -> list[Pattern]:
+    """Load patterns: explicit -t flag > ~/.config/helpmine/<tool>.helpfmt > default."""
+    if explicit_template:
+        return parse_helpfmt(Path(explicit_template).read_text())
+    per_tool = CONFIG_DIR / f"{tool}.helpfmt"
+    if per_tool.exists():
+        return parse_helpfmt(per_tool.read_text())
+    return parse_helpfmt(DEFAULT_TEMPLATE)
+
+
+def generate_and_cache(tools: list[str], shell: str, template: str | None, depth: int) -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    for tool in tools:
+        patterns = _load_patterns_for(tool, template)
+        result = mine([tool], patterns, depth)
+        if result.get("error"):
+            print(f"skip {tool}: {result['error']}", file=sys.stderr)
+            continue
+        if shell == "zsh":
+            script = generate_zsh(result)
+            out = CACHE_DIR / f"_{tool}"
+            out.write_text(script)
+            stats = result.get("_stats", {})
+            pct = (stats.get("matched", 0) / stats["total"] * 100) if stats.get("total") else 0
+            print(f"{tool}: wrote {out} ({pct:.0f}% matched)", file=sys.stderr)
+
+
+# ── Output Helpers ───────────────────────────────────────────────
+
+def strip_internals(node: dict) -> dict:
+    node.pop("_stats", None)
+    for sub in node.get("subcommands", []):
+        strip_internals(sub)
+    return node
+
+
+def print_stats(result: dict, indent: int = 0) -> None:
+    stats = result.get("_stats", {})
+    pad = "  " * indent
+    cmd = result.get("command", "?")
+    matched = stats.get("matched", 0)
+    total = stats.get("total", 0)
+    unknown = stats.get("unknown", 0)
+    pct = (matched / total * 100) if total else 0
+    print(f"{pad}{cmd}: {matched}/{total} lines matched ({pct:.0f}%), {unknown} unknown", file=sys.stderr)
+    for sub in result.get("subcommands", []):
+        print_stats(sub, indent + 1)
+
+
+# ── CLI ──────────────────────────────────────────────────────────
+
+def main():
+    ap = argparse.ArgumentParser(
+        prog="helpmine",
+        description="Mine structured data from CLI --help output",
+    )
+    sub = ap.add_subparsers(dest="action", required=True)
+
+    p = sub.add_parser("learn", help="Generate a .helpfmt template from a command's help")
+    p.add_argument("command", nargs="+")
+    p.add_argument("-o", "--output", help="Write template to file")
+
+    p = sub.add_parser("mine", help="Recursively mine all subcommand help text")
+    p.add_argument("command", nargs="+")
+    p.add_argument("-t", "--template", help="Path to .helpfmt template")
+    p.add_argument("-d", "--depth", type=int, default=3, help="Max recursion depth")
+    p.add_argument("--stats", action="store_true", help="Print match stats to stderr")
+
+    p = sub.add_parser("parse", help="Parse a saved help text file")
+    p.add_argument("file")
+    p.add_argument("-t", "--template", help="Path to .helpfmt template")
+
+    p = sub.add_parser("setup", help="Wire helpmine into your shell's rc file")
+    p.add_argument("shell", choices=["zsh"], help="Target shell")
+
+    p = sub.add_parser("generate", help="Generate + cache shell completions")
+    p.add_argument("shell", choices=["zsh"], help="Target shell")
+    p.add_argument("tools", nargs="+", help="Tools to generate completions for")
+    p.add_argument("-t", "--template", help="Path to .helpfmt template (applies to all tools)")
+    p.add_argument("-d", "--depth", type=int, default=3, help="Max recursion depth")
+
+    p = sub.add_parser("default-template", help="Print the built-in default template")
+
+    args = ap.parse_args()
+
+    if args.action == "default-template":
+        print(DEFAULT_TEMPLATE.strip())
+        return
+
+    if args.action == "learn":
+        text = get_help(args.command)
+        if not text:
+            print(f"error: no help from: {' '.join(args.command)}", file=sys.stderr)
+            sys.exit(1)
+        tmpl = learn_heuristic(text)
+        if args.output:
+            Path(args.output).write_text(tmpl + "\n")
+            print(f"wrote {args.output}", file=sys.stderr)
+        else:
+            print(tmpl)
+        return
+
+    # load patterns
+    if hasattr(args, "template") and args.template:
+        patterns = parse_helpfmt(Path(args.template).read_text())
+    else:
+        patterns = parse_helpfmt(DEFAULT_TEMPLATE)
+
+    if args.action == "parse":
+        text = Path(args.file).read_text()
+        matches = classify_lines(text.split("\n"), patterns)
+        result = build_structure(matches)
+        print(json.dumps(result, indent=2))
+
+    elif args.action == "mine":
+        result = mine(args.command, patterns, args.depth)
+        if args.stats:
+            print_stats(result)
+        print(json.dumps(strip_internals(result), indent=2))
+
+    elif args.action == "setup":
+        if args.shell == "zsh":
+            setup_zsh()
+
+    elif args.action == "generate":
+        generate_and_cache(args.tools, args.shell, args.template, args.depth)
+
+
+if __name__ == "__main__":
+    main()

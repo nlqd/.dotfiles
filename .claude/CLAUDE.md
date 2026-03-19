@@ -168,6 +168,7 @@ When multiple valid approaches exist, choose based on:
 - Also, use long flags in bash commands so I know what ur doing
 - When in investigative/explorative/debugging session, use liberally the AGENTS available to you.
   For example, when debugging, ask 2 agents to argue for and against you.
+- Try to be minimal in markdown. Don't bold things out of control. Bold should at most be 1% of the total text only. Same thing with italics.
 
 ## Git and GitHub works
 
@@ -203,7 +204,8 @@ Title: should be the task's name
 Avoid using emojis except for when it's in task name.
 In PR description, for arrows, I prefer $\rightarrow$ instead of the unicode arrow. Try to use Latex variants for other unicode symbol if you can.
 
-### Some provided wrappers
+### Other QOL improvement
 
 - Bash(gh-pr-comments) gives all comments on the current PR. No need to run with any param as it works ootb.
 - Don't merge origin/main. Merge local main
+- Don't assume small changes means amend and push force. Only commit as separate.

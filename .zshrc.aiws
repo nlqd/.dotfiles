@@ -55,7 +55,7 @@ alias claude='ENABLE_LSP_TOOL=true claude'
 
 function gdiff() {
   branch=${1:-main}
-  [[ $branch -ne main ]] && shift
+  [[ "$branch" != "main" ]] && shift
   git diff -w $(git merge-base @ $branch) --stat -p "$@"
 }
 
@@ -161,3 +161,4 @@ tmux has-session -t main 2> /dev/null || tmux new-session -d -s main
 eval "$(zoxide init zsh)"
 eval "$(starship init zsh)"
 eval "$(gh completion --shell zsh)"
+complete -C '/usr/local/bin/aws_completer' aws

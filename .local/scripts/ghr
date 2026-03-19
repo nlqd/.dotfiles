@@ -15,7 +15,8 @@ install_repo() {
   mkdir -p "$dir"
 
   release=$(curl -sf "$API/$repo/releases/latest") || {
-    echo "No releases for $repo" >&2; return 1
+    echo "No releases for $repo" >&2
+    return 1
   }
 
   ver=$(echo "$release" | jq -r '.tag_name')
@@ -23,10 +24,14 @@ install_repo() {
 
   assets=$(echo "$release" | jq -r '.assets[] | "\(.name)\t\(.browser_download_url)"')
 
-  [ -z "$assets" ] && { echo "No assets" >&2; return 1; }
+  [ -z "$assets" ] && {
+    echo "No assets" >&2
+    return 1
+  }
 
   echo "$assets" | cut -f1 | nl
-  printf "Select [1]: "; read -r n
+  printf "Select [1]: "
+  read -r n
   n="${n:-1}"
 
   url=$(echo "$assets" | sed -n "${n}p" | cut -f2)
@@ -35,32 +40,42 @@ install_repo() {
   echo "Downloading $name..."
   curl -L -o "$dir/$name" "$url"
 
-  echo "$repo" > "$dir/.repo"
-  echo "$ver" > "$dir/.version"
+  echo "$repo" >"$dir/.repo"
+  echo "$ver" >"$dir/.version"
 
   case "$name" in
-    *.tar.gz|*.tgz) tar -xzf "$dir/$name" -C "$dir" ;;
-    *.zip) unzip -o "$dir/$name" -d "$dir" ;;
-    *) chmod +x "$dir/$name"; ln -sf "$dir/$name" "$BIN_DIR/" ;;
+  *.tar.gz | *.tgz) tar -xzf "$dir/$name" -C "$dir" ;;
+  *.zip) unzip -o "$dir/$name" -d "$dir" ;;
+  *)
+    chmod +x "$dir/$name"
+    ln -sf "$dir/$name" "$BIN_DIR/"
+    ;;
   esac
 
   echo "Installed $repo ($ver)"
 }
 
 list_all() {
-  printf "REPO\tINSTALLED\tLATEST\n"
-  for dir in "$CACHE_DIR"/*; do
-    [ -f "$dir/.repo" ] || continue
-    repo=$(cat "$dir/.repo")
-    local_ver=$(cat "$dir/.version")
-    remote_ver=$(curl -sf "$API/$repo/releases/latest" | jq -r '.tag_name')
-    printf "%s\t%s\t%s\n" "$repo" "$local_ver" "$remote_ver"
-  done | column -t -s $'\t'
+  (
+    printf "REPO\tINSTALLED\tLATEST\n"
+    printf '%s\n' "$CACHE_DIR"/* | xargs -P8 -I{} bash -c '
+      dir="$1"
+      [ -f "$dir/.repo" ] || exit
+      repo=$(cat "$dir/.repo")
+      local_ver=$(cat "$dir/.version")
+      remote_ver=$(curl -sf "'"$API"'/$repo/releases/latest" | jq -r ".tag_name")
+      printf "%s\t%s\t%s\n" "$repo" "$local_ver" "$remote_ver"
+    ' _ {}
+  ) | column --table --separator $'\t'
 }
 
-case "$1" in
-  install|i) install_repo "$2" ;;
-  update|u)  install_repo "$2" ;;
-  list|ls)   list_all ;;
-  *)         echo "Usage: ghr install|update|list <owner/repo>" >&2 ;;
-esac
+main() {
+  case "$1" in
+  install | i) install_repo "$2" ;;
+  update | u) install_repo "$2" ;;
+  list | ls) list_all ;;
+  *) echo "Usage: ghr install|update|list <owner/repo>" >&2 ;;
+  esac
+}
+
+main "$@"
