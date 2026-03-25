@@ -16,6 +16,27 @@ Usage:
   helpmine setup zsh                   Wire completions into .zshrc
   helpmine generate zsh <tool>...      Generate + cache zsh completions
   helpmine default-template            Print the built-in template
+
+Options for generate:
+  -f, --fmt 'type:pattern'   Inline pattern prepended to defaults (repeatable)
+  -t, --template <file>      Use a .helpfmt template file instead of defaults
+  -d, --depth N              Max subcommand recursion depth (default: 3)
+
+Template syntax (.helpfmt):
+  @type                      Line type (usage, section, option, command, continuation)
+  pattern                    Template on next line, blank line between patterns
+
+  {{ name }}                 Capture a single token (\\S+)
+  {{ name... }}              Capture rest of line (.+)
+  2+ spaces                  Gap separator (\\s{2,})
+  1 space                    Flexible whitespace (\\s+)
+
+  Patterns are tried in order. First match wins.
+
+Examples:
+  helpmine setup zsh
+  helpmine generate zsh fd bat cargo uv
+  helpmine generate zsh mytool -f 'option: -{{ short }}, --{{ long }}  {{ desc... }}'
 """
 
 import re
@@ -544,7 +565,6 @@ def generate_zsh(node: dict) -> str:
 # ── Setup & Cache ────────────────────────────────────────────────
 
 CACHE_DIR = Path.home() / ".cache" / "helpmine" / "completions"
-CONFIG_DIR = Path.home() / ".config" / "helpmine"
 
 ZSH_BLOCK = """\
 # ── helpmine completions ──
@@ -563,7 +583,6 @@ compdef _helpmine_fallback -p ''
 
 def setup_zsh() -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
     zshrc = Path.home() / ".zshrc"
     if zshrc.exists():
@@ -571,31 +590,35 @@ def setup_zsh() -> None:
         if "helpmine" in content:
             print("helpmine already in .zshrc, skipping", file=sys.stderr)
             return
-    else:
-        content = ""
 
     with open(zshrc, "a") as f:
         f.write("\n" + ZSH_BLOCK + "\n")
     print(f"added helpmine block to {zshrc}", file=sys.stderr)
     print(f"completions cached in {CACHE_DIR}", file=sys.stderr)
-    print(f"per-tool templates go in {CONFIG_DIR}/<tool>.helpfmt", file=sys.stderr)
     print("restart your shell or: source ~/.zshrc", file=sys.stderr)
 
 
-def _load_patterns_for(tool: str, explicit_template: str | None) -> list[Pattern]:
-    """Load patterns: explicit -t flag > ~/.config/helpmine/<tool>.helpfmt > default."""
-    if explicit_template:
-        return parse_helpfmt(Path(explicit_template).read_text())
-    per_tool = CONFIG_DIR / f"{tool}.helpfmt"
-    if per_tool.exists():
-        return parse_helpfmt(per_tool.read_text())
-    return parse_helpfmt(DEFAULT_TEMPLATE)
+def _build_patterns(fmt: list[str] | None, template: str | None) -> list[Pattern]:
+    """Build patterns from: -f inline specs prepended to defaults, or -t file, or defaults."""
+    if template:
+        return parse_helpfmt(Path(template).read_text())
+    extra = []
+    if fmt:
+        # each -f is "type:pattern" — first colon separates type from pattern
+        for spec in fmt:
+            colon = spec.index(":")
+            kind = spec[:colon].strip()
+            tmpl = spec[colon + 1:]
+            regex, caps = compile_template(tmpl)
+            extra.append(Pattern(kind, tmpl, regex, caps))
+    return extra + parse_helpfmt(DEFAULT_TEMPLATE)
 
 
-def generate_and_cache(tools: list[str], shell: str, template: str | None, depth: int) -> None:
+def generate_and_cache(tools: list[str], shell: str, template: str | None,
+                       fmt: list[str] | None, depth: int) -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    patterns = _build_patterns(fmt, template)
     for tool in tools:
-        patterns = _load_patterns_for(tool, template)
         result = mine([tool], patterns, depth)
         if result.get("error"):
             print(f"skip {tool}: {result['error']}", file=sys.stderr)
@@ -661,6 +684,7 @@ def main():
     p.add_argument("shell", choices=["zsh"], help="Target shell")
     p.add_argument("tools", nargs="+", help="Tools to generate completions for")
     p.add_argument("-t", "--template", help="Path to .helpfmt template (applies to all tools)")
+    p.add_argument("-f", "--fmt", action="append", help="Inline pattern as 'type:pattern', prepended to defaults. Repeatable.")
     p.add_argument("-d", "--depth", type=int, default=3, help="Max recursion depth")
 
     p = sub.add_parser("default-template", help="Print the built-in default template")
@@ -707,7 +731,7 @@ def main():
             setup_zsh()
 
     elif args.action == "generate":
-        generate_and_cache(args.tools, args.shell, args.template, args.depth)
+        generate_and_cache(args.tools, args.shell, args.template, args.fmt, args.depth)
 
 
 if __name__ == "__main__":
