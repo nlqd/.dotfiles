@@ -421,19 +421,17 @@ Usage: asana-overview [OPTIONS] [COMMAND] [ARGS]
 
 Options:
   -p, --project NAME    Switch project for this command
-  -d                    Show descriptions in list views (mine, all)
+  -d                    Show descriptions in list views
   -h, --help            Show this help
 
 Commands:
-  dash, d               Dashboard: unassigned not-started + my in-progress + my needs-review
-  mine, m               All my tasks across sections
+  dash, d               Dashboard overview
   all, a [SECTION]      All tasks in section (default: In-Progress)
   view, v, task [GIDS]  View task details + comments
   search, s QUERY       Search tasks by text
   move GID SECTION      Move task to section
   assign, grab [GIDS]   Assign task(s) to me
   unassign, drop [GIDS] Unassign task(s) from me
-  due [GIDS] DATE       Set due date (YYYY-MM-DD)
   comment GID TEXT      Add comment to task
   attachments [GID]     List task attachments
   download [GID] [DIR]  Download attachments
@@ -443,23 +441,14 @@ Task selection:
   1234567890            Single GID (shown in [brackets] in output)
   GID1,GID2,GID3        Multiple GIDs (comma-separated)
   --section NAME        All tasks in a section
-  (omit)                Interactive picker with fzf (picks from all sections)
-
-Sections: ${sections_list}
-  (Section names are case-insensitive: "in-progress" matches "In-Progress")
 
 Examples:
-  asana-overview d                  Dashboard: unassigned not-started + my in-progress + my needs-review
+  asana-overview d                  Dashboard
   asana-overview                    Show my In-Progress tasks
   asana-overview v 123456           View full task details
-  asana-overview m                  All my tasks across sections
-  asana-overview a not-started      All tasks in Not-Started (case-insensitive)
+  asana-overview a not-started      All tasks in Not-Started
   asana-overview assign 123,456     Assign multiple tasks to me
-  asana-overview -p ocr m           My tasks in 'ocr' project
-
-Environment variables (priority: flag > ASANA_PROJECT_OVERRIDE > ASANA_PROJECT > config default):
-  ASANA_PROJECT=name                Set default project for session
-  ASANA_PROJECT_OVERRIDE=name       Override project (highest priority)
+  asana-overview -p ocr d           Dashboard for 'ocr' project
 EOF
 }
 
@@ -467,9 +456,19 @@ show_dashboard() {
   local config="$1"
   local user_gid=$(echo "$config" | jq -r '.user_gid')
 
+  # Try multiple candidate names, return first match
+  _resolve_first() {
+    local name
+    for name in "$@"; do
+      local resolved
+      resolved=$(resolve_section_name "$name" "$config" 2>/dev/null) && { echo "$resolved"; return 0; }
+    done
+    return 1
+  }
+
   _fetch_section() {
-    local name="$1" resolved gid
-    resolved=$(resolve_section_name "$name" "$config" 2>/dev/null) || { echo '{"data":[]}'; return 0; }
+    local resolved="$1" gid
+    [[ -z $resolved ]] && { echo '{"data":[]}'; return 0; }
     gid=$(echo "$config" | jq -r ".sections[\"${resolved}\"]")
     get_tasks_in_section "$gid" "false"
   }
@@ -481,19 +480,28 @@ show_dashboard() {
     echo "$output"; echo
   }
 
-  local tasks output
+  local tasks output section
 
-  tasks=$(_fetch_section "Not-Started")
-  output=$(echo "$tasks" | jq -r '.data[] | select(.completed == false and .assignee == null) | "[\(.gid)] \(.name) - Due: \(.due_on // "None") - Assignee: Unassigned"')
-  _print_section "Unassigned / Not Started" "$output"
+  section=$(_resolve_first "Not-Started" "To Do" "Backlog" "Untitled section")
+  if [[ -n $section ]]; then
+    tasks=$(_fetch_section "$section")
+    output=$(echo "$tasks" | jq -r '.data[] | select(.completed == false and .assignee == null) | "[\(.gid)] \(.name) - Due: \(.due_on // "None") - Assignee: Unassigned"')
+    _print_section "Unassigned / $section" "$output"
+  fi
 
-  tasks=$(_fetch_section "In-Progress")
-  output=$(display_tasks "$tasks" "false" "$user_gid")
-  _print_section "My In-Progress" "$output"
+  section=$(_resolve_first "In-Progress" "In Progress")
+  if [[ -n $section ]]; then
+    tasks=$(_fetch_section "$section")
+    output=$(display_tasks "$tasks" "false" "$user_gid")
+    _print_section "My $section" "$output"
+  fi
 
-  tasks=$(_fetch_section "Needs Review")
-  output=$(display_tasks "$tasks" "false" "$user_gid")
-  _print_section "Needs Review" "$output"
+  section=$(_resolve_first "Needs Review" "Dev-Complete" "Complete" "QA Complete")
+  if [[ -n $section ]]; then
+    tasks=$(_fetch_section "$section")
+    output=$(display_tasks "$tasks" "false" "$user_gid")
+    _print_section "My $section" "$output"
+  fi
 }
 
 show_all_my_tasks() {

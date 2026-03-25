@@ -63,8 +63,8 @@ function warn {
 # copy-on-write, but did not find any good references, so I'm falling back on
 # "try and see if it fails"
 function cp_cow {
-    if ! /bin/cp -Rc "$1" "$2"; then
-        if ! /bin/cp -R --reflink "$1" "$2"; then
+    if ! /bin/cp -Rc "$1" "$2" 2>/dev/null; then
+        if ! /bin/cp -R --reflink "$1" "$2" 2>/dev/null; then
             if ! /bin/cp -R "$1" "$2"; then
                 warn "Unable to copy file $1 to $2 - folder may not exist"
             fi
@@ -118,7 +118,7 @@ function _worktree {
     cd "$git_root" || die "Failed to change to git root directory"
 
     # pull the most recent version of the remote
-    if ! git pull; then
+    if ! git pull 2>/dev/null; then
         warn "Unable to run git pull, there may not be an upstream"
     fi
 
@@ -160,8 +160,9 @@ function _worktree {
     # to work for reasons that are unclear to me.
     if [ -d "node_modules" ]; then
         tmpfile=$(mktemp)
-        cp_node_modules="cp -Rc node_modules ../$dirname/node_modules ||
-            cp -R --reflink node_modules ../$dirname/node_modules"
+        cp_node_modules="cp -Rc node_modules ../$dirname/node_modules 2>/dev/null ||
+            cp -R --reflink node_modules ../$dirname/node_modules 2>/dev/null ||
+            cp -R node_modules ../$dirname/node_modules"
 
         warn "copying node_modules in the background"
         warn "logging to $tmpfile"

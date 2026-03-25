@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Called by udev (via systemd-run) when a keyboard is added/reconnected.
+# Restarts the kanata user service with debouncing via flock.
+
+LOCK="/tmp/kanata-restart.lock"
+exec 9>"$LOCK"
+flock --nonblock 9 || exit 0
+
+# Let the device settle before kanata grabs it
+sleep 1
+
+runuser --user dungngo -- \
+  env XDG_RUNTIME_DIR=/run/user/1002 \
+  systemctl --user restart kanata
+
+# Hold lock to debounce rapid reconnections (e.g. BT keyboard
+# creating multiple input devices at once)
+sleep 2

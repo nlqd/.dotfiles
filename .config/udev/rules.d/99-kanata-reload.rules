@@ -1,0 +1,3 @@
+# Restart kanata when a real (non-virtual) keyboard is connected.
+# kanata's own virtual device is excluded to prevent restart loops.
+ACTION=="add", SUBSYSTEM=="input", ENV{ID_INPUT_KEYBOARD}=="1", ATTR{name}!="kanata", RUN+="/usr/bin/systemd-run --no-block /home/dungngo/.local/scripts/kanata-udev-restart"

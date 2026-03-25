@@ -115,7 +115,7 @@ CONVERSATION COMMENTS
 RESOLVED THREADS (\($resolved | length))
 ─────────────────────────────────────────────────────
 \([$resolved[] |
-  "\(.comments.nodes[0].path // "(no file)")\(if .comments.nodes[0].line then ":\(.comments.nodes[0].line)" else "" end) (resolved by @\(.resolvedBy.login))
+  "\(.comments.nodes[0].path // "(no file)")\(if .comments.nodes[0].line then ":\(.comments.nodes[0].line)" else "" end)  thread:\(.id) (resolved by @\(.resolvedBy.login))
 
 \([.comments.nodes[] |
   "\(if .replyTo then "↳ " else "" end)@\(.author.login) [\(.databaseId)] \(.createdAt | split("T")[0])
@@ -127,7 +127,7 @@ OPEN REVIEW THREADS (\($open | length))
 ═════════════════════════════════════════════════════
 \([$open[] |
   "─────────────────────────────────────────────────────
-\(.comments.nodes[0].path // "(no file)")\(if .comments.nodes[0].line then ":\(.comments.nodes[0].line)" else "" end)
+\(.comments.nodes[0].path // "(no file)")\(if .comments.nodes[0].line then ":\(.comments.nodes[0].line)" else "" end)  thread:\(.id)
 
 \([.comments.nodes[] |
   "\(if .replyTo then "↳ " else "" end)@\(.author.login) [\(.databaseId)] \(.createdAt | split("T")[0])
@@ -139,5 +139,9 @@ OPEN REVIEW THREADS (\($open | length))
   ```" else "" end)
 "] | join("\n\n"))"
 ] | join("\n\n"))
-" else "" end)"
+" else "" end)
+─────────────────────────────────────────────────────
+[n] = comment databaseId  |  thread:PRRT_... = review thread ID
+Reply to thread: addPullRequestReviewThreadReply(threadId)
+Resolve thread:  resolveReviewThread(threadId)"
 '
