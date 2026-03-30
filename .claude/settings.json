@@ -30,7 +30,7 @@
   },
   "alwaysThinkingEnabled": true,
   "effortLevel": "high",
-  "voiceEnabled": true,
+  "voiceEnabled": false,
   "skipDangerousModePermissionPrompt": true,
   "autoUpdates": true,
   "preferredNotifChannel": "terminal_bell",
