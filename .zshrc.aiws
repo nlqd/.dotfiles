@@ -12,6 +12,7 @@ HISTSIZE=999999999
 SAVEHIST=$HISTSIZE
 
 export EDITOR=nvim
+alias nvim="NVIM_APPNAME=nvim-0.12 nvim"
 export MANPAGER='nvim +Man!'
 
 PATH="$HOME/.asdf/shims:$PATH"
@@ -53,9 +54,16 @@ alias nr='newsraft'
 alias cr='ENABLE_LSP_TOOL=true claude -r'
 alias claude='ENABLE_LSP_TOOL=true claude'
 
+# NOTE: completion would be cool and avoid these things completely
 function gdiff() {
-  branch=${1:-main}
-  [[ "$branch" != "main" ]] && shift
+  local current
+  local guess
+  local branch
+
+  current=$(git branch --show-current)
+  guess=$(git reflog show "$current" --format='%gs' | tail -1 | sed 's@branch: Created from origin/@@')
+  branch=${1:-$guess}
+  [[ "$branch" != "$guess" ]] && shift
   git diff -w $(git merge-base @ $branch) --stat -p "$@"
 }
 

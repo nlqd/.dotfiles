@@ -56,6 +56,8 @@ bindsym $mod+Shift+o resize grow   width  30 px or 10 ppt
 bindsym $mod+f fullscreen toggle
 bindsym $mod+w layout tabbed
 bindsym $mod+e layout toggle split
+bindsym $mod+underscore split v
+bindsym $mod+backslash  split h
 bindsym $mod+Shift+t floating toggle
 bindsym $mod+p       sticky toggle
 

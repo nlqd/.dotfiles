@@ -31,6 +31,7 @@
   "alwaysThinkingEnabled": true,
   "effortLevel": "high",
   "voiceEnabled": false,
+  "autoDreamEnabled": true,
   "skipDangerousModePermissionPrompt": true,
   "autoUpdates": true,
   "preferredNotifChannel": "terminal_bell",

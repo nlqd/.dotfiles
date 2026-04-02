@@ -1,9 +1,8 @@
 -- options
 vim.g.mapleader = ' '
-vim.g.maplocalleader = ' '
-vim.o.background = 'light'
 vim.o.colorcolumn = '100'
 vim.o.tabstop = 4
+vim.o.softtabstop = 4
 vim.o.shiftwidth = 4
 vim.o.breakindent = true
 vim.wo.number = true
@@ -11,7 +10,6 @@ vim.o.relativenumber = true
 vim.o.updatetime = 250
 vim.o.timeout = true
 vim.o.timeoutlen = 300
-vim.o.mouse = 'a'
 vim.o.undofile = true
 vim.o.ignorecase = true
 vim.o.smartcase = true
@@ -27,13 +25,14 @@ vim.o.cursorline = true
 vim.o.scrolloff = 10
 vim.o.exrc = true
 vim.o.hlsearch = true
+vim.o.winborder = 'rounded'
 
 -- Keymaps
-vim.keymap.set('v', '<leader>y', '\'+y', { desc = '[Y]ank to system' })
+vim.keymap.set('v', '<leader>y', '"+y', { desc = '[Y]ank to system' })
 vim.keymap.set('v', 'J', ":m '>+1<CR>gv=gv")
 vim.keymap.set('v', 'K', ":m '<-2<CR>gv=gv")
-vim.keymap.set('n', 'k', "v:count == 0 ? 'gk' : 'k'", { expr = true, silent = true })
-vim.keymap.set('n', 'j', "v:count == 0 ? 'gj' : 'j'", { expr = true, silent = true })
+vim.keymap.set({ 'n', 'v', 'x' }, 'k', "v:count == 0 ? 'gk' : 'k'", { expr = true, silent = true })
+vim.keymap.set({ 'n', 'v', 'x' }, 'j', "v:count == 0 ? 'gj' : 'j'", { expr = true, silent = true })
 vim.keymap.set('n', '<C-c>', '<cmd>nohlsearch<CR>')
 
 -- Autocmds
@@ -42,11 +41,31 @@ vim.api.nvim_create_autocmd('TextYankPost', {
     group = vim.api.nvim_create_augroup('YankHighlight', { clear = true }),
     pattern = '*',
 })
+
+-- User cmds
 vim.api.nvim_create_user_command('Make', function(opts)
     local command = table.concat(opts.fargs, ' ') or vim.o.makeprg
     vim.cmd([[below terminal ]] .. command)
     vim.api.nvim_win_set_height(0, math.floor(vim.api.nvim_win_get_height(0) / 2))
 end, { nargs = '*' })
+vim.api.nvim_create_user_command('CopyPath', function ()
+    vim.fn.setreg('+', vim.fn.expand('%'))
+end, {})
+vim.api.nvim_create_user_command('CopyPathAbs', function ()
+    vim.fn.setreg('+', vim.fn.expand('%:p'))
+end, {})
+
+--- standard plugin
+vim.cmd('packadd cfilter')
+vim.cmd('packadd justify')
+
+-- undotree
+vim.cmd('packadd nvim.undotree')
+vim.keymap.set('n', '<leader>u', function ()
+    require('undotree').open({
+        command = math.floor(vim.api.nvim_win_get_width(0) / 3) .. 'vnew'
+    })
+end, { desc = '[U]ndoTree' })
 
 -- packages
 local gh = function(x) return 'https://github.com/' .. x end
@@ -64,11 +83,13 @@ vim.pack.add({
     gh'neovim/nvim-lspconfig',
     gh'j-hui/fidget.nvim',
     gh'nvimtools/none-ls.nvim',
+    { src = gh'saghen/blink.cmp', version = vim.version.range('1.*') },
 })
 require('fidget').setup({})
 require('null-ls').setup({
     sources = { require('null-ls').builtins.formatting.prettier },
 })
+require('blink.cmp').setup({})
 vim.diagnostic.config({ virtual_text = { current_line = true } })
 vim.keymap.set('n', '<leader>gf', vim.lsp.buf.format, { desc = '[G]o and [F]ormat the code' })
 vim.lsp.config('lua_ls', { settings = { Lua = {
@@ -102,8 +123,21 @@ require('oil').setup({
     win_options = {
         wrap = true,
     },
+    keymaps = {
+        ['gs'] = { 'actions.open_terminal', mode = 'n' },
+    },
 })
 vim.keymap.set('n', '<leader>-', '<CMD>Oil<CR>')
+
+-- mini
+vim.pack.add({ gh'nvim-mini/mini.nvim' })
+require('mini.pick').setup({})
+require('mini.extra').setup({})
+vim.keymap.set('n', '<leader>sf', '<cmd>Pick files<cr>')
+vim.keymap.set('n', '<leader>sg', '<cmd>Pick grep_live<cr>')
+vim.keymap.set('n', '<leader>sr', '<cmd>Pick resume<cr>')
+vim.keymap.set('n', '<leader>sh', '<cmd>Pick help<cr>')
+vim.keymap.set('n', '<leader><leader>', '<cmd>Pick buffers<cr>')
 
 -- gitsigns
 vim.pack.add({ gh'lewis6991/gitsigns.nvim' })
@@ -177,46 +211,18 @@ require('treesitter-context').setup({
     multiline_threshold = 1,
     max_lines = 4,
 })
---     incremental_selection = {
---     enable = true,
---     keymaps = {
---         init_selection = '<c-space>',
---         node_incremental = '<c-space>',
---         scope_incremental = '<c-s>',
---         node_decremental = '<M-space>',
---     },
---     },
---     textobjects = {
---     move = {
---         enable = true,
---         set_jumps = true,     -- whether to set jumps in the jumplist
---         goto_next_start = {
---         [']m'] = '@function.outer',
---         [']]'] = '@class.outer',
---         },
---         goto_next_end = {
---         [']M'] = '@function.outer',
---         [']['] = '@class.outer',
---         },
---         goto_previous_start = {
---         ['[m'] = '@function.outer',
---         ['[['] = '@class.outer',
---         },
---         goto_previous_end = {
---         ['[M'] = '@function.outer',
---         ['[]'] = '@class.outer',
---         },
---     },
---     },
--- })
+vim.keymap.set({ 'n', 'x', 'o' }, '<C-space>', function ()
+    if vim.treesitter.get_parser(nil, nil, { error = false }) then
+        require('vim.treesitter._select').select_parent(vim.v.count1)
+    else
+        vim.lsp.buf.selection_range(vim.v.count1)
+    end
+end)
+-- TODO: missing moving between functions and classes
 
 -- todo-comments
 vim.pack.add({ gh'folke/todo-comments.nvim' })
 require('todo-comments').setup({ signs = false })
-
--- undotree
-vim.pack.add({ gh'mbbill/undotree' })
-vim.keymap.set('n', '<leader>u', '<cmd>UndotreeToggle<CR>', { desc = '[U]ndoTree' })
 
 -- vim-slime.lua
 vim.pack.add({ gh'jpalardy/vim-slime' })
@@ -224,9 +230,9 @@ vim.g.slime_no_mappings = 1
 vim.g.slime_cell_delimiter = '# %%'
 vim.g.slime_target = 'tmux'
 vim.g.slime_bracketed_paste = 1
-vim.keymap.set('n', '<leader>s',  '<Plug>SlimeRegionSend')
-vim.keymap.set('n', '<leader>ss', '<Plug>SlimeLineSend')
-vim.keymap.set('n', '<leader>sc', '<Plug>SlimeSendCell')
+vim.keymap.set('n', '<leader>s',  '<Plug>SlimeRegionSend', { desc = 'Slime Send' })
+vim.keymap.set('n', '<leader>ss', '<Plug>SlimeLineSend', { desc = 'Slime Send Line' })
+vim.keymap.set('n', '<leader>sc', '<Plug>SlimeSendCell', { desc = 'Slime Send Cell' })
 
 -- vimtex
 vim.pack.add({ gh'lervag/vimtex' })
@@ -242,9 +248,7 @@ vim.pack.add({
 vim.g.db_ui_winwidth = 30
 vim.g.db_ui_use_nerd_fonts = 1
 
--- mini
-vim.pack.add({ gh'nvim-mini/mini.nvim' })
-require('mini.pick').setup({})
-vim.keymap.set('n', '<leader>sf', '<cmd>Pick files<cr>')
-vim.keymap.set('n', '<leader>sg', '<cmd>Pick grep_live<cr>')
-vim.keymap.set('n', '<leader>sr', '<cmd>Pick resume<cr>')
+-- delta
+vim.pack.add({ gh'farhanmustar/fugitive-delta.nvim' })
+vim.g.exe_fugitive_delta=1
+vim.api.nvim_set_hl(0, 'FugitiveDeltaText', { bold = true, underline = true })

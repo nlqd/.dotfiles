@@ -209,3 +209,6 @@ In PR description, for arrows, I prefer $\rightarrow$ instead of the unicode arr
 - Bash(gh-pr-comments) gives all comments on the current PR. No need to run with any param as it works ootb.
 - Don't merge origin/main. Merge local main
 - Don't assume small changes means amend and push force. Only commit as separate.
+- When a user asks a general concept question (e.g., 'what is X'), answer the general concept first before diving into project-specific details.
+- When the user provides a terse or minimal prompt, ask one clarifying question before proceeding rather than guessing the intent. But for clearly scoped tasks, proceed without asking.
+- When refactoring, for readability reason, please collocate variable w/ where they are used, so the reading flow from top to bottom is more flowish.

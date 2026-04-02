@@ -14,3 +14,4 @@
 !.claude/commands/
 !.claude/commands/**
 !.claude/settings.json
+.config/btop
