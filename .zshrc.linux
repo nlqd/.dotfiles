@@ -27,6 +27,7 @@ export ZSH="$HOME/.oh-my-zsh"
 export FLYCTL_INSTALL="/home/qd/.fly"
 export PATH="$FLYCTL_INSTALL/bin:$PATH"
 
+alias nvim='NVIM_APPNAME=nvim-0.12 nvim'
 alias v='nvim'
 alias vg='nvim +G'
 alias lmk='latexmk'

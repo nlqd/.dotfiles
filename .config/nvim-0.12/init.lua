@@ -25,7 +25,6 @@ vim.o.cursorline = true
 vim.o.scrolloff = 10
 vim.o.exrc = true
 vim.o.hlsearch = true
-vim.o.winborder = 'rounded'
 
 -- Keymaps
 vim.keymap.set('v', '<leader>y', '"+y', { desc = '[Y]ank to system' })
@@ -57,7 +56,6 @@ end, {})
 
 --- standard plugin
 vim.cmd('packadd cfilter')
-vim.cmd('packadd justify')
 
 -- undotree
 vim.cmd('packadd nvim.undotree')
