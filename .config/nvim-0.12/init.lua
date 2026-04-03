@@ -40,6 +40,13 @@ vim.api.nvim_create_autocmd('TextYankPost', {
     group = vim.api.nvim_create_augroup('YankHighlight', { clear = true }),
     pattern = '*',
 })
+local bg_cache = vim.fn.stdpath('state') .. '/background'
+vim.o.background = vim.fn.readfile(bg_cache)[1] or vim.o.background
+vim.api.nvim_create_autocmd('OptionSet', {
+    pattern = 'background',
+    nested = true,
+    callback = function() vim.fn.writefile({ vim.o.background }, bg_cache) end,
+})
 
 -- User cmds
 vim.api.nvim_create_user_command('Make', function(opts)
@@ -82,12 +89,37 @@ vim.pack.add({
     gh'j-hui/fidget.nvim',
     gh'nvimtools/none-ls.nvim',
     { src = gh'saghen/blink.cmp', version = vim.version.range('1.*') },
+    gh'rafamadriz/friendly-snippets',
 })
 require('fidget').setup({})
 require('null-ls').setup({
     sources = { require('null-ls').builtins.formatting.prettier },
 })
-require('blink.cmp').setup({})
+require('blink.cmp').setup({
+    keymap = {
+        preset = 'default',
+        ['<Up>'] = {},
+        ['<Down>'] = {},
+    },
+    appearance = {
+        use_nvim_cmp_as_default = true,
+        nerd_font_variant = 'mono',
+    },
+    completion = {
+        documentation = { auto_show = true, auto_show_delay_ms = 500 },
+    },
+    sources = {
+        default = { 'lsp', 'snippets', 'buffer', 'path' },
+        per_filetype = {
+            sql = { 'dadbod', 'snippets', 'buffer' },
+        },
+        providers = {
+            dadbod = { module = 'vim_dadbod_completion.blink' },
+        },
+    },
+    signature = { enabled = true },
+    -- opts_extend = { "sources.default" },
+})
 vim.diagnostic.config({ virtual_text = { current_line = true } })
 vim.keymap.set('n', '<leader>gf', vim.lsp.buf.format, { desc = '[G]o and [F]ormat the code' })
 vim.lsp.config('lua_ls', { settings = { Lua = {
@@ -131,7 +163,7 @@ vim.keymap.set('n', '<leader>-', '<CMD>Oil<CR>')
 vim.pack.add({ gh'nvim-mini/mini.nvim' })
 require('mini.pick').setup({})
 require('mini.extra').setup({})
-vim.keymap.set('n', '<leader>sf', '<cmd>Pick files<cr>')
+vim.keymap.set('n', '<leader>sf', function() MiniPick.builtin.files({ tool = 'git' }) end)
 vim.keymap.set('n', '<leader>sg', '<cmd>Pick grep_live<cr>')
 vim.keymap.set('n', '<leader>sr', '<cmd>Pick resume<cr>')
 vim.keymap.set('n', '<leader>sh', '<cmd>Pick help<cr>')
@@ -163,6 +195,9 @@ require('gitsigns').setup({
             end
         end, { desc = 'Go to prev git change'})
         map('n', '<leader>gp', gitsigns.preview_hunk, { desc = '[G]itsigns [P]review Hunk'})
+        map('v', '<leader>gs', function()
+            gitsigns.stage_hunk({ vim.fn.line('.'), vim.fn.line('v') })
+        end, { desc = '[G]itsigns [S]tage selected lines' })
     end
 })
 
