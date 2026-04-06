@@ -1,21 +1,57 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "model": "ollama/gemma4:26b",
   "permission": {
     "bash": {
       "*": "ask",
-      "git status*": "allow",
+      "cat*": "allow",
+      "echo*": "allow",
+      "git branch*": "allow",
       "git diff*": "allow",
       "git log*": "allow",
-      "git branch*": "allow",
       "git show*": "allow",
-      "ls*": "allow",
-      "cat*": "allow",
+      "git status*": "allow",
       "head*": "allow",
+      "ls*": "allow",
+      "pwd*": "allow",
       "tail*": "allow",
       "wc*": "allow",
-      "echo*": "allow",
-      "pwd*": "allow",
       "which*": "allow"
+    }
+  },
+  "provider": {
+    "ollama": {
+      "models": {
+        "gemma4": {
+          "_launch": true,
+          "name": "gemma4"
+        },
+        "gemma4:26b": {
+          "_launch": true,
+          "name": "gemma4:26b"
+        }
+      },
+      "name": "Ollama",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://127.0.0.1:11434/v1"
+      }
+    },
+    "llama.cpp": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "llama-server (local)",
+      "options": {
+        "baseURL": "http://127.0.0.1:8080/v1"
+      },
+      "models": {
+        "DeepSeek-Coder-V2": {
+          "name": "DeepSeek-Coder-V2",
+          "limit": {
+            "context": 163840,
+            "output": 65536
+          }
+        }
+      }
     }
   }
 }

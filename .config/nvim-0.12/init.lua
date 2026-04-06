@@ -25,6 +25,7 @@ vim.o.cursorline = true
 vim.o.scrolloff = 10
 vim.o.exrc = true
 vim.o.hlsearch = true
+vim.o.clipboard = 'unnamedplus'
 
 -- Keymaps
 vim.keymap.set('v', '<leader>y', '"+y', { desc = '[Y]ank to system' })
@@ -54,10 +55,10 @@ vim.api.nvim_create_user_command('Make', function(opts)
     vim.cmd([[below terminal ]] .. command)
     vim.api.nvim_win_set_height(0, math.floor(vim.api.nvim_win_get_height(0) / 2))
 end, { nargs = '*' })
-vim.api.nvim_create_user_command('CopyPath', function ()
+vim.api.nvim_create_user_command('CopyPath', function()
     vim.fn.setreg('+', vim.fn.expand('%'))
 end, {})
-vim.api.nvim_create_user_command('CopyPathAbs', function ()
+vim.api.nvim_create_user_command('CopyPathAbs', function()
     vim.fn.setreg('+', vim.fn.expand('%:p'))
 end, {})
 
@@ -66,7 +67,7 @@ vim.cmd('packadd cfilter')
 
 -- undotree
 vim.cmd('packadd nvim.undotree')
-vim.keymap.set('n', '<leader>u', function ()
+vim.keymap.set('n', '<leader>u', function()
     require('undotree').open({
         command = math.floor(vim.api.nvim_win_get_width(0) / 3) .. 'vnew'
     })
@@ -74,22 +75,22 @@ end, { desc = '[U]ndoTree' })
 
 -- packages
 local gh = function(x) return 'https://github.com/' .. x end
-vim.pack.add({ gh'folke/which-key.nvim' })
+vim.pack.add({ gh 'folke/which-key.nvim' })
 vim.pack.add({ gh 'iamcco/markdown-preview.nvim' })
-vim.pack.add({ gh'nvim-lua/plenary.nvim' })
-vim.pack.add({ gh'nvim-tree/nvim-web-devicons' })
-vim.pack.add({ gh'stefandtw/quickfix-reflector.vim' })
-vim.pack.add({ gh'tpope/vim-fugitive' })
-vim.pack.add({ gh'tpope/vim-projectionist' })
-vim.pack.add({ gh'tpope/vim-sleuth' })
+vim.pack.add({ gh 'nvim-lua/plenary.nvim' })
+vim.pack.add({ gh 'nvim-tree/nvim-web-devicons' })
+vim.pack.add({ gh 'stefandtw/quickfix-reflector.vim' })
+vim.pack.add({ gh 'tpope/vim-fugitive' })
+vim.pack.add({ gh 'tpope/vim-projectionist' })
+vim.pack.add({ gh 'tpope/vim-sleuth' })
 
 -- lsp
 vim.pack.add({
-    gh'neovim/nvim-lspconfig',
-    gh'j-hui/fidget.nvim',
-    gh'nvimtools/none-ls.nvim',
-    { src = gh'saghen/blink.cmp', version = vim.version.range('1.*') },
-    gh'rafamadriz/friendly-snippets',
+    gh 'neovim/nvim-lspconfig',
+    gh 'j-hui/fidget.nvim',
+    gh 'nvimtools/none-ls.nvim',
+    { src = gh 'saghen/blink.cmp', version = vim.version.range('1.*') },
+    gh 'rafamadriz/friendly-snippets',
 })
 require('fidget').setup({})
 require('null-ls').setup({
@@ -97,9 +98,7 @@ require('null-ls').setup({
 })
 require('blink.cmp').setup({
     keymap = {
-        preset = 'default',
-        ['<Up>'] = {},
-        ['<Down>'] = {},
+        preset = 'cmdline',
     },
     appearance = {
         use_nvim_cmp_as_default = true,
@@ -122,23 +121,27 @@ require('blink.cmp').setup({
 })
 vim.diagnostic.config({ virtual_text = { current_line = true } })
 vim.keymap.set('n', '<leader>gf', vim.lsp.buf.format, { desc = '[G]o and [F]ormat the code' })
-vim.lsp.config('lua_ls', { settings = { Lua = {
-    runtime = { version = 'LuaJIT' },
-    diagnostics = { globals = { 'vim', 'require' }},
-    workspace = { library = vim.api.nvim_get_runtime_file('', true) },
-}}})
+vim.lsp.config('lua_ls', {
+    settings = {
+        Lua = {
+            runtime = { version = 'LuaJIT' },
+            diagnostics = { globals = { 'vim', 'require' } },
+            workspace = { library = vim.api.nvim_get_runtime_file('', true) },
+        }
+    }
+})
 vim.lsp.enable({ 'lua_ls', 'ts_ls', 'pyright', 'rust_analyzer', 'gopls' })
 
 -- mason
 vim.pack.add({
-    gh'williamboman/mason.nvim',
-    gh'williamboman/mason-lspconfig.nvim',
+    gh 'williamboman/mason.nvim',
+    gh 'williamboman/mason-lspconfig.nvim',
 })
 require('mason').setup()
 require('mason-lspconfig').setup()
 
 -- oil
-vim.pack.add({ gh'stevearc/oil.nvim' })
+vim.pack.add({ gh 'stevearc/oil.nvim' })
 require('oil').setup({
     default_file_explorer = true,
     columns = {},
@@ -160,7 +163,7 @@ require('oil').setup({
 vim.keymap.set('n', '<leader>-', '<CMD>Oil<CR>')
 
 -- mini
-vim.pack.add({ gh'nvim-mini/mini.nvim' })
+vim.pack.add({ gh 'nvim-mini/mini.nvim' })
 require('mini.pick').setup({})
 require('mini.extra').setup({})
 vim.keymap.set('n', '<leader>sf', function() MiniPick.builtin.files({ tool = 'git' }) end)
@@ -170,7 +173,7 @@ vim.keymap.set('n', '<leader>sh', '<cmd>Pick help<cr>')
 vim.keymap.set('n', '<leader><leader>', '<cmd>Pick buffers<cr>')
 
 -- gitsigns
-vim.pack.add({ gh'lewis6991/gitsigns.nvim' })
+vim.pack.add({ gh 'lewis6991/gitsigns.nvim' })
 require('gitsigns').setup({
     current_line_blame = true,
     on_attach = function()
@@ -186,15 +189,15 @@ require('gitsigns').setup({
             else
                 gitsigns.nav_hunk('next')
             end
-        end, { desc = 'Go to next git change'})
+        end, { desc = 'Go to next git change' })
         map('n', '[c', function()
             if vim.wo.diff then
                 vim.cmd.normal({ '[c', bang = true })
             else
                 gitsigns.nav_hunk('prev')
             end
-        end, { desc = 'Go to prev git change'})
-        map('n', '<leader>gp', gitsigns.preview_hunk, { desc = '[G]itsigns [P]review Hunk'})
+        end, { desc = 'Go to prev git change' })
+        map('n', '<leader>gp', gitsigns.preview_hunk, { desc = '[G]itsigns [P]review Hunk' })
         map('v', '<leader>gs', function()
             gitsigns.stage_hunk({ vim.fn.line('.'), vim.fn.line('v') })
         end, { desc = '[G]itsigns [S]tage selected lines' })
@@ -202,7 +205,7 @@ require('gitsigns').setup({
 })
 
 -- indent-blankline
-vim.pack.add({gh'lukas-reineke/indent-blankline.nvim',})
+vim.pack.add({ gh 'lukas-reineke/indent-blankline.nvim', })
 require('ibl').setup({
     debounce = 100,
     indent = { char = '┊' },
@@ -211,7 +214,7 @@ require('ibl').setup({
 })
 
 -- multi.lua
-vim.pack.add({ gh'jake-stewart/multicursor.nvim' })
+vim.pack.add({ gh 'jake-stewart/multicursor.nvim' })
 local mc = require('multicursor-nvim')
 mc.setup()
 -- Add or skip cursor above/below the main cursor.
@@ -236,15 +239,15 @@ end)
 
 -- treesitter
 vim.pack.add({
-    gh'nvim-treesitter/nvim-treesitter',
-    gh'nvim-treesitter/nvim-treesitter-context',
-    gh'nvim-treesitter/nvim-treesitter-textobjects',
+    gh 'nvim-treesitter/nvim-treesitter',
+    gh 'nvim-treesitter/nvim-treesitter-context',
+    gh 'nvim-treesitter/nvim-treesitter-textobjects',
 })
 require('treesitter-context').setup({
     multiline_threshold = 1,
     max_lines = 4,
 })
-vim.keymap.set({ 'n', 'x', 'o' }, '<C-space>', function ()
+vim.keymap.set({ 'n', 'x', 'o' }, '<C-space>', function()
     if vim.treesitter.get_parser(nil, nil, { error = false }) then
         require('vim.treesitter._select').select_parent(vim.v.count1)
     else
@@ -254,34 +257,34 @@ end)
 -- TODO: missing moving between functions and classes
 
 -- todo-comments
-vim.pack.add({ gh'folke/todo-comments.nvim' })
+vim.pack.add({ gh 'folke/todo-comments.nvim' })
 require('todo-comments').setup({ signs = false })
 
 -- vim-slime.lua
-vim.pack.add({ gh'jpalardy/vim-slime' })
+vim.pack.add({ gh 'jpalardy/vim-slime' })
 vim.g.slime_no_mappings = 1
 vim.g.slime_cell_delimiter = '# %%'
 vim.g.slime_target = 'tmux'
 vim.g.slime_bracketed_paste = 1
-vim.keymap.set('n', '<leader>s',  '<Plug>SlimeRegionSend', { desc = 'Slime Send' })
+vim.keymap.set('n', '<leader>s', '<Plug>SlimeRegionSend', { desc = 'Slime Send' })
 vim.keymap.set('n', '<leader>ss', '<Plug>SlimeLineSend', { desc = 'Slime Send Line' })
 vim.keymap.set('n', '<leader>sc', '<Plug>SlimeSendCell', { desc = 'Slime Send Cell' })
 
 -- vimtex
-vim.pack.add({ gh'lervag/vimtex' })
+vim.pack.add({ gh 'lervag/vimtex' })
 vim.g.vimtex_view_method = 'zathura'
 vim.g.vimtex_quickfix_open_on_warning = 0
 
 -- dadbod
 vim.pack.add({
-    gh'tpope/vim-dadbod',
-    gh'kristijanhusak/vim-dadbod-completion',
-    gh'kristijanhusak/vim-dadbod-ui',
+    gh 'tpope/vim-dadbod',
+    gh 'kristijanhusak/vim-dadbod-completion',
+    gh 'kristijanhusak/vim-dadbod-ui',
 })
 vim.g.db_ui_winwidth = 30
 vim.g.db_ui_use_nerd_fonts = 1
 
 -- delta
-vim.pack.add({ gh'farhanmustar/fugitive-delta.nvim' })
-vim.g.exe_fugitive_delta=1
+vim.pack.add({ gh 'farhanmustar/fugitive-delta.nvim' })
+vim.g.exe_fugitive_delta = 1
 vim.api.nvim_set_hl(0, 'FugitiveDeltaText', { bold = true, underline = true })
