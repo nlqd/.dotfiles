@@ -196,11 +196,9 @@ require('gitsigns').setup({
             else
                 gitsigns.nav_hunk('prev')
             end
-        end, { desc = 'Go to prev git change' })
-        map('n', '<leader>gp', gitsigns.preview_hunk, { desc = '[G]itsigns [P]review Hunk' })
-        map('v', '<leader>gs', function()
-            gitsigns.stage_hunk({ vim.fn.line('.'), vim.fn.line('v') })
-        end, { desc = '[G]itsigns [S]tage selected lines' })
+        end, { desc = 'Go to prev git change'})
+        map('n', '<leader>gp', gitsigns.preview_hunk, { desc = '[G]itsigns [P]review Hunk'})
+        map({'n', 'v'}, '<leader>gs', '<CMD>Gitsigns stage_hunk<CR>', { desc = '[G]itsigns [S]tage Hunk' })
     end
 })
 

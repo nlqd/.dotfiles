@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+
+query=$(echo "$@" | sed 's/ /+/g')
+cha "https://html.duckduckgo.com/html/?q=${query}"
+
+# some other options:
+# - lite.duckduckgo.com/lite/
+# - search.brave.com/search?q=
