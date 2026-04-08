@@ -1,29 +1,8 @@
 #!/usr/bin/env bash
 
 # credit: https://gist.github.com/Nimmidev/2cf4d5cc80dce32d0240ec7b3cfe090f
-# shellchecked
 
-declare -r LINE_NUMBER_PANE_WIDTH=3
-declare -r LINE_NUMBER_UPDATE_DELAY=0.1
-declare -r COLOR_NUMBERS_RGB="101;112;161"
-declare -r COLOR_ACTIVE_NUMBER_RGB="255;158;100"
-
-open_line_number_split() {
-  local self_path
-  self_path=$(realpath "$0")
-  local pane_id
-  pane_id=$(tmux display-message -pF "#{pane_id}")
-
-  pgrep -f "$self_path $pane_id" >/dev/null && return
-
-  tmux split-window -h -l $LINE_NUMBER_PANE_WIDTH -b "$self_path $pane_id"
-  tmux select-pane -l
-}
-
-enter_copy_mode() {
-  local target_pane=$1
-  tmux copy-mode -t "$target_pane"
-}
+readonly LINE_NUMBER_PANE_WIDTH=3
 
 get_cursor_line() {
   local output
@@ -34,7 +13,7 @@ get_cursor_line() {
 is_in_copy_mode() {
   local mode
   mode=$(tmux display-message -p -t "$target_pane" -F '#{pane_mode}')
-  ! [ -z "$mode" ]
+  [ -n "$mode" ]
 }
 
 redraw_line_numbers() {
@@ -42,21 +21,26 @@ redraw_line_numbers() {
   local lines
   lines=$(tput lines)
 
-  clear
-
-  printf "\e[38;2;%s;2m" "$COLOR_NUMBERS_RGB"
-  seq "$cursor_line" -1 1
-  printf "\e[0m"
-
-  printf "\e[38;2;%s;1m 0\e[0m" "$COLOR_ACTIVE_NUMBER_RGB"
+  local out="\033[H\033[2m"
+  local i=$cursor_line
+  while [ "$i" -ge 1 ]; do
+    out="${out}${i}\033[K\n"
+    i=$((i - 1))
+  done
+  out="${out}\033[0m\033[1m 0\033[K\033[0m\n"
 
   if [ "$lines" -gt $((cursor_line + 1)) ]; then
-    echo
-    printf "\e[38;2;%s;2m" "$COLOR_NUMBERS_RGB"
-    seq 1 $((lines - cursor_line - 2))
-    printf "%d" $((lines - cursor_line - 1))
-    printf "\e[0m"
+    out="${out}\033[2m"
+    local limit=$((lines - cursor_line - 2))
+    i=1
+    while [ "$i" -le "$limit" ]; do
+      out="${out}${i}\033[K\n"
+      i=$((i + 1))
+    done
+    out="${out}$((lines - cursor_line - 1))\033[K\033[0m"
   fi
+
+  printf "%b\033[J" "$out"
 }
 
 update_loop() {
@@ -70,25 +54,32 @@ update_loop() {
       redraw_line_numbers "$cursor_line"
       last_cursor_line=$cursor_line
     fi
-
-    sleep $LINE_NUMBER_UPDATE_DELAY
   done
 }
 
 restore_pane_width() {
-  local target_pane=$1
-  tmux resize-pane -t "$target_pane" -L $((LINE_NUMBER_PANE_WIDTH + 1))
+  tmux resize-pane -t "$1" -L $((LINE_NUMBER_PANE_WIDTH + 1))
 }
 
 main() {
   local target_pane=$1
 
   if [ -z "$target_pane" ]; then
-    open_line_number_split
+    local self_path pane_id
+    self_path=$(realpath "$0")
+    pane_id=$(tmux display-message -pF "#{pane_id}")
+
+    pgrep -f "$self_path $pane_id" >/dev/null && return
+
+    tmux split-window -h -l $LINE_NUMBER_PANE_WIDTH -b "$self_path $pane_id"
+    tmux select-pane -l
+    tmux copy-mode
     exit 0
-  else
-    enter_copy_mode "$target_pane"
   fi
+
+  until is_in_copy_mode; do
+    sleep 0.05
+  done
 
   update_loop
   restore_pane_width "$target_pane"
