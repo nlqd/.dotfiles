@@ -15,3 +15,13 @@
 !.claude/commands/**
 !.claude/settings.json
 .config/btop
+.config/emacs/auto-save-list
+.config/emacs/eln-cache/29.3-ffcb1460
+.config/emacs/elpa
+.config/emacs/transient
+.config/emacs/tree-sitter
+.config/emacs/custom.el
+.config/emacs/history
+.config/emacs/places
+.config/emacs/projects
+.config/emacs/recentf

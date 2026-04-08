@@ -4,6 +4,13 @@
 
 readonly LINE_NUMBER_PANE_WIDTH=3
 
+readonly ESC_HOME="\033[H"
+readonly ESC_ERASE_EOL="\033[K"
+readonly ESC_ERASE_BELOW="\033[J"
+readonly ESC_RESET="\033[0m"
+readonly ESC_DIM="\033[2m"
+readonly ESC_BOLD="\033[1m"
+
 get_cursor_line() {
   local output
   output=$(tmux display-message -pt "$target_pane" -F '#{copy_cursor_y}')
@@ -21,26 +28,32 @@ redraw_line_numbers() {
   local lines
   lines=$(tput lines)
 
-  local out="\033[H\033[2m"
+  local out="${ESC_HOME}${ESC_DIM}"
   local i=$cursor_line
+
+  # upper
   while [ "$i" -ge 1 ]; do
-    out="${out}${i}\033[K\n"
+    out="${out}${i}${ESC_ERASE_EOL}\n"
     i=$((i - 1))
   done
-  out="${out}\033[0m\033[1m 0\033[K\033[0m\n"
+  out="${out}${ESC_RESET}"
 
+  # current line
+  out="${out}${ESC_BOLD} 0${ESC_ERASE_EOL}${ESC_RESET}\n"
+
+  # lower
   if [ "$lines" -gt $((cursor_line + 1)) ]; then
-    out="${out}\033[2m"
+    out="${out}${ESC_DIM}"
     local limit=$((lines - cursor_line - 2))
     i=1
     while [ "$i" -le "$limit" ]; do
-      out="${out}${i}\033[K\n"
+      out="${out}${i}${ESC_ERASE_EOL}\n"
       i=$((i + 1))
     done
-    out="${out}$((lines - cursor_line - 1))\033[K\033[0m"
+    out="${out}$((lines - cursor_line - 1))${ESC_ERASE_EOL}${ESC_RESET}"
   fi
 
-  printf "%b\033[J" "$out"
+  printf "%b%b" "$out" "$ESC_ERASE_BELOW"
 }
 
 update_loop() {
@@ -55,10 +68,6 @@ update_loop() {
       last_cursor_line=$cursor_line
     fi
   done
-}
-
-restore_pane_width() {
-  tmux resize-pane -t "$1" -L $((LINE_NUMBER_PANE_WIDTH + 1))
 }
 
 main() {
@@ -82,7 +91,6 @@ main() {
   done
 
   update_loop
-  restore_pane_width "$target_pane"
 }
 
 main "$@"

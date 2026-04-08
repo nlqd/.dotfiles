@@ -11,9 +11,9 @@ https://vietnamnews.vn/rss/politics-laws.rss
 # https://thanhnien.vn/rss/thoi-su.rss
 https://thanhnien.vn/rss/chinh-tri.rss
 https://thanhnien.vn/rss/cong-nghe.rss
-https://thanhnien.vn/rss/giao-duc.rss
-https://thanhnien.vn/rss/kinh-te.rss
-https://thanhnien.vn/rss/the-gioi.rss
+# https://thanhnien.vn/rss/giao-duc.rss
+# https://thanhnien.vn/rss/kinh-te.rss
+# https://thanhnien.vn/rss/the-gioi.rss
 
 https://vnbusiness.vn/rss/feed.rss
 https://vnbusiness.vn/rss/thoi-su.rss
@@ -25,9 +25,9 @@ https://vnbusiness.vn/rss/startup.rss
 https://vnbusiness.vn/rss/tai-chinh.rss
 
 # https://nld.com.vn/rss/home.rss
-https://nld.com.vn/rss/giao-duc-khoa-hoc.rss
+# https://nld.com.vn/rss/giao-duc-khoa-hoc.rss
 https://nld.com.vn/rss/khoa-hoc.rss
-https://nld.com.vn/rss/kinh-te.rss
+# https://nld.com.vn/rss/kinh-te.rss
 https://nld.com.vn/rss/net-zero.rss
 https://nld.com.vn/rss/quoc-te.rss
 # https://nld.com.vn/rss/thoi-su.rss
@@ -37,10 +37,10 @@ https://mst.gov.vn/rss/khoa-hoc-va-cong-nghe.rss
 https://mst.gov.vn/rss/tin-tuc-su-kien.rss
 
 https://plo.vn/rss/ban-doc-24.rss
-https://plo.vn/rss/giao-duc-21.rss
-https://plo.vn/rss/kinh-te-13.rss
+# https://plo.vn/rss/giao-duc-21.rss
+# https://plo.vn/rss/kinh-te-13.rss
 https://plo.vn/rss/phap-luat-114.rss
-https://plo.vn/rss/quoc-te-8.rss
+# https://plo.vn/rss/quoc-te-8.rss
 # https://plo.vn/rss/thoi-su-1.rss
 
 # https://nhandan.vn/rss/home.rss
@@ -48,11 +48,11 @@ https://nhandan.vn/rss/asean-704471.rss
 https://nhandan.vn/rss/chau-a-tbd-704472.rss
 https://nhandan.vn/rss/chau-au-704474.rss
 https://nhandan.vn/rss/chau-my-704475.rss
-https://nhandan.vn/rss/chinhtri-1171.rss
+# https://nhandan.vn/rss/chinhtri-1171.rss
 https://nhandan.vn/rss/chungkhoan-1191.rss
-https://nhandan.vn/rss/giaoduc-1303.rss
+# https://nhandan.vn/rss/giaoduc-1303.rss
 https://nhandan.vn/rss/khoahoc-congnghe-1292.rss
-https://nhandan.vn/rss/kinhte-1185.rss
+# https://nhandan.vn/rss/kinhte-1185.rss
 https://nhandan.vn/rss/phapluat-1287.rss
 https://nhandan.vn/rss/thegioi-1231.rss
 https://nhandan.vn/rss/tri-thuc-chuyen-sau-704477.rss
