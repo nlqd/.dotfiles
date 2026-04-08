@@ -74,10 +74,14 @@
         (go-mode        . go-ts-mode)
         (rust-mode      . rust-ts-mode)))
 
-;; Built-in: misc
+;; Aesthetic
 ;;   bright themes: tango, whiteboard, modus-operandi, adwaita
 ;;   dark themes: deeper-blue, wombat, tango-dark, 
 (load-theme 'tango t)
+(set-frame-font "Iosevka Nerd Font-12")
+(setq-default line-spacing 0.2)
+
+;; Built-in: misc
 (repeat-mode 1)
 (pixel-scroll-precision-mode 1)
 (recentf-mode 1)
