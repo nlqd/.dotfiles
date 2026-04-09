@@ -17,20 +17,19 @@ gaps inner 10px
 gaps horizontal 300px
 smart_gaps inverse_outer
 
-set $refresh_i3status killall -SIGUSR1 i3status
-bindsym XF86MonBrightnessUp   exec --no-startup-id xbrightness +0.05             && $refresh_i3status
-bindsym XF86MonBrightnessDown exec --no-startup-id xbrightness -0.05             && $refresh_i3status
-bindsym XF86AudioRaiseVolume  exec --no-startup-id wpctl       set-volume -l 1.0 @DEFAULT_AUDIO_SINK@   5%+
-bindsym XF86AudioLowerVolume  exec --no-startup-id wpctl       set-volume        @DEFAULT_AUDIO_SINK@   5%-
-bindsym XF86AudioMute         exec --no-startup-id wpctl       set-mute          @DEFAULT_AUDIO_SINK@   toggle
+bindsym XF86MonBrightnessUp   exec --no-startup-id xbrightness +0.05, exec --no-startup-id xi3status-poke
+bindsym XF86MonBrightnessDown exec --no-startup-id xbrightness -0.05, exec --no-startup-id xi3status-poke
+bindsym XF86AudioRaiseVolume  exec --no-startup-id wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+, exec --no-startup-id xi3status-poke
+bindsym XF86AudioLowerVolume  exec --no-startup-id wpctl set-volume        @DEFAULT_AUDIO_SINK@ 5%-, exec --no-startup-id xi3status-poke
+bindsym XF86AudioMute         exec --no-startup-id wpctl set-mute          @DEFAULT_AUDIO_SINK@ toggle, exec --no-startup-id xi3status-poke
 bindsym XF86AudioMicMute      exec --no-startup-id wpctl       set-mute          @DEFAULT_AUDIO_SOURCE@ toggle
 bindsym XF86AudioPlay         exec --no-startup-id playerctl   play-pause
 bindsym XF86AudioPause        exec --no-startup-id playerctl   play-pause
 bindsym XF86AudioNext         exec --no-startup-id playerctl   next
 bindsym XF86AudioPrev         exec --no-startup-id playerctl   previous
 # workaround on company keyboard
-bindsym XF86HomePage          exec --no-startup-id xbrightness -0.05             && $refresh_i3status
-bindsym XF86Mail              exec --no-startup-id xbrightness +0.05             && $refresh_i3status
+bindsym XF86HomePage          exec --no-startup-id xbrightness -0.05, exec --no-startup-id xi3status-poke
+bindsym XF86Mail              exec --no-startup-id xbrightness +0.05, exec --no-startup-id xi3status-poke
 
 bindsym  $mod+d        exec  --no-startup-id  dmenu_run -fn "JetBrainsMono NF"
 bindsym  $mod+Shift+d  exec  --no-startup-id  i3-dmenu-desktop --dmenu='dmenu -fn "JetBrainsMono NF"'
@@ -39,9 +38,9 @@ bindsym  $mod+t        exec  --no-startup-id  alacritty
 bindsym  $mod+b        exec  --no-startup-id  google-chrome
 bindsym  $mod+Shift+b  exec  --no-startup-id  firefox
 bindsym  $mod+s        exec  --no-startup-id  slack
-bindsym  $mod+space    exec  --no-startup-id  ibus-toggle && $refresh_i3status
+bindsym  $mod+space    exec  --no-startup-id  ibus-toggle, exec --no-startup-id xi3status-poke
 bindsym  Print         exec  --no-startup-id  xscreenshot
-bindsym  Shift+Print   exec  --no-startup-id  xrecord     && $refresh_i3status
+bindsym  Shift+Print   exec  --no-startup-id  xrecord, exec --no-startup-id xi3status-poke
 bindsym  $mod+Shift+e  exec  "i3-nagbar -t warning -m 'Do you really want to exit i3?' -B 'Yes, exit i3' 'i3-msg exit'"
 
 bindsym $mod+Shift+q kill

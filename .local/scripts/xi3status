@@ -24,7 +24,7 @@ get_weather() {
         cat "$cache_file"
     else
         local weather=$(curl -s --max-time 2 'wttr.in/?format=%c+%t+%p' 2>/dev/null)
-        if [[ -n "$weather" ]]; then
+        if [[ -n "$weather" ]] && [[ "$weather" =~ [+-][0-9]+°[CF] ]]; then
             echo "$weather" > "$cache_file"
             echo "$weather"
         elif [[ -f "$cache_file" ]]; then
@@ -96,6 +96,8 @@ update_slow_data() {
     wait
 }
 
+_poke_file="/tmp/xi3status_poke"
+
 update_slow_data &
 _slow_update_counter=0
 
@@ -124,14 +126,14 @@ do
     [[ -n "$xm6_bat" ]] && segments+=("$xm6_bat")
     [[ -n "$corne_bat" ]] && segments+=("$corne_bat")
     [[ -n "$rec" ]] && segments+=("$rec")
-    cpu=$(awk '/^cpu / {idle=$5; total=0; for(i=2;i<=NF;i++) total+=$i; printf "C %.0f%%", 100*(1-idle/total)}' /proc/stat)
-    ram=$(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{printf "R %.0f%%", 100*(t-a)/t}' /proc/meminfo)
-    segments+=("$cpu")
-    segments+=("$ram")
 
     # Join with " | "
     custom=$(IFS='|'; echo "${segments[*]}" | sed 's/|/ | /g')
 
     echo "${custom}" || exit 1
-    sleep 1
+
+    for (( _w=0; _w<10; _w++ )); do
+        rm -f "$_poke_file" 2>/dev/null && break
+        sleep 0.1
+    done
 done
