@@ -12,14 +12,16 @@ readonly ESC_DIM="\033[2m"
 readonly ESC_BOLD="\033[1m"
 
 get_cursor_line() {
+  local pane=$1
   local output
-  output=$(tmux display-message -pt "$target_pane" -F '#{copy_cursor_y}')
+  output=$(tmux display-message -pt "$pane" -F '#{copy_cursor_y}')
   echo "${output:-0}"
 }
 
 is_in_copy_mode() {
+  local pane=$1
   local mode
-  mode=$(tmux display-message -p -t "$target_pane" -F '#{pane_mode}')
+  mode=$(tmux display-message -p -t "$pane" -F '#{pane_mode}')
   [ -n "$mode" ]
 }
 
@@ -28,18 +30,19 @@ redraw_line_numbers() {
   local lines
   lines=$(tput lines)
 
+  local fmt="%${LINE_NUMBER_PANE_WIDTH}d"
   local out="${ESC_HOME}${ESC_DIM}"
   local i=$cursor_line
 
   # upper
   while [ "$i" -ge 1 ]; do
-    out="${out}${i}${ESC_ERASE_EOL}\n"
+    out="${out}$(printf "$fmt" "$i")${ESC_ERASE_EOL}\n"
     i=$((i - 1))
   done
   out="${out}${ESC_RESET}"
 
   # current line
-  out="${out}${ESC_BOLD} 0${ESC_ERASE_EOL}${ESC_RESET}\n"
+  out="${out}${ESC_BOLD}0${ESC_ERASE_EOL}${ESC_RESET}\n"
 
   # lower
   if [ "$lines" -gt $((cursor_line + 1)) ]; then
@@ -47,50 +50,77 @@ redraw_line_numbers() {
     local limit=$((lines - cursor_line - 2))
     i=1
     while [ "$i" -le "$limit" ]; do
-      out="${out}${i}${ESC_ERASE_EOL}\n"
+      out="${out}$(printf "$fmt" "$i")${ESC_ERASE_EOL}\n"
       i=$((i + 1))
     done
-    out="${out}$((lines - cursor_line - 1))${ESC_ERASE_EOL}${ESC_RESET}"
+    out="${out}$(printf "$fmt" $((lines - cursor_line - 1)))${ESC_ERASE_EOL}${ESC_RESET}"
   fi
 
   printf "%b%b" "$out" "$ESC_ERASE_BELOW"
 }
 
 update_loop() {
+  local target_pane=$1
   local cursor_line=""
   local last_cursor_line="-1"
 
-  while is_in_copy_mode; do
-    cursor_line=$(get_cursor_line)
+  while is_in_copy_mode "$target_pane"; do
+    cursor_line=$(get_cursor_line "$target_pane")
 
     if [ "$cursor_line" -ne "$last_cursor_line" ]; then
       redraw_line_numbers "$cursor_line"
       last_cursor_line=$cursor_line
     fi
+
+    sleep 0.02
   done
 }
 
-main() {
+restore_layout_on_exit() {
   local target_pane=$1
+  local original_layout=$2
+  local window_id
+  window_id=$(tmux display-message -t "$target_pane" -pF '#{window_id}')
+  tmux set-hook -w -t "$window_id" pane-exited \
+    "select-layout '$original_layout' ; set-hook -uw pane-exited"
+}
 
-  if [ -z "$target_pane" ]; then
-    local self_path pane_id
-    self_path=$(realpath "$0")
-    pane_id=$(tmux display-message -pF "#{pane_id}")
+spawn_line_number_pane() {
+  local self_path pane_id
+  self_path=$(realpath "$0")
+  pane_id=$(tmux display-message -pF "#{pane_id}")
 
-    pgrep -f "$self_path $pane_id" >/dev/null && return
+  pgrep -f "$self_path $pane_id" >/dev/null && return
 
-    tmux split-window -h -l $LINE_NUMBER_PANE_WIDTH -b "$self_path $pane_id"
-    tmux select-pane -l
-    tmux copy-mode
-    exit 0
-  fi
+  local original_layout
+  original_layout=$(tmux display-message -pF '#{window_layout}')
 
-  until is_in_copy_mode; do
+  tmux split-window -h -l $LINE_NUMBER_PANE_WIDTH -b \
+    "$self_path $pane_id $(printf '%q' "$original_layout")"
+  sleep 0.1
+  tmux select-pane -l
+  tmux copy-mode
+  exit 0
+}
+
+run_line_numbers() {
+  local target_pane=$1
+  local original_layout=$2
+
+  until is_in_copy_mode "$target_pane"; do
     sleep 0.05
   done
 
-  update_loop
+  update_loop "$target_pane"
+  restore_layout_on_exit "$target_pane" "$original_layout"
+}
+
+main() {
+  if [ -z "$1" ]; then
+    spawn_line_number_pane
+  else
+    run_line_numbers "$1" "$2"
+  fi
 }
 
 main "$@"
