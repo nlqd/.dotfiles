@@ -34,6 +34,7 @@ vim.keymap.set('v', 'K', ":m '<-2<CR>gv=gv")
 vim.keymap.set({ 'n', 'v', 'x' }, 'k', "v:count == 0 ? 'gk' : 'k'", { expr = true, silent = true })
 vim.keymap.set({ 'n', 'v', 'x' }, 'j', "v:count == 0 ? 'gj' : 'j'", { expr = true, silent = true })
 vim.keymap.set('n', '<C-c>', '<cmd>nohlsearch<CR>')
+vim.keymap.set('t', '<C-\\><C-\\>', '<C-\\><C-n>')
 
 -- Autocmds
 vim.api.nvim_create_autocmd('TextYankPost', {
@@ -83,6 +84,13 @@ vim.pack.add({ gh 'stefandtw/quickfix-reflector.vim' })
 vim.pack.add({ gh 'tpope/vim-fugitive' })
 vim.pack.add({ gh 'tpope/vim-projectionist' })
 vim.pack.add({ gh 'tpope/vim-sleuth' })
+
+-- git
+vim.api.nvim_create_user_command('Gdiff', function(opts)
+    local branch = opts.args ~= '' and opts.args or 'main'
+    local base = vim.trim(vim.fn.system('git merge-base @ ' .. branch))
+    vim.cmd('Git diff -w ' .. base .. ' --stat -p')
+end, { nargs = '?' })
 
 -- lsp
 vim.pack.add({

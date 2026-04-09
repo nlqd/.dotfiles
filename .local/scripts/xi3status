@@ -34,9 +34,35 @@ get_weather() {
 }
 
 get_claude_ram() {
-    local gb=$(ps aux --no-headers | awk '/[c]laude/ {sum += $6} END {if (sum > 0) printf "%.1f", sum/1024/1024}')
-    if [[ -n "$gb" ]]; then
-        echo "🧠 ${gb}G"
+    local pids=$(pgrep -f '[c]laude' | tr '\n' ' ')
+    [[ -z "$pids" ]] && return
+    # Find claude PIDs, then BFS the process tree to sum all descendants' RSS
+    local claude_gb=$(ps -e -o pid=,ppid=,rss= | awk -v roots="$pids" '
+    BEGIN {
+        n = split(roots, r, " ")
+        for (i = 1; i <= n; i++) if (r[i] != "") is_claude[r[i]+0] = 1
+    }
+    {
+        pid = $1+0; ppid = $2+0; rss = $3+0
+        mem[pid] = rss
+        children[ppid] = children[ppid] " " pid
+    }
+    END {
+        qn = 0
+        for (p in is_claude) queue[qn++] = p+0
+        sum = 0
+        for (i = 0; i < qn; i++) {
+            p = queue[i]
+            sum += mem[p]
+            m = split(children[p], c, " ")
+            for (j = 1; j <= m; j++)
+                if (c[j] != "") queue[qn++] = c[j]+0
+        }
+        if (sum > 0) printf "%.1f", sum/1024/1024
+    }')
+    if [[ -n "$claude_gb" ]]; then
+        local used_gb=$(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{printf "%.1f", (t-a)/1024/1024}' /proc/meminfo)
+        echo "🧠 ${claude_gb}/${used_gb}G"
     fi
 }
 

@@ -42,10 +42,24 @@
   (evil-commentary-mode))
 
 ;; Which-key (built-in in 30, need package in 29)
-(use-package which-key
+;; (use-package which-key
+;;   :ensure t
+;;   :config
+;;   (which-key-mode))
+
+;; Git
+(use-package magit
   :ensure t
+  :defer t)
+
+;; Research: networked notes
+(use-package org-roam
+  :ensure t
+  :defer t
+  :custom
+  (org-roam-directory (expand-file-name "~/org/roam"))
   :config
-  (which-key-mode))
+  (org-roam-db-autosync-mode))
 
 ;; Built-in: vertical completion
 (fido-vertical-mode 1)
@@ -99,11 +113,21 @@
 (global-display-line-numbers-mode 1)
 (column-number-mode 1)
 
+;; Performance
+(setq bidi-display-reordering nil
+      fast-but-imprecise-scrolling t
+      read-process-output-max (* 4 1024 1024))
+
 ;; Sane defaults
 (setq make-backup-files nil
       auto-save-default nil
       create-lockfiles nil
+      save-interprogram-paste-before-kill t
+      kill-do-not-save-duplicates t
+      set-mark-command-repeat-pop t
+      help-window-select t
       custom-file (expand-file-name "custom.el" user-emacs-directory))
+(winner-mode 1)
 (when (file-exists-p custom-file)
   (load custom-file))
 
