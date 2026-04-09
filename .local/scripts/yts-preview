@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -o pipefail
+
+id="$1"
+
+f="$YTS_CACHE/${id}.jpg"
+[[ ! -f "$f" ]] && curl --silent "https://i.ytimg.com/vi/${id}/hqdefault.jpg" --output "$f"
+chafa --size="${FZF_PREVIEW_COLUMNS}x" "$f"
+echo
+
+jq -r "select(.id == \"${id}\") | \"  \(.channel // \"?\")  |  \(.view_count // \"?\") views  |  \(.duration_string // \"live\")\"" "$YTS_CACHE/results.jsonl"
+echo
+
+meta="$YTS_CACHE/${id}.json"
+if [[ ! -f "$meta" ]]; then
+  tmp=$(mktemp)
+  yt-dlp --dump-json "https://www.youtube.com/watch?v=${id}" >"$tmp" 2>/dev/null && mv "$tmp" "$meta"
+fi
+[[ -f "$meta" ]] && jq -r .description "$meta" | head -15

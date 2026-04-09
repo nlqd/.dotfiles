@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -o pipefail
+
+query="$*"
+[[ -z "$query" ]] && echo "Usage: yts <search query>" && exit 1
+
+export YTS_CACHE="/tmp/yts"
+mkdir -p "$YTS_CACHE"
+
+yt-dlp "ytsearch10:$query" --flat-playlist --dump-json >"$YTS_CACHE/results.jsonl" || exit 1
+
+# shellcheck disable=SC2016
+jq -r .id "$YTS_CACHE/results.jsonl" |
+  xargs -I{} -P10 sh -c \
+    '[ -f "$YTS_CACHE/{}.jpg" ] || curl --silent "https://i.ytimg.com/vi/{}/hqdefault.jpg" --output "$YTS_CACHE/{}.jpg"' &
+
+video_id=$(
+  jq -r '"\(.id)\t\(.title) [\(.duration_string // "live")] - \(.channel // "?")"' "$YTS_CACHE/results.jsonl" |
+    fzf --delimiter=$'\t' --with-nth=2 \
+      --preview='yts-preview {1}' |
+    cut -f1
+)
+
+[[ -n "$video_id" ]] && exec mpv "https://www.youtube.com/watch?v=$video_id"
