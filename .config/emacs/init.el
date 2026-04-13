@@ -33,7 +33,7 @@
   :ensure t
   :after evil
   :config
-  (evil-collection-init))
+  (evil-collection-init '(dired magit org eglot)))
 
 (use-package evil-commentary
   :ensure t
@@ -96,7 +96,7 @@
  ((find-font (font-spec :name "Iosevka Nerd Font"))
   (set-frame-font "Iosevka Nerd Font-12"))
  ((find-font (font-spec :name "Berkeley Mono"))
-  (set-frame-font "Berkeley Mono-12")))
+  (set-frame-font "Berkeley Mono-11")))
 (setq-default line-spacing 0.2)
 
 ;; Built-in: misc
