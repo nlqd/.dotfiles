@@ -2,26 +2,168 @@
 # ghr - github release manager
 
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ghr"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ghr"
 BIN_DIR="${HOME}/.local/bin"
 API="https://api.github.com/repos"
 
-mkdir -p "$CACHE_DIR" "$BIN_DIR"
+mkdir -p "$CACHE_DIR" "$CONFIG_DIR" "$BIN_DIR"
+
+PROFILE_FILE="$CONFIG_DIR/profile"
+if [ -f "$PROFILE_FILE" ]; then
+  GHR_PROFILE=$(cat "$PROFILE_FILE")
+else
+  read -r -e -i "$(hostname)" -p "Profile name: " GHR_PROFILE
+  GHR_PROFILE="${GHR_PROFILE:-$(hostname)}"
+  echo "$GHR_PROFILE" >"$PROFILE_FILE"
+fi
+MANIFEST="$CONFIG_DIR/manifest-${GHR_PROFILE}.json"
 
 get_dir() { echo "$CACHE_DIR/$(echo "$1" | tr '/' '_')"; }
 
+manifest_read() {
+  [ -f "$MANIFEST" ] && cat "$MANIFEST" || echo "[]"
+}
+
+manifest_upsert() {
+  local repo="$1" asset="$2" version="$3" links_json="$4"
+  local tmp="$MANIFEST.tmp"
+  manifest_read | jq \
+    --arg repo "$repo" \
+    --arg asset "$asset" \
+    --arg version "$version" \
+    --argjson links "$links_json" \
+    '[.[] | select(.repo != $repo)] + [{repo: $repo, asset: $asset, version: $version, links: $links}]' \
+    >"$tmp" && mv "$tmp" "$MANIFEST"
+}
+
+fuzzy_match_asset() {
+  local stored="$1"
+  local available="$2"
+
+  # Exact match first
+  local exact
+  exact=$(echo "$available" | grep -xF "$stored")
+  if [ -n "$exact" ]; then
+    echo "$exact"
+    return 0
+  fi
+
+  # Strip version numbers to create a looser fzf query
+  local query
+  query=$(echo "$stored" | sed -E 's/v?[0-9]+\.[0-9]+(\.[0-9]+)?([-_.][a-zA-Z0-9.]+)*//g')
+
+  local match
+  match=$(echo "$available" | fzf --filter="$query" --no-sort | head -1)
+
+  if [ -n "$match" ]; then
+    echo "$match"
+    return 0
+  fi
+  return 1
+}
+
+list_extracted_files() {
+  local dir="$1" archive_name="$2"
+  find "$dir" -type f \
+    -not -name ".repo" -not -name ".version" -not -name "$archive_name" \
+    -printf '%P\n'
+}
+
+fuzzy_match_binary() {
+  local stored="$1" dir="$2" archive_name="$3"
+  local available
+  available=$(list_extracted_files "$dir" "$archive_name" | while read -r f; do
+    [ -x "$dir/$f" ] && echo "$f"
+  done)
+  fuzzy_match_asset "$stored" "$available"
+}
+
+extract_asset() {
+  local dir="$1" name="$2"
+  case "$name" in
+  *.tar.gz | *.tgz) tar -xzf "$dir/$name" -C "$dir" ;;
+  *.zip) unzip -oq "$dir/$name" -d "$dir" ;;
+  *) chmod +x "$dir/$name" ;;
+  esac
+}
+
+write_cache_meta() {
+  local dir="$1" repo="$2" ver="$3"
+  echo "$repo" >"$dir/.repo"
+  echo "$ver" >"$dir/.version"
+}
+
+prompt_symlink() {
+  local binary_path="$1"
+  local default
+  default="$BIN_DIR/$(basename "$binary_path")"
+  local symlink_path
+
+  read -r -e -i "$default" -p "Symlink: " symlink_path
+  symlink_path="${symlink_path:-$default}"
+
+  mkdir -p "$(dirname "$symlink_path")"
+  echo "$symlink_path"
+}
+
+pick_executable() {
+  local dir="$1" archive_name="$2"
+
+  local exec_files=()
+  local other_files=()
+
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    if [ -x "$dir/$f" ]; then
+      exec_files+=("$f")
+    else
+      other_files+=("$f")
+    fi
+  done < <(list_extracted_files "$dir" "$archive_name" | sort)
+
+  local all=("${exec_files[@]}" "${other_files[@]}")
+  local idx=1
+
+  echo ""
+  echo "Files:"
+  for f in "${exec_files[@]}"; do
+    printf "  %d  %s  [+x]\n" "$idx" "$f"
+    idx=$((idx + 1))
+  done
+  for f in "${other_files[@]}"; do
+    printf "  %d  %s\n" "$idx" "$f"
+    idx=$((idx + 1))
+  done
+
+  printf "\nSelect executable [1]: "
+  read -r n
+  n="${n:-1}"
+
+  if ! [[ "$n" =~ ^[0-9]+$ ]] || [ "$n" -lt 1 ] || [ "$n" -gt "${#all[@]}" ]; then
+    echo "Invalid selection: $n" >&2
+    return 1
+  fi
+
+  echo "${all[$((n - 1))]}"
+}
+
 install_repo() {
-  repo="$1"
+  local repo="$1"
+  local dir
   dir=$(get_dir "$repo")
   mkdir -p "$dir"
 
+  local release
   release=$(curl -sf "$API/$repo/releases/latest") || {
     echo "No releases for $repo" >&2
     return 1
   }
 
+  local ver
   ver=$(echo "$release" | jq -r '.tag_name')
   echo "Latest: $ver"
 
+  local assets
   assets=$(echo "$release" | jq -r '.assets[] | "\(.name)\t\(.browser_download_url)"')
 
   [ -z "$assets" ] && {
@@ -29,52 +171,218 @@ install_repo() {
     return 1
   }
 
+  local asset_count
+  asset_count=$(echo "$assets" | wc -l)
   echo "$assets" | cut -f1 | nl
   printf "Select [1]: "
   read -r n
   n="${n:-1}"
 
+  if ! [[ "$n" =~ ^[0-9]+$ ]] || [ "$n" -lt 1 ] || [ "$n" -gt "$asset_count" ]; then
+    echo "Invalid selection: $n" >&2
+    return 1
+  fi
+
+  local url name
   url=$(echo "$assets" | sed -n "${n}p" | cut -f2)
   name=$(echo "$assets" | sed -n "${n}p" | cut -f1)
 
   echo "Downloading $name..."
-  curl -L -o "$dir/$name" "$url"
+  curl -L --progress-bar -o "$dir/$name" "$url"
+  write_cache_meta "$dir" "$repo" "$ver"
 
-  echo "$repo" >"$dir/.repo"
-  echo "$ver" >"$dir/.version"
-
+  local binary
   case "$name" in
-  *.tar.gz | *.tgz) tar -xzf "$dir/$name" -C "$dir" ;;
-  *.zip) unzip -o "$dir/$name" -d "$dir" ;;
+  *.tar.gz | *.tgz | *.zip)
+    echo "Extracting..."
+    extract_asset "$dir" "$name"
+    binary=$(pick_executable "$dir" "$name") || return 1
+    ;;
   *)
-    chmod +x "$dir/$name"
-    ln -sf "$dir/$name" "$BIN_DIR/"
+    extract_asset "$dir" "$name"
+    binary="$name"
     ;;
   esac
 
-  echo "Installed $repo ($ver)"
+  local symlink_path
+  symlink_path=$(prompt_symlink "$binary")
+  ln -sf "$dir/$binary" "$symlink_path"
+
+  local links_json
+  links_json=$(jq -n --arg src "$binary" --arg dst "$symlink_path" '{($src): $dst}')
+  manifest_upsert "$repo" "$name" "$ver" "$links_json"
+
+  echo "Installed $repo ($ver) -> $symlink_path"
+}
+
+# Downloads latest release and creates symlinks from a manifest entry.
+# Writes result TSV (repo, asset, ver, links_json) to $result_file.
+# Status messages go to stdout/stderr normally.
+restore_single() {
+  local repo="$1" asset="$2" links_json="$3" prefix="$4" result_file="$5"
+
+  local dir
+  dir=$(get_dir "$repo")
+  mkdir -p "$dir"
+
+  local release
+  release=$(curl -sf "$API/$repo/releases/latest") || {
+    echo "$prefix $repo ... FAIL (no releases)" >&2
+    return 1
+  }
+
+  local ver
+  ver=$(echo "$release" | jq -r '.tag_name')
+  local available
+  available=$(echo "$release" | jq -r '.assets[].name')
+
+  local matched_asset
+  matched_asset=$(fuzzy_match_asset "$asset" "$available") || {
+    echo "$prefix $repo ... FAIL (asset ambiguous, run ghr install manually)" >&2
+    return 1
+  }
+
+  local url
+  url=$(echo "$release" | jq -r --arg name "$matched_asset" '.assets[] | select(.name == $name) | .browser_download_url')
+
+  curl -sfL -o "$dir/$matched_asset" "$url" || {
+    echo "$prefix $repo ... FAIL (download error)" >&2
+    return 1
+  }
+
+  write_cache_meta "$dir" "$repo" "$ver"
+  extract_asset "$dir" "$matched_asset"
+
+  local new_links_json="{}"
+  local src dst actual_src
+  while IFS=$'\t' read -r src dst; do
+    actual_src=$(fuzzy_match_binary "$src" "$dir" "$matched_asset") || actual_src="$src"
+    mkdir -p "$(dirname "$dst")"
+    chmod +x "$dir/$actual_src"
+    ln -sf "$dir/$actual_src" "$dst"
+    new_links_json=$(echo "$new_links_json" | jq -c --arg s "$actual_src" --arg d "$dst" '. + {($s): $d}')
+  done < <(echo "$links_json" | jq -r 'to_entries[] | "\(.key)\t\(.value)"')
+
+  printf "%s\t%s\t%s\t%s" "$repo" "$matched_asset" "$ver" "$new_links_json" >"$result_file"
+  echo "$prefix $repo ... ok"
+}
+
+apply_restore_results() {
+  local tmpdir="$1" count="$2"
+  local i=0
+  while [ "$i" -lt "$count" ]; do
+    if [ -s "$tmpdir/$i" ]; then
+      IFS=$'\t' read -r repo asset ver links_json <"$tmpdir/$i"
+      manifest_upsert "$repo" "$asset" "$ver" "$links_json"
+    fi
+    i=$((i + 1))
+  done
+}
+
+restore_all() {
+  local manifest
+  manifest=$(manifest_read)
+  local total
+  total=$(echo "$manifest" | jq 'length')
+
+  [ "$total" -eq 0 ] && {
+    echo "Nothing to restore (manifest empty)"
+    return
+  }
+
+  echo "Restoring $total tools from manifest..."
+  echo ""
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local pids=()
+  local i=0
+  while [ "$i" -lt "$total" ]; do
+    read -r repo asset links_json < <(echo "$manifest" | jq -r ".[$i] | [.repo, .asset, (.links | tojson)] | @tsv")
+    restore_single "$repo" "$asset" "$links_json" "[$((i + 1))/$total]" "$tmpdir/$i" \
+      >"$tmpdir/$i.log" 2>&1 &
+    pids+=($!)
+    i=$((i + 1))
+  done
+
+  local failed=0
+  for pid in "${pids[@]}"; do
+    wait "$pid" || failed=$((failed + 1))
+  done
+
+  i=0
+  while [ "$i" -lt "$total" ]; do
+    cat "$tmpdir/$i.log" 2>/dev/null
+    i=$((i + 1))
+  done
+
+  apply_restore_results "$tmpdir" "$total"
+  rm -rf "$tmpdir"
+
+  echo ""
+  echo "Restored $((total - failed))/$total tools"
+  [ "$failed" -gt 0 ] && return 1
+  return 0
+}
+
+update_repo() {
+  local repo="$1"
+  local manifest
+  manifest=$(manifest_read)
+
+  local entry
+  entry=$(echo "$manifest" | jq -r --arg repo "$repo" '.[] | select(.repo == $repo)')
+
+  [ -z "$entry" ] && {
+    echo "$repo not in manifest. Use 'ghr install $repo' first." >&2
+    return 1
+  }
+
+  local asset links_json
+  asset=$(echo "$entry" | jq -r '.asset')
+  links_json=$(echo "$entry" | jq -c '.links')
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  restore_single "$repo" "$asset" "$links_json" "[1/1]" "$tmpdir/0"
+  apply_restore_results "$tmpdir" 1
+  rm -rf "$tmpdir"
 }
 
 list_all() {
+  local symlink_map=""
+  [ -f "$MANIFEST" ] && symlink_map=$(jq -r '.[] | "\(.repo)\t\(.links | values | join(", "))"' "$MANIFEST")
+
+  # shellcheck disable=SC2016
   (
-    printf "REPO\tINSTALLED\tLATEST\n"
+    printf "REPO\tINSTALLED\tLATEST\tSYMLINK\n"
     printf '%s\n' "$CACHE_DIR"/* | xargs -P8 -I{} bash -c '
       dir="$1"
+      symlink_map="$2"
       [ -f "$dir/.repo" ] || exit
       repo=$(cat "$dir/.repo")
       local_ver=$(cat "$dir/.version")
       remote_ver=$(curl -sf "'"$API"'/$repo/releases/latest" | jq -r ".tag_name")
-      printf "%s\t%s\t%s\n" "$repo" "$local_ver" "$remote_ver"
-    ' _ {}
+      symlink=$(echo "$symlink_map" | grep "^$repo	" | cut -f2)
+      [ -z "$symlink" ] && symlink="-"
+      printf "%s\t%s\t%s\t%s\n" "$repo" "$local_ver" "$remote_ver" "$symlink"
+    ' _ {} "$symlink_map"
   ) | column --table --separator $'\t'
 }
 
 main() {
   case "$1" in
   install | i) install_repo "$2" ;;
-  update | u) install_repo "$2" ;;
+  update | u)
+    if [ -n "$2" ]; then
+      update_repo "$2"
+    else
+      restore_all
+    fi
+    ;;
+  restore | r) restore_all ;;
   list | ls) list_all ;;
-  *) echo "Usage: ghr install|update|list <owner/repo>" >&2 ;;
+  *) echo "Usage: ghr <install|update|restore|list> [owner/repo]" >&2 ;;
   esac
 }
 
