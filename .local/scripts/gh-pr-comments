@@ -26,7 +26,7 @@ response=$(gh api graphql -f query='
             createdAt
           }
         }
-        latestReviews(first: 100) {
+        reviews(last: 100) {
           nodes {
             author { login }
             state
@@ -67,7 +67,7 @@ if $OUTPUT_JSON; then
     mergeStateStatus,
     baseRefName,
     headRefName,
-    reviews: .latestReviews.nodes,
+    reviews: [.reviews.nodes[] | select(.body and .body != "")],
     comments: [.comments.nodes[] | select(.author.login != "claude" and .author.login != "github-actions")],
     reviewThreads: .reviewThreads.nodes
   }'
@@ -76,7 +76,7 @@ fi
 
 echo "$response" | jq -r --arg num "$number" '
 .data.repository.pullRequest as $pr |
-($pr.latestReviews.nodes | length) as $review_count |
+($pr.reviews.nodes | length) as $review_count |
 [$pr.comments.nodes[] | select(.author.login != "claude" and .author.login != "github-actions")] as $conv |
 [$pr.reviewThreads.nodes[] | select(.isResolved)] as $resolved |
 [$pr.reviewThreads.nodes[] | select(.isResolved | not)] as $open |
@@ -88,20 +88,24 @@ Merge: \($pr.mergeStateStatus // "UNKNOWN") | Conflicts: \($pr.mergeable // "UNK
 REVIEWER        STATE               DATE
 ─────────────────────────────────────────────────────
 \(if $review_count == 0 then "  (no reviews yet)" else
-  [$pr.latestReviews.nodes[] |
-    "\(.author.login)\(" " * (15 - (.author.login | length))) \(
-      if .state == "APPROVED" then "✓ APPROVED"
-      elif .state == "CHANGES_REQUESTED" then "✗ CHANGES_REQ"
-      elif .state == "COMMENTED" then "💬 COMMENTED"
-      elif .state == "DISMISSED" then "⊘ DISMISSED"
-      else .state end
+  ([$pr.reviews.nodes[] | .author.login] | unique) as $reviewers |
+  [$reviewers[] as $login |
+    ($pr.reviews.nodes | map(select(.author.login == $login))) as $user_reviews |
+    ($user_reviews | last) as $latest |
+    ([$user_reviews[] | select(.body and .body != "") | .body] | join("\n\n")) as $all_bodies |
+    "\($login)\(" " * (15 - ($login | length))) \(
+      if $latest.state == "APPROVED" then "✓ APPROVED"
+      elif $latest.state == "CHANGES_REQUESTED" then "✗ CHANGES_REQ"
+      elif $latest.state == "COMMENTED" then "💬 COMMENTED"
+      elif $latest.state == "DISMISSED" then "⊘ DISMISSED"
+      else $latest.state end
     )\(" " * (19 - (
-      if .state == "APPROVED" then 10
-      elif .state == "CHANGES_REQUESTED" then 13
-      elif .state == "COMMENTED" then 11
-      elif .state == "DISMISSED" then 10
-      else (.state | length) end
-    ))) \(.submittedAt | split("T")[0])\(if .body and .body != "" then "\n                \(.body | gsub("\n"; "\n                "))" else "" end)"
+      if $latest.state == "APPROVED" then 10
+      elif $latest.state == "CHANGES_REQUESTED" then 13
+      elif $latest.state == "COMMENTED" then 11
+      elif $latest.state == "DISMISSED" then 10
+      else ($latest.state | length) end
+    ))) \($latest.submittedAt | split("T")[0])\(if $all_bodies != "" then "\n                \($all_bodies | gsub("\n"; "\n                "))" else "" end)"
   ] | join("\n")
 end)
 \(if ($conv | length) > 0 then "

@@ -92,7 +92,11 @@
 ;;   bright themes: tango, whiteboard, modus-operandi, adwaita
 ;;   dark themes: deeper-blue, wombat, tango-dark, 
 (load-theme 'tango t)
-(set-frame-font "Iosevka Nerd Font-12")
+(cond 
+ ((find-font (font-spec :name "Iosevka Nerd Font"))
+  (set-frame-font "Iosevka Nerd Font-12"))
+ ((find-font (font-spec :name "Berkeley Mono"))
+  (set-frame-font "Berkeley Mono-12")))
 (setq-default line-spacing 0.2)
 
 ;; Built-in: misc
