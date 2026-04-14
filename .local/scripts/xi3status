@@ -1,50 +1,54 @@
 #!/usr/bin/env bash
 
 get_bt_battery() {
-    local device=$1
-    local icon=$2
-    local battery=$(bluetoothctl info "$device" 2>/dev/null | grep -oP 'Battery Percentage: 0x[0-9a-f]+ \(\K\d+')
-    if [[ -n "$battery" ]]; then
-        echo "${icon} ${battery}%"
-    fi
+	local device=$1
+	local icon=$2
+	local battery
+	battery=$(bluetoothctl info "$device" 2>/dev/null | grep -oP 'Battery Percentage: 0x[0-9a-f]+ \(\K\d+')
+	if [[ -n "$battery" ]]; then
+		echo "${icon} ${battery}%"
+	fi
 }
 
 get_gpu_load() {
-    local gpu_load=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null)
-    if [[ -n "$gpu_load" ]]; then
-        printf "🤖 %3d%%" "$gpu_load"
-    fi
+	local gpu_load
+	gpu_load=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null)
+	if [[ -n "$gpu_load" ]]; then
+		printf "🤖 %3d%%" "$gpu_load"
+	fi
 }
 
 get_weather() {
-    local cache_file="/tmp/wttr_cache"
-    local cache_time=600
+	local cache_file="/tmp/wttr_cache"
+	local cache_time=600
 
-    if [[ -f "$cache_file" ]] && [[ $(($(date +%s) - $(stat -c %Y "$cache_file"))) -lt $cache_time ]]; then
-        cat "$cache_file"
-    else
-        local weather=$(curl -s --max-time 2 'wttr.in/?format=%c+%t+%p' 2>/dev/null)
-        if [[ -n "$weather" ]] && [[ "$weather" =~ [+-][0-9]+°[CF] ]]; then
-            echo "$weather" > "$cache_file"
-            echo "$weather"
-        elif [[ -f "$cache_file" ]]; then
-            cat "$cache_file"
-        fi
-    fi
+	if [[ -f "$cache_file" ]] && [[ $(($(date +%s) - $(stat -c %Y "$cache_file"))) -lt $cache_time ]]; then
+		cat "$cache_file"
+	else
+		local weather
+		weather=$(curl -s --max-time 2 'wttr.in/?format=%c+%t+%p' 2>/dev/null)
+		if [[ -n "$weather" ]] && [[ "$weather" =~ [+-][0-9]+°[CF] ]]; then
+			echo "$weather" >"$cache_file"
+			echo "$weather"
+		elif [[ -f "$cache_file" ]]; then
+			cat "$cache_file"
+		fi
+	fi
 }
 
 get_claude_ram() {
-    local pids=$(pgrep -f '[c]laude' | tr '\n' ' ')
-    [[ -z "$pids" ]] && return
-    # Find claude PIDs, then BFS the process tree to sum all descendants' RSS
-    local claude_gb=$(ps -e -o pid=,ppid=,rss= | awk -v roots="$pids" '
+	local pids
+	pids=$(pgrep -f '[c]laude' | tr '\n' ' ')
+	[[ -z "$pids" ]] && return
+	# PSS (not RSS) avoids double-counting shared pages across node processes
+	local claude_gb
+	claude_gb=$(ps -e -o pid=,ppid= | awk -v roots="$pids" '
     BEGIN {
         n = split(roots, r, " ")
         for (i = 1; i <= n; i++) if (r[i] != "") is_claude[r[i]+0] = 1
     }
     {
-        pid = $1+0; ppid = $2+0; rss = $3+0
-        mem[pid] = rss
+        pid = $1+0; ppid = $2+0
         children[ppid] = children[ppid] " " pid
     }
     END {
@@ -53,23 +57,27 @@ get_claude_ram() {
         sum = 0
         for (i = 0; i < qn; i++) {
             p = queue[i]
-            sum += mem[p]
+            smaps = "/proc/" p "/smaps_rollup"
+            while ((getline line < smaps) > 0)
+                if (line ~ /^Pss:/) { split(line, f); sum += f[2] }
+            close(smaps)
             m = split(children[p], c, " ")
             for (j = 1; j <= m; j++)
                 if (c[j] != "") queue[qn++] = c[j]+0
         }
         if (sum > 0) printf "%.1f", sum/1024/1024
     }')
-    if [[ -n "$claude_gb" ]]; then
-        local used_gb=$(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{printf "%.1f", (t-a)/1024/1024}' /proc/meminfo)
-        echo "🧠 ${claude_gb}/${used_gb}G"
-    fi
+	if [[ -n "$claude_gb" ]]; then
+		local used_gb
+		used_gb=$(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{printf "%.1f", (t-a)/1024/1024}' /proc/meminfo)
+		echo "🧠 ${claude_gb}/${used_gb}G"
+	fi
 }
 
 get_xrecord() {
-    if [[ -f "/tmp/recpid" ]]; then
-        echo "REC: ●"
-    fi
+	if [[ -f "/tmp/recpid" ]]; then
+		echo "REC: ●"
+	fi
 }
 
 _cache_dir="/tmp/xi3status_cache"
@@ -78,22 +86,24 @@ mkdir -p "$_cache_dir"
 
 # Write result to cache; if empty, keep old value up to TTL then expire
 write_cache() {
-    local file=$1
-    shift
-    local result=$("$@")
-    if [[ -n "$result" ]]; then
-        echo "$result" > "$file"
-    elif [[ -f "$file" ]] && (( $(date +%s) - $(stat -c %Y "$file") > _cache_ttl )); then
-        rm -f "$file"
-    fi
+	local file=$1
+	shift
+	local result
+	result=$("$@")
+	if [[ -n "$result" ]]; then
+		echo "$result" >"$file"
+	elif [[ -f "$file" ]] && (($(date +%s) - $(stat -c %Y "$file") > _cache_ttl)); then
+		rm -f "$file"
+	fi
 }
 
 update_slow_data() {
-    write_cache "$_cache_dir/xm6_bat" get_bt_battery "58:18:62:01:E5:78" "🎧" &
-    write_cache "$_cache_dir/corne_bat" get_bt_battery "D3:AC:8D:04:52:D5" "⌨" &
-    write_cache "$_cache_dir/gpu_load" get_gpu_load &
-    write_cache "$_cache_dir/weather" get_weather &
-    wait
+	write_cache "$_cache_dir/xm6_bat" get_bt_battery "58:18:62:01:E5:78" "🎧" &
+	write_cache "$_cache_dir/corne_bat" get_bt_battery "D3:AC:8D:04:52:D5" "⌨" &
+	write_cache "$_cache_dir/gpu_load" get_gpu_load &
+	write_cache "$_cache_dir/claude_ram" get_claude_ram &
+	write_cache "$_cache_dir/weather" get_weather &
+	wait
 }
 
 _poke_file="/tmp/xi3status_poke"
@@ -101,39 +111,42 @@ _poke_file="/tmp/xi3status_poke"
 update_slow_data &
 _slow_update_counter=0
 
-while :
-do
-    if (( _slow_update_counter % 5 == 0 )); then
-        update_slow_data &
-    fi
-    _slow_update_counter=$(( _slow_update_counter + 1 ))
+while :; do
+	if ((_slow_update_counter % 5 == 0)); then
+		update_slow_data &
+	fi
+	_slow_update_counter=$((_slow_update_counter + 1))
 
-    i3s=$(i3status --run-once 2>/dev/null)
-    xm6_bat=$(cat "$_cache_dir/xm6_bat" 2>/dev/null)
-    corne_bat=$(cat "$_cache_dir/corne_bat" 2>/dev/null)
-    gpu_load=$(cat "$_cache_dir/gpu_load" 2>/dev/null)
-    weather=$(cat "$_cache_dir/weather" 2>/dev/null)
-    rec=$(get_xrecord)
-    claude_ram=$(get_claude_ram)
+	i3s=$(i3status --run-once 2>/dev/null)
+	xm6_bat=$(cat "$_cache_dir/xm6_bat" 2>/dev/null)
+	corne_bat=$(cat "$_cache_dir/corne_bat" 2>/dev/null)
+	gpu_load=$(cat "$_cache_dir/gpu_load" 2>/dev/null)
+	weather=$(cat "$_cache_dir/weather" 2>/dev/null)
+	rec=$(get_xrecord)
+	claude_ram=$(cat "$_cache_dir/claude_ram" 2>/dev/null)
 
-    # Build segments, skip empties
-    segments=()
-    [[ -n "$i3s" ]] && segments+=("$i3s")
-    [[ -n "$weather" ]] && segments+=("$weather")
-    segments+=("🔆 $(xbrightness)")
-    [[ -n "$gpu_load" ]] && segments+=("$gpu_load")
-    [[ -n "$claude_ram" ]] && segments+=("$claude_ram")
-    [[ -n "$xm6_bat" ]] && segments+=("$xm6_bat")
-    [[ -n "$corne_bat" ]] && segments+=("$corne_bat")
-    [[ -n "$rec" ]] && segments+=("$rec")
+	# Build segments, skip empties
+	segments=()
+	[[ -n "$i3s" ]] && segments+=("$i3s")
+	[[ -n "$weather" ]] && segments+=("$weather")
+	segments+=("🔆 $(xbrightness)")
+	[[ -n "$gpu_load" ]] && segments+=("$gpu_load")
+	[[ -n "$claude_ram" ]] && segments+=("$claude_ram")
+	[[ -n "$xm6_bat" ]] && segments+=("$xm6_bat")
+	[[ -n "$corne_bat" ]] && segments+=("$corne_bat")
+	[[ -n "$rec" ]] && segments+=("$rec")
 
-    # Join with " | "
-    custom=$(IFS='|'; echo "${segments[*]}" | sed 's/|/ | /g')
+	# Join with " | "
+	custom=$(
+		IFS='|'
+		echo "${segments[*]}"
+	)
+	custom="${custom//|/ | }"
 
-    echo "${custom}" || exit 1
+	echo "${custom}" || exit 1
 
-    for (( _w=0; _w<10; _w++ )); do
-        rm -f "$_poke_file" 2>/dev/null && break
-        sleep 0.1
-    done
+	for ((_w = 0; _w < 10; _w++)); do
+		rm -f "$_poke_file" 2>/dev/null && break
+		sleep 0.1
+	done
 done
