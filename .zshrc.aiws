@@ -114,9 +114,11 @@ function pn() {
       ln -s ~/dev/datum-monorepo/.claude/commands/start-new-day.md .claude/commands/start-new-day.md
       ln -s ~/dev/datum-monorepo/.claude/commands/rodney-datum.md .claude/commands/rodney-datum.md
       pn i
+      app=api; pn -F env extract-env-manifest ../../apps/$app/src/lib/env.ts ../../apps/$app/env.manifest.json
+      app=client; pn -F env extract-env-manifest ../../apps/$app/src/lib/env.ts ../../apps/$app/env.manifest.json
+      app=pipeline; pn -F env extract-env-manifest ../../apps/$app/src/lib/env.ts ../../apps/$app/env.manifest.json
       pn -F env generate-env development
       pn -F env generate-env test
-      wait
       pn d build
       pn codegen
       return
