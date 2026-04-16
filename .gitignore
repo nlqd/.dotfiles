@@ -25,4 +25,6 @@
 .config/emacs/places
 .config/emacs/projects
 .config/emacs/recentf
-/.config/emacs/#init.el#
+.config/emacs/#init.el#
+.config/emacs/eshell/
+.config/emacs/org-roam.db

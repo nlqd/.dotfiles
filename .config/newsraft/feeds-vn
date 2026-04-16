@@ -1,3 +1,5 @@
+# vim:commentstring=#\ %s
+
 https://tiasang.com.vn/rss/chuyen-de.rss
 https://tiasang.com.vn/rss/dien-dan.rss
 https://tiasang.com.vn/rss/ho-so-nhan-vat.rss
@@ -9,8 +11,8 @@ https://vietnamnews.vn/rss/economy.rss
 https://vietnamnews.vn/rss/politics-laws.rss
 
 # https://thanhnien.vn/rss/thoi-su.rss
-https://thanhnien.vn/rss/chinh-tri.rss
-https://thanhnien.vn/rss/cong-nghe.rss
+# https://thanhnien.vn/rss/chinh-tri.rss
+# https://thanhnien.vn/rss/cong-nghe.rss
 # https://thanhnien.vn/rss/giao-duc.rss
 # https://thanhnien.vn/rss/kinh-te.rss
 # https://thanhnien.vn/rss/the-gioi.rss
