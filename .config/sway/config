@@ -131,6 +131,8 @@ bindsym $mod+Shift+0 move container to workspace number 10
 bindsym $mod+s layout stacking
 bindsym $mod+w layout tabbed
 bindsym $mod+e layout toggle split
+bindsym $mod+underscore split v
+bindsym $mod+backslash  split h
 bindsym $mod+f fullscreen
 bindsym $mod+Shift+t floating toggle
 bindsym $mod+Shift+b border toggle
