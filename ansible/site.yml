@@ -1,0 +1,15 @@
+- hosts: all
+  become: true
+  vars_files:
+    - vault.yml
+  roles:
+    - role: base
+      tags: base
+    - role: fail2ban
+      tags: fail2ban
+    - role: nginx
+      tags: nginx
+    - role: mail
+      tags: mail
+    - role: docker
+      tags: docker

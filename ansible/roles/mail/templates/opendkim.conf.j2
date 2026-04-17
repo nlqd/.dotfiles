@@ -1,0 +1,12 @@
+Syslog          yes
+SyslogSuccess   yes
+Canonicalization relaxed/simple
+OversignHeaders From
+UserID          opendkim
+UMask           007
+PidFile         /run/opendkim/opendkim.pid
+TrustAnchorFile /usr/share/dns/root.key
+KeyTable        file:/etc/postfix/dkim/keytable
+SigningTable    refile:/etc/postfix/dkim/signingtable
+InternalHosts   refile:/etc/postfix/dkim/trustedhosts
+Socket          inet:12301@localhost

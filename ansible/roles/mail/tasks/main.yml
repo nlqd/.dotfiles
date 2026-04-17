@@ -1,0 +1,118 @@
+- name: Install mail packages
+  ansible.builtin.apt:
+    name:
+      - postfix
+      - dovecot-imapd
+      - dovecot-pop3d
+      - dovecot-sieve
+      - dovecot-managesieved
+      - opendkim
+      - opendkim-tools
+      - spamd
+      - spamassassin
+    state: present
+
+- name: Set mailname
+  ansible.builtin.copy:
+    content: "{{ mail_domain }}"
+    dest: /etc/mailname
+
+- name: Template postfix main.cf
+  ansible.builtin.template:
+    src: main.cf.j2
+    dest: /etc/postfix/main.cf
+  notify: restart postfix
+
+- name: Template postfix master.cf
+  ansible.builtin.template:
+    src: master.cf.j2
+    dest: /etc/postfix/master.cf
+  notify: restart postfix
+
+- name: Template login_maps.pcre
+  ansible.builtin.template:
+    src: login_maps.pcre.j2
+    dest: /etc/postfix/login_maps.pcre
+  notify: restart postfix
+
+- name: Template header_checks
+  ansible.builtin.template:
+    src: header_checks.j2
+    dest: /etc/postfix/header_checks
+  notify: restart postfix
+
+- name: Template dovecot.conf
+  ansible.builtin.template:
+    src: dovecot.conf.j2
+    dest: /etc/dovecot/dovecot.conf
+  notify: restart dovecot
+
+- name: Template opendkim.conf
+  ansible.builtin.template:
+    src: opendkim.conf.j2
+    dest: /etc/opendkim.conf
+  notify: restart opendkim
+
+- name: Create DKIM directory
+  ansible.builtin.file:
+    path: "/etc/postfix/dkim/{{ mail_domain }}"
+    state: directory
+    owner: opendkim
+    group: opendkim
+    mode: "0700"
+
+- name: Copy DKIM private key from vault
+  ansible.builtin.copy:
+    content: "{{ vault_dkim_private_key }}"
+    dest: "/etc/postfix/dkim/{{ mail_domain }}/mail.private"
+    owner: opendkim
+    group: opendkim
+    mode: "0600"
+  notify: restart opendkim
+
+- name: Template DKIM keytable
+  ansible.builtin.template:
+    src: dkim/keytable.j2
+    dest: /etc/postfix/dkim/keytable
+  notify: restart opendkim
+
+- name: Template DKIM signingtable
+  ansible.builtin.template:
+    src: dkim/signingtable.j2
+    dest: /etc/postfix/dkim/signingtable
+  notify: restart opendkim
+
+- name: Template DKIM trustedhosts
+  ansible.builtin.template:
+    src: dkim/trustedhosts.j2
+    dest: /etc/postfix/dkim/trustedhosts
+  notify: restart opendkim
+
+- name: Add postfix to opendkim group
+  ansible.builtin.user:
+    name: postfix
+    groups: opendkim
+    append: true
+
+- name: Ensure dovecot sieve directory
+  ansible.builtin.file:
+    path: /var/lib/dovecot/sieve
+    state: directory
+    owner: dovecot
+    group: dovecot
+
+- name: Run certbot for mail
+  ansible.builtin.command:
+    cmd: "certbot certonly --standalone -d {{ mail_hostname }} --non-interactive --agree-tos --email admin@{{ mail_domain }}"
+    creates: "/etc/letsencrypt/live/{{ mail_hostname }}/fullchain.pem"
+
+- name: Enable mail services
+  ansible.builtin.service:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop:
+    - postfix
+    - dovecot
+    - opendkim
+    - spamd

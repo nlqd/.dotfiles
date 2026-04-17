@@ -1,0 +1,55 @@
+- name: Install docker prerequisites
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+    state: present
+
+- name: Ensure keyrings directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+
+- name: Add Docker GPG key
+  ansible.builtin.shell:
+    cmd: curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+    creates: /etc/apt/keyrings/docker.asc
+
+- name: Add Docker apt repository
+  ansible.builtin.apt_repository:
+    repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+    filename: docker
+
+- name: Install Docker
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-compose-plugin
+    state: present
+    update_cache: true
+
+- name: Add dungngo to docker group
+  ansible.builtin.user:
+    name: dungngo
+    groups: docker
+    append: true
+
+- name: Create n8n app directory
+  ansible.builtin.file:
+    path: /home/dungngo/apps/n8n
+    state: directory
+    owner: dungngo
+
+- name: Copy n8n compose file
+  ansible.builtin.copy:
+    src: n8n-compose.yml
+    dest: /home/dungngo/apps/n8n/compose.yaml
+    owner: dungngo
+
+- name: Create n8n local-files directory
+  ansible.builtin.file:
+    path: /home/dungngo/apps/n8n/local-files
+    state: directory
+    owner: dungngo

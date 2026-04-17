@@ -1,0 +1,71 @@
+ssl = required
+ssl_cert = </etc/letsencrypt/live/{{ mail_hostname }}/fullchain.pem
+ssl_key = </etc/letsencrypt/live/{{ mail_hostname }}/privkey.pem
+ssl_min_protocol = TLSv1.2
+ssl_cipher_list = EECDH+ECDSA+AESGCM:EECDH+aRSA+AESGCM:EECDH+ECDSA+SHA256:EECDH+aRSA+SHA256:EECDH+ECDSA+SHA384:EECDH+ECDSA+SHA256:EECDH+aRSA+SHA384:EDH+aRSA+AESGCM:EDH+aRSA+SHA256:EDH+aRSA:EECDH:!aNULL:!eNULL:!MEDIUM:!LOW:!3DES:!MD5:!EXP:!PSK:!SRP:!DSS:!RC4:!SEED
+ssl_prefer_server_ciphers = yes
+ssl_dh = </usr/share/dovecot/dh.pem
+auth_mechanisms = plain login
+auth_username_format = %n
+
+protocols = $protocols imap pop3
+
+userdb {
+    driver = passwd
+}
+
+passdb {
+    driver = pam
+}
+
+mail_location = maildir:~/Mail:INBOX=~/Mail/Inbox:LAYOUT=fs
+namespace inbox {
+    inbox = yes
+    mailbox Drafts {
+        special_use = \Drafts
+        auto = subscribe
+    }
+    mailbox Junk {
+        special_use = \Junk
+        auto = subscribe
+        autoexpunge = 30d
+    }
+    mailbox Sent {
+        special_use = \Sent
+        auto = subscribe
+    }
+    mailbox Trash {
+        special_use = \Trash
+    }
+    mailbox Archive {
+        special_use = \Archive
+    }
+}
+
+service auth {
+    unix_listener /var/spool/postfix/private/auth {
+        mode = 0660
+        user = postfix
+        group = postfix
+    }
+}
+
+protocol lda {
+    mail_plugins = $mail_plugins sieve
+}
+
+protocol lmtp {
+    mail_plugins = $mail_plugins sieve
+}
+
+protocol pop3 {
+    pop3_uidl_format = %08Xu%08Xv
+    pop3_no_flag_updates = yes
+}
+
+plugin {
+    sieve = ~/.dovecot.sieve
+    sieve_default = /var/lib/dovecot/sieve/default.sieve
+    sieve_dir = ~/.sieve
+    sieve_global_dir = /var/lib/dovecot/sieve/
+}

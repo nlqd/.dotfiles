@@ -1,0 +1,77 @@
+- name: Install nginx and certbot
+  ansible.builtin.apt:
+    name:
+      - nginx
+      - certbot
+      - python3-certbot-nginx
+    state: present
+
+- name: Create /var/www/html
+  ansible.builtin.file:
+    path: /var/www/html
+    state: directory
+    owner: root
+
+- name: Create /var/www/files
+  ansible.builtin.file:
+    path: /var/www/files
+    state: directory
+    owner: dungngo
+    group: www-data
+
+- name: Symlink ~/public to /var/www/files
+  ansible.builtin.file:
+    src: /var/www/files
+    dest: /home/dungngo/public
+    state: link
+    owner: dungngo
+
+- name: Template nginx site configs
+  ansible.builtin.template:
+    src: "{{ item.template }}"
+    dest: "/etc/nginx/sites-available/{{ item.name }}"
+  loop: "{{ nginx_sites }}"
+  notify: reload nginx
+
+- name: Enable nginx sites
+  ansible.builtin.file:
+    src: "/etc/nginx/sites-available/{{ item.name }}"
+    dest: "/etc/nginx/sites-enabled/{{ item.name }}"
+    state: link
+  loop: "{{ nginx_sites | selectattr('enabled', 'undefined') | list + nginx_sites | selectattr('enabled', 'defined') | selectattr('enabled') | list }}"
+  notify: reload nginx
+
+- name: Disable nginx sites marked enabled=false
+  ansible.builtin.file:
+    path: "/etc/nginx/sites-enabled/{{ item.name }}"
+    state: absent
+  loop: "{{ nginx_sites | selectattr('enabled', 'defined') | rejectattr('enabled') | list }}"
+  notify: reload nginx
+
+- name: Remove default nginx site
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: reload nginx
+
+- name: Flush handlers before certbot
+  ansible.builtin.meta: flush_handlers
+
+- name: Check existing certs
+  ansible.builtin.command:
+    cmd: "certbot certificates --cert-name {{ item.domain }}"
+  loop: "{{ nginx_sites | selectattr('certbot', 'defined') | selectattr('certbot') | list }}"
+  when: item.enabled | default(true)
+  register: cert_check
+  changed_when: false
+  failed_when: false
+
+- name: Run certbot for sites that need it
+  ansible.builtin.command:
+    cmd: "certbot --nginx -d {{ item.item.domain }} --non-interactive --agree-tos --email admin@dzungngo.com"
+  loop: "{{ cert_check.results }}"
+  when:
+    - item.item.enabled | default(true)
+    - "'VALID' not in item.stdout"
+  register: certbot_result
+  changed_when: certbot_result.rc == 0

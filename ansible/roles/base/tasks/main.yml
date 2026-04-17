@@ -1,0 +1,48 @@
+- name: Install base packages
+  ansible.builtin.apt:
+    name:
+      - rsync
+      - vim
+      - curl
+      - git
+    state: present
+    update_cache: true
+
+- name: Create user dungngo
+  ansible.builtin.user:
+    name: dungngo
+    groups: sudo
+    shell: /bin/bash
+
+- name: Ensure .ssh directory
+  ansible.builtin.file:
+    path: /home/dungngo/.ssh
+    state: directory
+    owner: dungngo
+    mode: "0700"
+
+- name: Set up authorized_keys
+  ansible.builtin.copy:
+    src: authorized_keys
+    dest: /home/dungngo/.ssh/authorized_keys
+    owner: dungngo
+    mode: "0600"
+
+- name: Template sshd_config
+  ansible.builtin.template:
+    src: sshd_config.j2
+    dest: /etc/ssh/sshd_config
+    owner: root
+    mode: "0644"
+  notify: restart sshd
+
+- name: Ensure .local/bin exists
+  ansible.builtin.file:
+    path: /home/dungngo/.local/bin
+    state: directory
+    owner: dungngo
+
+- name: Add local bin to PATH
+  ansible.builtin.lineinfile:
+    path: /home/dungngo/.bashrc
+    line: 'export PATH="$HOME/.local/bin:$PATH"'

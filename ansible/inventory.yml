@@ -1,0 +1,24 @@
+all:
+  hosts:
+    hetz:
+      ansible_host: dzungngo.com
+      ansible_user: dungngo
+      ansible_ssh_private_key_file: ~/.ssh/hetzner_ed25519
+
+      nginx_sites:
+        - name: root
+          domain: dzungngo.com
+          template: root.conf.j2
+          certbot: true
+        - name: manufeature
+          domain: wms.dzungngo.com
+          template: manufeature.conf.j2
+          certbot: true
+        - name: n8n
+          domain: n8n.dzungngo.com
+          template: n8n.conf.j2
+          certbot: true
+          enabled: false
+
+      mail_domain: dzungngo.com
+      mail_hostname: mail.dzungngo.com
