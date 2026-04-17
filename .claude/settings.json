@@ -31,7 +31,7 @@
     "context7@claude-plugins-official": true
   },
   "alwaysThinkingEnabled": true,
-  "effortLevel": "high",
+  "tui": "fullscreen",
   "autoDreamEnabled": true,
   "skipDangerousModePermissionPrompt": true,
   "voiceEnabled": false,
@@ -40,6 +40,5 @@
   "verbose": true,
   "feedbackSurveyState": {
     "lastShownTime": 1754036669161
-  },
-  "tui": "fullscreen"
+  }
 }

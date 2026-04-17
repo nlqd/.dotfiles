@@ -1,19 +1,16 @@
 ;;; init.el --- Minimal Evil Emacs -*- lexical-binding: t; -*-
 
-;; Package setup
 (require 'package)
 (add-to-list 'package-archives '("melpa" . "https://melpa.org/packages/") t)
 (package-initialize)
 
-;; Evil
 (use-package evil
   :ensure t
   :init
   (setq evil-want-integration t
         evil-want-keybinding nil
         evil-want-C-u-scroll t
-        evil-undo-system 'undo-redo
-        evil-leader/leader "SPC")
+        evil-undo-system 'undo-redo)
   :config
   (evil-mode 1))
 
@@ -29,16 +26,10 @@
   :config
   (evil-commentary-mode))
 
-;; Git
 (use-package magit
   :ensure t
   :defer t)
 
-(use-package hyperbole
-  :ensure t
-  :defer t)
-
-;; Research
 (use-package org-roam
   :ensure t
   :defer t
@@ -47,22 +38,62 @@
   :config
   (org-roam-db-autosync-mode))
 
+(use-package hyperbole
+  :ensure t
+  :defer t)
 
-;; version mismatch often
-(setq major-mode-remap-alist
-      '((python-mode     . python-ts-mode)
-        (javascript-mode . js-ts-mode)
-        (typescript-mode . typescript-ts-mode)
-        (json-mode       . json-ts-mode)
-        (css-mode        . css-ts-mode)
-        (yaml-mode       . yaml-ts-mode)
-        (bash-mode       . bash-ts-mode)
-        (c-mode          . c-ts-mode)
-        (c++-mode        . c++-ts-mode)
-        (go-mode         . go-ts-mode)
-        (rust-mode       . rust-ts-mode)))
+(use-package eglot
+  :ensure t
+  :defer t
+  :hook ((python-ts-mode typescript-ts-mode tsx-ts-mode js-ts-mode go-ts-mode rust-ts-mode c-ts-mode c++-ts-mode) . eglot-ensure)
+  :custom
+  (eglot-autoshutdown t)
+  (eglot-events-buffer-size 0))
 
-(load-theme 'tango t)
+;; Tree-sitter grammars pinned to last ABI 14 release
+(defvar my/treesit-langs
+  '((c          "v0.23.6" :ext "\\.[ch]\\'")
+    (cpp        "v0.23.4" :ext "\\.\\(cpp\\|cc\\|cxx\\|hpp\\)\\'" :to c++-ts-mode)
+    (go         "v0.23.4" :ext "\\.go\\'")
+    (rust       "v0.23.3" :ext "\\.rs\\'")
+    (python     "v0.23.6" :ext "\\.py\\'")
+    (javascript "v0.23.1" :ext "\\.m?js\\'"  :to js-ts-mode)
+    (typescript "v0.23.2" :ext "\\.ts\\'"    :src "typescript/src")
+    (tsx        "v0.23.2" :ext "\\.tsx\\'"   :src "tsx/src"
+                :url "https://github.com/tree-sitter/tree-sitter-typescript")
+    (json       "v0.24.8" :ext "\\.json\\'")
+    (css        "v0.23.2" :ext "\\.css\\'")
+    (yaml       "v0.7.2"  :ext "\\.ya?ml\\'"
+                :url "https://github.com/tree-sitter-grammars/tree-sitter-yaml")
+    (gomod      "v1.0.2"  :ext "/go\\.mod\\'" :to go-mod-ts-mode
+                :url "https://github.com/camdencheek/tree-sitter-go-mod")))
+
+(pcase-dolist (`(,lang ,tag . ,opts) my/treesit-langs)
+  (let ((mode (or (plist-get opts :to) (intern (format "%s-ts-mode" lang))))
+        (url  (or (plist-get opts :url)
+                  (format "https://github.com/tree-sitter/tree-sitter-%s" lang)))
+        (src  (plist-get opts :src)))
+    (setf (alist-get lang treesit-language-source-alist)
+          (list url tag src))
+    (add-to-list 'auto-mode-alist (cons (plist-get opts :ext) mode))))
+
+(setq-default indent-tabs-mode nil
+              tab-width 4)
+
+(add-hook 'go-ts-mode-hook
+          (lambda () (setq-local indent-tabs-mode t tab-width 4)))
+
+(use-package indent-bars
+  :ensure t
+  :hook ((python-ts-mode yaml-ts-mode json-ts-mode typescript-ts-mode
+          tsx-ts-mode js-ts-mode css-ts-mode c-ts-mode c++-ts-mode
+          go-ts-mode rust-ts-mode) . indent-bars-mode)
+  :custom
+  (indent-bars-treesit-support t))
+
+;; Themes and opts
+
+(load-theme 'modus-operandi t)
 (cond ((find-font (font-spec :name "Iosevka Nerd Font"))
        (set-frame-font "Iosevka Nerd Font-12"))
       ((find-font (font-spec :name "Berkeley Mono"))
