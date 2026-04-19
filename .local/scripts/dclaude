@@ -83,6 +83,7 @@ exec /usr/bin/bwrap \
     --ro-bind $HOME/.local $HOME/.local \
     --ro-bind $HOME/.local/bin $HOME/.local/bin \
     --ro-bind $HOME/.cargo $HOME/.cargo \
+    --ro-bind $HOME/go/bin $HOME/go/bin \
     --ro-bind $HOME/.cargo/bin $HOME/.cargo/bin \
     --ro-bind $HOME/Downloads $HOME/Downloads \
     --ro-bind $HOME/.asdf $HOME/.asdf \
