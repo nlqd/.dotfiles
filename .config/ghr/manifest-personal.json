@@ -1,0 +1,58 @@
+[
+  {
+    "repo": "ahrm/sioyek",
+    "asset": "sioyek-release-linux-portable.zip",
+    "version": "v2.0.0",
+    "links": {
+      "Sioyek-x86_64.AppImage": "/home/qd/.local/bin/sioyek"
+    }
+  },
+  {
+    "repo": "Farzat07/oreilly-epub",
+    "asset": "oreilly-epub-linux-x86_64",
+    "version": "v0.1.3",
+    "links": {
+      "oreilly-epub-linux-x86_64": "/home/qd/.local/bin/oreilly-epub-linux-x86_64"
+    }
+  },
+  {
+    "repo": "H-M-H/Weylus",
+    "asset": "Weylus_0.11.4_amd64.deb",
+    "version": "v0.11.4",
+    "links": {
+      "Weylus_0.11.4_amd64.deb": "/home/qd/.local/bin/Weylus_0.11.4_amd64.deb"
+    }
+  },
+  {
+    "repo": "koalaman/shellcheck",
+    "asset": "shellcheck-v0.11.0.linux.x86_64.tar.gz",
+    "version": "v0.11.0",
+    "links": {
+      "shellcheck-v0.11.0/shellcheck": "/home/qd/.local/bin/shellcheck"
+    }
+  },
+  {
+    "repo": "rustonbsd/iroh-ssh",
+    "asset": "iroh-ssh.linux",
+    "version": "0.2.10",
+    "links": {
+      "iroh-ssh.linux": "/home/qd/.local/bin/iroh-ssh.linux"
+    }
+  },
+  {
+    "repo": "yt-dlp/yt-dlp",
+    "asset": "yt-dlp",
+    "version": "2026.03.17",
+    "links": {
+      "yt-dlp": "/home/qd/.local/bin/yt-dlp"
+    }
+  },
+  {
+    "repo": "neovim/neovim",
+    "asset": "nvim-linux-x86_64.tar.gz",
+    "version": "v0.12.1",
+    "links": {
+      "nvim-linux-x86_64/bin/nvim": "/usr/local/bin/nvim"
+    }
+  }
+]
