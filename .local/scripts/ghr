@@ -99,11 +99,32 @@ prompt_symlink() {
   default="$BIN_DIR/$(basename "$binary_path")"
   local symlink_path
 
-  read -r -e -i "$default" -p "Symlink: " symlink_path
-  symlink_path="${symlink_path:-$default}"
+  # Caller captures stdout via $(...); route readline I/O through /dev/tty so
+  # the editable prompt is actually visible.
+  read -r -e -i "$default" -p "Symlink: " symlink_path </dev/tty 2>/dev/tty
+  echo "${symlink_path:-$default}"
+}
 
-  mkdir -p "$(dirname "$symlink_path")"
-  echo "$symlink_path"
+# Create parent dir and symlink, escalating to sudo when the user can't
+# write. Tries without sudo first to avoid a needless prompt.
+safe_ln() {
+  local src="$1" dst="$2" dir
+  dir=$(dirname "$dst")
+  if mkdir -p "$dir" 2>/dev/null && ln -sf "$src" "$dst" 2>/dev/null; then
+    return 0
+  fi
+  sudo mkdir -p "$dir" && sudo ln -sf "$src" "$dst"
+}
+
+# True if any link dst in the given manifest JSON is in a non-writable dir.
+manifest_needs_sudo() {
+  local manifest="$1"
+  local dst
+  while IFS= read -r dst; do
+    [ -z "$dst" ] && continue
+    [ -w "$(dirname "$dst")" ] || return 0
+  done < <(echo "$manifest" | jq -r '.[].links | values[]')
+  return 1
 }
 
 pick_executable() {
@@ -121,22 +142,35 @@ pick_executable() {
     fi
   done < <(list_extracted_files "$dir" "$archive_name" | sort)
 
-  local all=("${exec_files[@]}" "${other_files[@]}")
-  local idx=1
+  # If the archive has any executables, only offer those. Large tarballs
+  # (e.g. nvim) have thousands of non-executable data files that would flood
+  # the prompt, and the user almost always wants an executable anyway.
+  local all
+  if [ "${#exec_files[@]}" -gt 0 ]; then
+    all=("${exec_files[@]}")
+  else
+    all=("${other_files[@]}")
+  fi
 
-  echo ""
-  echo "Files:"
-  for f in "${exec_files[@]}"; do
-    printf "  %d  %s  [+x]\n" "$idx" "$f"
-    idx=$((idx + 1))
-  done
-  for f in "${other_files[@]}"; do
-    printf "  %d  %s\n" "$idx" "$f"
-    idx=$((idx + 1))
-  done
+  # Caller captures stdout via $(...); send the menu + prompt to /dev/tty and
+  # read from /dev/tty so only the final selection lands on stdout.
+  {
+    local idx=1
+    echo ""
+    echo "Files:"
+    for f in "${all[@]}"; do
+      if [ -x "$dir/$f" ]; then
+        printf "  %d  %s  [+x]\n" "$idx" "$f"
+      else
+        printf "  %d  %s\n" "$idx" "$f"
+      fi
+      idx=$((idx + 1))
+    done
+    printf "\nSelect executable [1]: "
+  } >/dev/tty
 
-  printf "\nSelect executable [1]: "
-  read -r n
+  local n
+  read -r n </dev/tty
   n="${n:-1}"
 
   if ! [[ "$n" =~ ^[0-9]+$ ]] || [ "$n" -lt 1 ] || [ "$n" -gt "${#all[@]}" ]; then
@@ -206,13 +240,25 @@ install_repo() {
 
   local symlink_path
   symlink_path=$(prompt_symlink "$binary")
-  ln -sf "$dir/$binary" "$symlink_path"
+  if ! safe_ln "$dir/$binary" "$symlink_path"; then
+    echo "Failed to create symlink: $symlink_path" >&2
+    return 1
+  fi
 
   local links_json
   links_json=$(jq -n --arg src "$binary" --arg dst "$symlink_path" '{($src): $dst}')
   manifest_upsert "$repo" "$name" "$ver" "$links_json"
 
   echo "Installed $repo ($ver) -> $symlink_path"
+}
+
+all_links_valid() {
+  local links_json="$1"
+  local dst
+  while IFS= read -r dst; do
+    [ -e "$dst" ] || return 1
+  done < <(echo "$links_json" | jq -r '.[]')
+  return 0
 }
 
 # Downloads latest release and creates symlinks from a manifest entry.
@@ -233,6 +279,12 @@ restore_single() {
 
   local ver
   ver=$(echo "$release" | jq -r '.tag_name')
+
+  if [ "$(cat "$dir/.version" 2>/dev/null)" = "$ver" ] && all_links_valid "$links_json"; then
+    echo "$prefix $repo ... ok (up to date)"
+    return 0
+  fi
+
   local available
   available=$(echo "$release" | jq -r '.assets[].name')
 
@@ -245,10 +297,14 @@ restore_single() {
   local url
   url=$(echo "$release" | jq -r --arg name "$matched_asset" '.assets[] | select(.name == $name) | .browser_download_url')
 
-  curl -sfL -o "$dir/$matched_asset" "$url" || {
+  # Download to temp then rename, so in-use executables (ETXTBSY) and partial
+  # downloads don't clobber a working binary.
+  if ! curl -sfL -o "$dir/.dl.tmp" "$url"; then
+    rm -f "$dir/.dl.tmp"
     echo "$prefix $repo ... FAIL (download error)" >&2
     return 1
-  }
+  fi
+  mv "$dir/.dl.tmp" "$dir/$matched_asset"
 
   write_cache_meta "$dir" "$repo" "$ver"
   extract_asset "$dir" "$matched_asset"
@@ -257,9 +313,11 @@ restore_single() {
   local src dst actual_src
   while IFS=$'\t' read -r src dst; do
     actual_src=$(fuzzy_match_binary "$src" "$dir" "$matched_asset") || actual_src="$src"
-    mkdir -p "$(dirname "$dst")"
     chmod +x "$dir/$actual_src"
-    ln -sf "$dir/$actual_src" "$dst"
+    if ! safe_ln "$dir/$actual_src" "$dst"; then
+      echo "$prefix $repo ... FAIL (symlink error: $dst)" >&2
+      return 1
+    fi
     new_links_json=$(echo "$new_links_json" | jq -c --arg s "$actual_src" --arg d "$dst" '. + {($s): $d}')
   done < <(echo "$links_json" | jq -r 'to_entries[] | "\(.key)\t\(.value)"')
 
@@ -292,6 +350,16 @@ restore_all() {
 
   echo "Restoring $total tools from manifest..."
   echo ""
+
+  # Prime sudo credentials up front so parallel restores don't race on the
+  # password prompt when any tool symlinks to a system dir.
+  if manifest_needs_sudo "$manifest"; then
+    echo "Some tools symlink to system dirs; caching sudo credentials..."
+    sudo -v || {
+      echo "sudo required but unavailable" >&2
+      return 1
+    }
+  fi
 
   local tmpdir
   tmpdir=$(mktemp -d)

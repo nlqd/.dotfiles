@@ -17,3 +17,4 @@
 .config/btop
 .config/emacs/**
 !.config/emacs/init.el
+.config/ghr/profile
