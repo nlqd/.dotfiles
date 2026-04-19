@@ -3,15 +3,24 @@
   tab    q      w      e      r      t      y      u      i      o      p      [
   caps   a      s      d      f      g      h      j      k      l      ;      '
   lsft   z      x      c      v      b      n      m      ,      .      /      rsft
-  lctl   lmet   lalt                 spc                  ralt   rctl
+  lctl   lmet   lalt                 spc                  ralt   rctl   rmet
 )
 
 (deflayer default
   _
   @tlow  _      _      _      _      _      _      _      _      _      _      _
-  lctl   _      _      _      _      _      _      _      _      _      _      _
+  lctl   @a     @s     @d     @f     _      _      @j     @k     @l     @;     _
   _      _      _      _      _      _      _      _      _      _      _      @sgrv
-  caps   _      _                    _                    @arai  lmet
+  caps   _      _                    _                    @arai  lmet   _
+)
+
+;; nomods: active briefly after each HRM tap
+(deflayer nomods
+  _
+  @tlow  _      _      _      _      _      _      _      _      _      _      _
+  lctl   a      s      d      f      _      _      j      k      l      ;      _
+  _      _      _      _      _      _      _      _      _      _      _      @sgrv
+  caps   _      _                    _                    @arai  lmet   _
 )
 
 (deflayer lower
@@ -19,7 +28,7 @@
   _      _      _      _      _      _      _      _      _      _      _      _
   _      _      _      _      _      _      left   down   up     right  _      _
   _      _      _      _      _      _      _      _      _      _      _      _
-  _      _      _                    _                    _      _
+  _      _      _                    _                    _      _      _
 )
 
 (deflayer raise
@@ -27,19 +36,62 @@
   _      _      1      2      3      _      _      _      S-9    S-0    _      _
   _      _      4      5      6      _      _      _      [      ]      S-\    _
   _      0      7      8      9      _      _      _      S-[    S-]    \      _
-  _      _      _                    _                    _      _
+  _      _      _                    _                    _      _      _
 )
 
+(defcfg
+  process-unmapped-keys yes
+  concurrent-tap-hold yes
+  chords-v2-min-idle 150 ;; suppress chords during typing streaks (≈ urob's require-prior-idle for combos)
+)
 
 (defvar
   tap-time 140
   hold-time 200
   chord-timeout 30
+
+  idle-timeout 150
+
+  hold-pinky   280
+  hold-ring    260
+  hold-middle  240
+  hold-index   220
+
+  left-hand-release  (a s d f g)
+  left-hand-press    (q w e r t z x c v b)
+  right-hand-release (h j k l ;)
+  right-hand-press   (y u i o p n m , . /)
 )
 
-(defcfg
-  concurrent-tap-hold yes
+(deffakekeys to-default-layer (layer-switch default))
+
+(deftemplate hrm (key mod hold-time)
+  (defalias $key (tap-hold-release-tap-keys-release $tap-time $hold-time
+    (multi $key @tap) $mod
+    (if-in-list     $mod (lctl lsft lalt lmet) $left-hand-press)
+    (if-not-in-list $mod (lctl lsft lalt lmet) $right-hand-press)
+    (if-in-list     $mod (rctl rsft ralt rmet) $left-hand-release)
+    (if-not-in-list $mod (rctl rsft ralt rmet) $right-hand-release))))
+
+(defalias
+  ;; raise, lower layers
+  arai (layer-toggle raise)
+  tlow (tap-hold $tap-time $hold-time tab (layer-toggle lower))
+  ;; make ~ closer to home
+  sgrv (tap-hold $tap-time $hold-time grv rsft)
+
+  ;; hrm
+  tap (multi (layer-switch nomods)
+             (on-idle-fakekey to-default-layer tap $idle-timeout))
 )
+(t! hrm a lctl $hold-pinky)
+(t! hrm s lsft $hold-ring)
+(t! hrm d lalt $hold-middle)
+(t! hrm f lmet $hold-index)
+(t! hrm j rmet $hold-index)
+(t! hrm k ralt $hold-middle)
+(t! hrm l rsft $hold-ring)
+(t! hrm ; rctl $hold-pinky)
 
 (defchordsv2
   ;;   Lateral combos
@@ -69,29 +121,6 @@
   (j m) S-] $chord-timeout first-release ()
   (p ;) S-\ $chord-timeout first-release ()
   (; /) \   $chord-timeout first-release ()
-)
-
-(defalias
-  ;; thumb based layer switching
-  slow (tap-hold $tap-time $hold-time spc  (layer-toggle lower))
-  ;; arai (tap-hold $tap-time $hold-time ralt (layer-toggle raise))
-  arai (layer-toggle raise)
-
-  ;; pinky based layer switching
-  tlow (tap-hold $tap-time $hold-time tab  (layer-toggle lower))
-  snum (tap-hold $tap-time $hold-time [    (layer-toggle raise))
-
-  sgrv (tap-hold $tap-time $hold-time grv rsft)
-
-  alctl (tap-hold $tap-time $hold-time a lctl)
-  slsft (tap-hold $tap-time $hold-time s lsft)
-  dlalt (tap-hold $tap-time $hold-time d lalt)
-  flmet (tap-hold $tap-time $hold-time f lmet)
-
-  jrmet (tap-hold $tap-time $hold-time j rmet)
-  kralt (tap-hold $tap-time $hold-time k ralt)
-  lrsft (tap-hold $tap-time $hold-time l rsft)
-  ;rctl (tap-hold $tap-time $hold-time ; rctl)
 )
 
 ;; vim:ft=scheme:ts=2:sts:cuc
