@@ -11,16 +11,16 @@
   @tlow  _      _      _      _      _      _      _      _      _      _      _
   lctl   @a     @s     @d     @f     _      _      @j     @k     @l     @;     _
   _      _      _      _      _      _      _      _      _      _      _      @sgrv
-  caps   _      _                    _                    @arai  lmet   _
+  caps   _      @alow                _                    @arai  lmet   _
 )
 
 ;; nomods: active briefly after each HRM tap
 (deflayer nomods
   _
   @tlow  _      _      _      _      _      _      _      _      _      _      _
-  lctl   a      s      d      f      _      _      j      k      l      ;      _
+  lctl   a      s      d     f      _      _      j      k      l      ;      _
   _      _      _      _      _      _      _      _      _      _      _      @sgrv
-  caps   _      _                    _                    @arai  lmet   _
+  caps   _      @alow                _                    @arai  lmet   _
 )
 
 (deflayer lower
@@ -52,10 +52,10 @@
 
   idle-timeout 150
 
-  hold-pinky   280
-  hold-ring    260
-  hold-middle  240
-  hold-index   220
+  hold-pinky   260
+  hold-ring    240
+  hold-middle  200
+  hold-index   200
 
   left-hand-release  (a s d f g)
   left-hand-press    (q w e r t z x c v b)
@@ -76,6 +76,8 @@
 (defalias
   ;; raise, lower layers
   arai (layer-toggle raise)
+  alow (layer-toggle lower)
+  ;; continue to monitor this ....
   tlow (tap-hold $tap-time $hold-time tab (layer-toggle lower))
   ;; make ~ closer to home
   sgrv (tap-hold $tap-time $hold-time grv rsft)
@@ -84,14 +86,28 @@
   tap (multi (layer-switch nomods)
              (on-idle-fakekey to-default-layer tap $idle-timeout))
 )
-(t! hrm a lctl $hold-pinky)
-(t! hrm s lsft $hold-ring)
-(t! hrm d lalt $hold-middle)
-(t! hrm f lmet $hold-index)
-(t! hrm j rmet $hold-index)
-(t! hrm k ralt $hold-middle)
-(t! hrm l rsft $hold-ring)
-(t! hrm ; rctl $hold-pinky)
+
+;;;; ctrl shift alt meta (csam)
+
+;; (t! hrm a lctl $hold-pinky)
+;; (t! hrm s lsft $hold-ring)
+;; (t! hrm d lalt $hold-middle)
+;; (t! hrm f lmet $hold-index)
+;; (t! hrm j rmet $hold-index)
+;; (t! hrm k ralt $hold-middle)
+;; (t! hrm l rsft $hold-ring)
+;; (t! hrm ; rctl $hold-pinky)
+
+;;;; csam reverse
+
+(t! hrm a lmet $hold-pinky)
+(t! hrm s lalt $hold-ring)
+(t! hrm d lsft $hold-middle)
+(t! hrm f lctl $hold-index)
+(t! hrm j rctl $hold-index)
+(t! hrm k rsft $hold-middle)
+(t! hrm l ralt $hold-ring)
+(t! hrm ; rmet $hold-pinky)
 
 (defchordsv2
   ;;   Lateral combos
@@ -99,28 +115,28 @@
   (p [) del  $chord-timeout first-release ()
   (o p) bspc $chord-timeout first-release ()
   (l ;) ret  $chord-timeout first-release ()
-  (j k) -   $chord-timeout first-release ()
-  (m ,) =   $chord-timeout first-release ()
+  (j k) -    $chord-timeout first-release (raise lower)
+  (m ,) =    $chord-timeout first-release (raise lower)
   ;; left hand
-  (w e) S-2 $chord-timeout first-release ()
-  (a s) S-4 $chord-timeout first-release ()
-  (s d) S-5 $chord-timeout first-release ()
-  (d f) S-6 $chord-timeout first-release ()
+  (w e) S-2  $chord-timeout first-release (raise lower)
+  (a s) S-4  $chord-timeout first-release (raise lower)
+  (s d) S-5  $chord-timeout first-release (raise lower)
+  (d f) S-6  $chord-timeout first-release (raise lower)
 
   ;;   Vertical combos
   ;; left hand
-  (w s) S-1 $chord-timeout first-release ()
-  (x s) S-7 $chord-timeout first-release ()
-  (x c) S-8 $chord-timeout first-release ()
+  (w s) S-1  $chord-timeout first-release (raise lower)
+  (x s) S-7  $chord-timeout first-release (raise lower)
+  (x c) S-8  $chord-timeout first-release (raise lower)
   ;; right hand
-  (i k) S-9 $chord-timeout first-release ()
-  (o l) S-0 $chord-timeout first-release ()
-  (k ,) [   $chord-timeout first-release ()
-  (l .) ]   $chord-timeout first-release ()
-  (u j) S-[ $chord-timeout first-release ()
-  (j m) S-] $chord-timeout first-release ()
-  (p ;) S-\ $chord-timeout first-release ()
-  (; /) \   $chord-timeout first-release ()
+  (i k) S-9  $chord-timeout first-release (raise lower)
+  (o l) S-0  $chord-timeout first-release (raise lower)
+  (k ,) [    $chord-timeout first-release (raise lower)
+  (l .) ]    $chord-timeout first-release (raise lower)
+  (u j) S-[  $chord-timeout first-release (raise lower)
+  (j m) S-]  $chord-timeout first-release (raise lower)
+  (p ;) S-\  $chord-timeout first-release (raise lower)
+  (; /) \    $chord-timeout first-release (raise lower)
 )
 
 ;; vim:ft=scheme:ts=2:sts:cuc
