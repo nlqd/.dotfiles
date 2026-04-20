@@ -10,6 +10,8 @@
   (setq evil-want-integration t
         evil-want-keybinding nil
         evil-want-C-u-scroll t
+        evil-want-C-u-delete t
+        evil-want-C-w-delete t
         evil-undo-system 'undo-redo)
   :config
   (evil-mode 1))
@@ -43,7 +45,6 @@
   :defer t)
 
 (use-package eglot
-  :ensure t
   :defer t
   :hook ((python-ts-mode typescript-ts-mode tsx-ts-mode js-ts-mode go-ts-mode rust-ts-mode c-ts-mode c++-ts-mode) . eglot-ensure)
   :custom
@@ -68,6 +69,7 @@
     (gomod      "v1.0.2"  :ext "/go\\.mod\\'" :to go-mod-ts-mode
                 :url "https://github.com/camdencheek/tree-sitter-go-mod")))
 
+(require 'treesit)
 (pcase-dolist (`(,lang ,tag . ,opts) my/treesit-langs)
   (let ((mode (or (plist-get opts :to) (intern (format "%s-ts-mode" lang))))
         (url  (or (plist-get opts :url)
@@ -110,6 +112,7 @@
 (scroll-bar-mode -1)
 (column-number-mode 1)
 (global-display-line-numbers-mode 1)
+(global-visual-line-mode 1)
 (winner-mode 1)
 
 (setq inhibit-startup-screen t
