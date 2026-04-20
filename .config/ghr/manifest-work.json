@@ -1,0 +1,58 @@
+[
+  {
+    "repo": "neovim/neovim",
+    "asset": "nvim-linux-x86_64.appimage",
+    "version": "v0.12.0",
+    "links": {
+      "nvim-linux-x86_64.appimage": "/home/dungngo/.local/bin/nvim"
+    }
+  },
+  {
+    "repo": "LuaLS/lua-language-server",
+    "asset": "lua-language-server-3.18.1-darwin-arm64.tar.gz",
+    "version": "3.18.1",
+    "links": {
+      "bin/lua-language-server": "/home/dungngo/.local/bin/lua-language-server"
+    }
+  },
+  {
+    "repo": "bugzmanov/bookokrat",
+    "asset": "bookokrat-v0.3.9-aarch64-apple-darwin.tar.gz",
+    "version": "v0.3.9",
+    "links": {
+      "bookokrat": "/home/dungngo/.local/bin/bookokrat"
+    }
+  },
+  {
+    "repo": "ahrm/sioyek",
+    "asset": "sioyek-release-linux-portable.zip",
+    "version": "v2.0.0",
+    "links": {
+      "Sioyek-x86_64.AppImage": "/home/dungngo/.local/bin/sioyek"
+    }
+  },
+  {
+    "repo": "Alexsjones/llmfit",
+    "asset": "llmfit-v0.9.5-aarch64-apple-darwin.tar.gz",
+    "version": "v0.9.5",
+    "links": {
+      "llmfit-v0.8.4-x86_64-unknown-linux-gnu/llmfit": "/home/dungngo/.local/bin/llmfit"
+    }
+  },
+  {
+    "repo": "rustonbsd/iroh-ssh",
+    "asset": "iroh-ssh.linux",
+    "version": "0.2.10",
+    "links": {
+      "iroh-ssh.linux": "/home/dungngo/.local/bin/iroh-ssh"
+    }
+  },
+  {
+    "repo": "yt-dlp/yt-dlp",
+    "asset": "yt-dlp",
+    "version": "2026.03.17",
+    "links": {
+      "yt-dlp": "/home/dungngo/.local/bin/yt-dlp"
+    }
+  }
+]
