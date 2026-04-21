@@ -8,14 +8,6 @@
     }
   },
   {
-    "repo": "Farzat07/oreilly-epub",
-    "asset": "oreilly-epub-linux-x86_64",
-    "version": "v0.1.3",
-    "links": {
-      "oreilly-epub-linux-x86_64": "/home/qd/.local/bin/oreilly-epub-linux-x86_64"
-    }
-  },
-  {
     "repo": "H-M-H/Weylus",
     "asset": "Weylus_0.11.4_amd64.deb",
     "version": "v0.11.4",
