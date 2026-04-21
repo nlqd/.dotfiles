@@ -33,10 +33,10 @@
 
 (deflayer raise
   _
-  _      _      1      2      3      _      _      _      S-9    S-0    _      _
-  _      _      4      5      6      _      _      _      [      ]      S-\    _
-  _      0      7      8      9      _      _      _      S-[    S-]    \      _
-  _      _      _                    _                    _      _      _
+  _      .      1      2      3      _      _      _      S-9    S-0    _      _
+  _      0      4      5      6      _      _      _      [      ]      S-\    _
+  _      ,      7      8      9      _      _      _      S-[    S-]    \      _
+  _      _      _                    _                    @aoff  _      _
 )
 
 (defcfg
@@ -75,8 +75,13 @@
 
 (defalias
   ;; raise, lower layers
-  arai (layer-toggle raise)
+  arai (tap-hold $tap-time $hold-time (layer-switch raise) (layer-while-held raise))
+  aoff (layer-switch default)
   alow (layer-toggle lower)
+
+  ;; smart-num terminators — disabled; toggle thumb handles exit
+  ;; t-g (multi g (layer-switch default))
+  ;; t-h (multi h (layer-switch default))
   ;; continue to monitor this ....
   tlow (tap-hold $tap-time $hold-time tab (layer-toggle lower))
   ;; make ~ closer to home
@@ -138,6 +143,10 @@
   (j m) S-]  $chord-timeout first-release (raise lower)
   (p ;) S-\  $chord-timeout first-release (raise lower)
   (; /) \    $chord-timeout first-release (raise lower)
+
+  ;;   Other non-traditional combos
+  ;; two rings = caps word
+  (w o) (caps-word 2000) $chord-timeout first-release (raise lower)
 )
 
 ;; vim:ft=scheme:ts=2:sts:cuc
