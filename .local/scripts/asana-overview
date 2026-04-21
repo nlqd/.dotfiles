@@ -33,6 +33,39 @@ validate_date() {
   fi
 }
 
+# Parse a duration spec like 3d / 12h / 2w / 30m into ISO 8601 UTC timestamp.
+parse_since() {
+  local spec="$1"
+  [[ $spec =~ ^([0-9]+)([dhwm])$ ]] || {
+    echo "Error: invalid --since '$spec'. Use Nd/Nh/Nw/Nm (e.g. 3d, 12h, 1w, 30m)" >&2
+    return 1
+  }
+  local n="${BASH_REMATCH[1]}" unit="${BASH_REMATCH[2]}"
+  local word
+  case "$unit" in
+    m) word="minutes" ;;
+    h) word="hours" ;;
+    d) word="days" ;;
+    w) word="weeks" ;;
+  esac
+  date -u -d "$n $word ago" +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+# Render an ISO 8601 timestamp as a compact relative string.
+format_relative() {
+  local iso="$1"
+  local ts now diff
+  ts=$(date -d "$iso" +%s 2>/dev/null) || { echo "?"; return; }
+  now=$(date +%s)
+  diff=$((now - ts))
+  if ((diff < 0)); then echo "just now"
+  elif ((diff < 3600)); then echo "$((diff / 60))m ago"
+  elif ((diff < 86400)); then echo "$((diff / 3600))h ago"
+  elif ((diff < 172800)); then echo "ystday"
+  else echo "$((diff / 86400))d ago"
+  fi
+}
+
 get_sections_list() {
   get_project_config | jq -r '.sections | keys | join(" | ")' 2>/dev/null || echo "(unknown)"
 }
@@ -220,6 +253,7 @@ format_comment_body() {
     )\n"'
 }
 get_task_attachments() { api_get "/attachments?parent=$1&opt_fields=name,download_url,permanent_url,view_url,size,created_at,resource_subtype"; }
+get_task_stories_for_activity() { api_get "/tasks/$1/stories?opt_fields=created_at,created_by.name,type,resource_subtype,new_value.name,new_section.name"; }
 search_tasks() { api_get "/workspaces/$1/tasks/search?text=$2&opt_fields=name,completed,due_on,assignee.name"; }
 
 ### MUTATING OPERATIONS (modify data in Asana)
@@ -409,6 +443,91 @@ parse_task_gids() {
   fi
 }
 
+classify_activity_stories() {
+  local since_iso="$1" task_gid="$2" task_name="$3"
+  jq -r --arg since "$since_iso" --arg gid "$task_gid" --arg name "$task_name" '
+    .data[]
+    | select(.created_at >= $since)
+    | select(.created_by != null)
+    | (
+        if .type == "comment" then
+          {label: "commented on", target: ""}
+        elif .resource_subtype == "marked_complete" then
+          {label: "completed", target: ""}
+        elif .resource_subtype == "marked_incomplete" then
+          {label: "reopened", target: ""}
+        elif .resource_subtype == "assigned" then
+          (if .new_value and .new_value.name then
+             {label: "assigned", target: .new_value.name}
+           else
+             {label: "unassigned", target: ""}
+           end)
+        elif .resource_subtype == "section_changed" then
+          {label: "moved", target: (.new_section.name // "?")}
+        else empty end
+      ) as $ev
+    | [.created_at, .created_by.name, $ev.label, $gid, $name, $ev.target]
+    | @tsv
+  '
+}
+
+cmd_activity() {
+  local since_spec="${1:-3d}"
+  local since_iso
+  since_iso=$(parse_since "$since_spec") || exit 1
+
+  local config workspace_gid workspace_name
+  config=$(get_config)
+  workspace_gid=$(echo "$config" | jq -r '.workspace_gid')
+  workspace_name=$(echo "$config" | jq -r '.workspace_name')
+
+  print_header
+  echo "Team activity in ${workspace_name} (last ${since_spec})"
+  print_header
+  echo
+
+  local search
+  search=$(api_get "/workspaces/${workspace_gid}/tasks/search?modified_at.after=${since_iso}&sort_by=modified_at&sort_ascending=false&limit=100&opt_fields=name,created_at,created_by.name,modified_at")
+  search=$(check_api_error "$search") || exit 1
+
+  local count
+  count=$(echo "$search" | jq '.data | length')
+  if [[ $count -eq 0 ]]; then
+    echo "No activity in the last ${since_spec}."
+    return 0
+  fi
+  [[ $count -ge 100 ]] && echo "Note: hit 100-task search cap; narrow window with --since if needed." >&2
+
+  local events
+  events=$(
+    echo "$search" | jq -r --arg since "$since_iso" '
+      .data[]
+      | select(.created_at >= $since and .created_by != null)
+      | [.created_at, .created_by.name, "created", .gid, .name, ""]
+      | @tsv
+    '
+    echo "$search" | jq -r '.data[] | "\(.gid)\t\(.name)"' | while IFS=$'\t' read -r gid name; do
+      local stories
+      stories=$(get_task_stories_for_activity "$gid") || continue
+      echo "$stories" | jq -e '.errors' &>/dev/null && continue
+      echo "$stories" | classify_activity_stories "$since_iso" "$gid" "$name"
+    done
+  )
+
+  if [[ -z $events ]]; then
+    echo "No activity in the last ${since_spec}."
+    return 0
+  fi
+
+  echo "$events" | sort -r | while IFS=$'\t' read -r ts actor action gid name target; do
+    local rel first suffix=""
+    rel=$(format_relative "$ts")
+    first="${actor%% *}"
+    [[ -n $target ]] && suffix=" → $target"
+    printf '%s\t%s\t%s\t[%s] %s%s\n' "$rel" "$first" "$action" "$gid" "$name" "$suffix"
+  done | column -t -s $'\t'
+}
+
 show_help() {
   local config="${1:-}"
   local sections_list="(configure to see sections)"
@@ -429,6 +548,7 @@ Commands:
   all, a [SECTION]      All tasks in section (default: In-Progress)
   view, v, task [GIDS]  View task details + comments
   search, s QUERY       Search tasks by text
+  activity [DURATION]   Workspace-wide timeline (default 3d; Nd/Nh/Nw/Nm)
   move GID SECTION      Move task to section
   assign, grab [GIDS]   Assign task(s) to me
   unassign, drop [GIDS] Unassign task(s) from me
@@ -655,6 +775,9 @@ main() {
   s|search) #HELP Search tasks by text:\nASANA search QUERY
     [[ $# -lt 1 ]] && { echo "Error: Search query required" >&2; exit 1; }
     search_tasks_interactive "$workspace_gid" "$1"
+    ;;
+  activity) #HELP Workspace team activity timeline:\nASANA activity [DURATION]
+    cmd_activity "${1:-3d}"
     ;;
   move) #HELP Move task to section:\nASANA move GID SECTION
     [[ -z ${1:-} ]] && { echo "Error: Task GID required" >&2; echo "Usage: asana-overview move GID SECTION" >&2; exit 1; }
