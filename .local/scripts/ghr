@@ -417,6 +417,43 @@ update_repo() {
   rm -rf "$tmpdir"
 }
 
+remove_repo() {
+  local repo="$1"
+  if [ -z "$repo" ]; then
+    echo "Usage: ghr remove <owner/repo>" >&2
+    return 1
+  fi
+
+  local manifest
+  manifest=$(manifest_read)
+  local entry
+  entry=$(echo "$manifest" | jq -r --arg repo "$repo" '.[] | select(.repo == $repo)')
+
+  if [ -z "$entry" ]; then
+    echo "$repo not in manifest" >&2
+    return 1
+  fi
+
+  local dst
+  while IFS= read -r dst; do
+    [ -z "$dst" ] && continue
+    if rm -f "$dst" 2>/dev/null || sudo rm -f "$dst"; then
+      echo "Removed symlink: $dst"
+    else
+      echo "Failed to remove: $dst" >&2
+    fi
+  done < <(echo "$entry" | jq -r '.links | values[]')
+
+  local dir
+  dir=$(get_dir "$repo")
+  rm -rf "$dir"
+
+  local tmp="$MANIFEST.tmp"
+  echo "$manifest" | jq --arg repo "$repo" '[.[] | select(.repo != $repo)]' >"$tmp" && mv "$tmp" "$MANIFEST"
+
+  echo "Removed $repo"
+}
+
 list_all() {
   local symlink_map=""
   [ -f "$MANIFEST" ] && symlink_map=$(jq -r '.[] | "\(.repo)\t\(.links | values | join(", "))"' "$MANIFEST")
@@ -449,8 +486,9 @@ main() {
     fi
     ;;
   restore | r) restore_all ;;
+  remove | rm) remove_repo "$2" ;;
   list | ls) list_all ;;
-  *) echo "Usage: ghr <install|update|restore|list> [owner/repo]" >&2 ;;
+  *) echo "Usage: ghr <install|update|restore|remove|list> [owner/repo]" >&2 ;;
   esac
 }
 
