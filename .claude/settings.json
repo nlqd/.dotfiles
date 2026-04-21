@@ -41,8 +41,5 @@
   "feedbackSurveyState": {
     "lastShownTime": 1754036669161
   },
-  "skipAutoPermissionPrompt": true,
-  "permissions": {
-    "defaultMode": "auto"
-  }
+  "skipAutoPermissionPrompt": true
 }

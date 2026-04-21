@@ -125,6 +125,7 @@
 
   ;;   Vertical combos
   ;; left hand
+  (q w) tab  $chord-timeout first-release (raise lower)
   (w s) S-1  $chord-timeout first-release (raise lower)
   (x s) S-7  $chord-timeout first-release (raise lower)
   (x c) S-8  $chord-timeout first-release (raise lower)
