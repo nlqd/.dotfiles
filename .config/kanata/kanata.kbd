@@ -18,7 +18,7 @@
 (deflayer nomods
   _
   @tlow  _      _      _      _      _      _      _      _      _      _      _
-  lctl   a      s      d     f      _      _      j      k      l      ;      _
+  lctl   a      s      d      f      _      _      j      k      l      ;      _
   _      _      _      _      _      _      _      _      _      _      _      @sgrv
   caps   _      @alow                _                    @arai  lmet   _
 )
@@ -36,13 +36,13 @@
   _      .      1      2      3      _      _      _      S-9    S-0    _      _
   _      0      4      5      6      _      _      _      [      ]      S-\    _
   _      ,      7      8      9      _      _      _      S-[    S-]    \      _
-  _      _      _                    _                    @aoff  _      _
+  _      _      _                    _                    _      _      _
 )
 
 (defcfg
   process-unmapped-keys yes
   concurrent-tap-hold yes
-  chords-v2-min-idle 150 ;; suppress chords during typing streaks (≈ urob's require-prior-idle for combos)
+  ;; chords-v2-min-idle 150 ;; disabled — was blocking chord-after-typing. default falls to 5ms
 )
 
 (defvar
@@ -50,74 +50,52 @@
   hold-time 200
   chord-timeout 30
 
-  idle-timeout 150
-
-  hold-pinky   260
-  hold-ring    240
-  hold-middle  200
-  hold-index   200
-
   left-hand-release  (a s d f g)
   left-hand-press    (q w e r t z x c v b)
   right-hand-release (h j k l ;)
   right-hand-press   (y u i o p n m , . /)
 )
 
+;; hrm
 (deffakekeys to-default-layer (layer-switch default))
 
-(deftemplate hrm (key mod hold-time)
-  (defalias $key (tap-hold-release-tap-keys-release $tap-time $hold-time
-    (multi $key @tap) $mod
-    (if-in-list     $mod (lctl lsft lalt lmet) $left-hand-press)
-    (if-not-in-list $mod (lctl lsft lalt lmet) $right-hand-press)
-    (if-in-list     $mod (rctl rsft ralt rmet) $left-hand-release)
-    (if-not-in-list $mod (rctl rsft ralt rmet) $right-hand-release))))
+(defalias tap (multi (layer-switch nomods)
+                     (on-idle-fakekey to-default-layer tap $tap-time)))
 
+(deftemplate
+  hrm (key mod)
+  (defalias $key (tap-hold-release-tap-keys-release
+                   $tap-time $hold-time
+                   (multi $key @tap) $mod
+                   (if-in-list     $mod (lctl lsft lalt lmet) $left-hand-press)
+                   (if-not-in-list $mod (lctl lsft lalt lmet) $right-hand-press)
+                   (if-in-list     $mod (rctl rsft ralt rmet) $left-hand-release)
+                   (if-not-in-list $mod (rctl rsft ralt rmet) $right-hand-release))))
+
+(deftemplate hrm-hand (k1 k2 k3 k4 m1 m2 m3 m4)
+             (t! hrm $k1 $m1)
+             (t! hrm $k2 $m2)
+             (t! hrm $k3 $m3)
+             (t! hrm $k4 $m4))
+
+(t! hrm-hand a s d f lmet lalt lsft lctl)
+(t! hrm-hand ; l k j rmet ralt rsft rctl)
+
+;; non hrm
 (defalias
   ;; raise, lower layers
-  arai (tap-hold $tap-time $hold-time (layer-switch raise) (layer-while-held raise))
-  aoff (layer-switch default)
+  arai (layer-toggle raise)
   alow (layer-toggle lower)
 
-  ;; smart-num terminators — disabled; toggle thumb handles exit
-  ;; t-g (multi g (layer-switch default))
-  ;; t-h (multi h (layer-switch default))
   ;; continue to monitor this ....
   tlow (tap-hold $tap-time $hold-time tab (layer-toggle lower))
   ;; make ~ closer to home
   sgrv (tap-hold $tap-time $hold-time grv rsft)
-
-  ;; hrm
-  tap (multi (layer-switch nomods)
-             (on-idle-fakekey to-default-layer tap $idle-timeout))
 )
-
-;;;; ctrl shift alt meta (csam)
-
-;; (t! hrm a lctl $hold-pinky)
-;; (t! hrm s lsft $hold-ring)
-;; (t! hrm d lalt $hold-middle)
-;; (t! hrm f lmet $hold-index)
-;; (t! hrm j rmet $hold-index)
-;; (t! hrm k ralt $hold-middle)
-;; (t! hrm l rsft $hold-ring)
-;; (t! hrm ; rctl $hold-pinky)
-
-;;;; csam reverse
-
-(t! hrm a lmet $hold-pinky)
-(t! hrm s lalt $hold-ring)
-(t! hrm d lsft $hold-middle)
-(t! hrm f lctl $hold-index)
-(t! hrm j rctl $hold-index)
-(t! hrm k rsft $hold-middle)
-(t! hrm l ralt $hold-ring)
-(t! hrm ; rmet $hold-pinky)
 
 (defchordsv2
   ;;   Lateral combos
   ;; right hand
-  (p [) del  $chord-timeout first-release ()
   (o p) bspc $chord-timeout first-release ()
   (l ;) ret  $chord-timeout first-release ()
   (j k) -    $chord-timeout first-release (raise lower)
@@ -149,4 +127,4 @@
   (w o) (caps-word 2000) $chord-timeout first-release (raise lower)
 )
 
-;; vim:ft=scheme:ts=2:sts:cuc
+;; vim:ft=lisp:ts=2:sts:cuc
