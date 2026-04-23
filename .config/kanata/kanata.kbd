@@ -11,25 +11,11 @@
   @tlow  _      _      _      _      _      _      _      _      _      _      _
   lctl   @a     @s     @d     @f     _      _      @j     @k     @l     @;     _
   _      _      _      _      _      _      _      _      _      _      _      @sgrv
-  caps   _      @alow                _                    @arai  lmet   _
+  caps   _      @alow                @aspc                _      lmet   _
 )
 
-;; nomods: active briefly after each HRM tap
-(deflayer nomods
-  _
-  @tlow  _      _      _      _      _      _      _      _      _      _      _
-  lctl   a      s      d      f      _      _      j      k      l      ;      _
-  _      _      _      _      _      _      _      _      _      _      _      @sgrv
-  caps   _      @alow                _                    @arai  lmet   _
-)
-
-(deflayer lower
-  _
-  _      _      _      _      _      _      _      _      _      _      _      _
-  _      _      _      _      _      _      left   down   up     right  _      _
-  _      _      _      _      _      _      _      _      _      _      _      _
-  _      _      _                    _                    _      _      _
-)
+(deflayermap (lower)
+             h left j down k up l right)
 
 (deflayer raise
   _
@@ -42,54 +28,38 @@
 (defcfg
   process-unmapped-keys yes
   concurrent-tap-hold yes
-  ;; chords-v2-min-idle 150 ;; disabled — was blocking chord-after-typing. default falls to 5ms
+  tap-hold-require-prior-idle 150 ;; typing streak → tap-hold resolves as tap
+  ;; chords-v2-min-idle 150       ;; disabled — was blocking chord-after-typing
 )
 
 (defvar
   tap-time 140
   hold-time 200
   chord-timeout 30
-
-  left-hand-release  (a s d f g)
-  left-hand-press    (q w e r t z x c v b)
-  right-hand-release (h j k l ;)
-  right-hand-press   (y u i o p n m , . /)
 )
 
 ;; hrm
-(deffakekeys to-default-layer (layer-switch default))
 
-(defalias tap (multi (layer-switch nomods)
-                     (on-idle-fakekey to-default-layer tap $tap-time)))
+(defhands
+  (left  q w e r t a s d f g z x c v b)
+  (right y u i o p h j k l ; n m , . /)
+)
 
-(deftemplate
-  hrm (key mod)
-  (defalias $key (tap-hold-release-tap-keys-release
-                   $tap-time $hold-time
-                   (multi $key @tap) $mod
-                   (if-in-list     $mod (lctl lsft lalt lmet) $left-hand-press)
-                   (if-not-in-list $mod (lctl lsft lalt lmet) $right-hand-press)
-                   (if-in-list     $mod (rctl rsft ralt rmet) $left-hand-release)
-                   (if-not-in-list $mod (rctl rsft ralt rmet) $right-hand-release))))
+(deftemplate hrm (key mod)
+             (defalias $key (tap-hold-opposite-hand $hold-time $key $mod (timeout hold))))
 
 (deftemplate hrm-hand (k1 k2 k3 k4 m1 m2 m3 m4)
-             (t! hrm $k1 $m1)
-             (t! hrm $k2 $m2)
-             (t! hrm $k3 $m3)
-             (t! hrm $k4 $m4))
+             (t! hrm $k1 $m1) (t! hrm $k2 $m2) (t! hrm $k3 $m3) (t! hrm $k4 $m4))
 
 (t! hrm-hand a s d f lmet lalt lsft lctl)
 (t! hrm-hand ; l k j rmet ralt rsft rctl)
 
 ;; non hrm
 (defalias
-  ;; raise, lower layers
-  arai (layer-toggle raise)
+  ;; space → tap: spc, hold: raise layer
+  aspc (tap-hold $tap-time $hold-time spc (layer-while-held raise))
   alow (layer-toggle lower)
-
-  ;; continue to monitor this ....
   tlow (tap-hold $tap-time $hold-time tab (layer-toggle lower))
-  ;; make ~ closer to home
   sgrv (tap-hold $tap-time $hold-time grv rsft)
 )
 
@@ -101,6 +71,7 @@
   (j k) -    $chord-timeout first-release (raise lower)
   (m ,) =    $chord-timeout first-release (raise lower)
   ;; left hand
+  (q w) tab  $chord-timeout first-release (raise lower)
   (w e) S-2  $chord-timeout first-release (raise lower)
   (a s) S-4  $chord-timeout first-release (raise lower)
   (s d) S-5  $chord-timeout first-release (raise lower)
@@ -108,7 +79,6 @@
 
   ;;   Vertical combos
   ;; left hand
-  (q w) tab  $chord-timeout first-release (raise lower)
   (w s) S-1  $chord-timeout first-release (raise lower)
   (x s) S-7  $chord-timeout first-release (raise lower)
   (x c) S-8  $chord-timeout first-release (raise lower)
