@@ -15,12 +15,13 @@
 )
 
 (deflayermap (lower)
+             a @la s @ls d @ld f @lf
              h left j down k up l right)
 
 (deflayer raise
   _
   _      .      1      2      3      _      _      _      S-9    S-0    \      _
-  _      0      4      5      6      _      _      _      [      ]      '      _
+  _      @r0    @r4    @r5    @r6    _      _      @rj    @r[    @r]    @r'    _
   _      ,      7      8      9      _      _      _      S-[    S-]    grv    _
   _      _      _                    _                    _      _      _
 )
@@ -38,21 +39,35 @@
   chord-timeout 30
 )
 
-;; hrm
-
 (defhands
   (left  q w e r t a s d f g z x c v b)
   (right y u i o p h j k l ; n m , . /)
 )
 
-(deftemplate hrm (key mod)
-             (defalias $key (tap-hold-opposite-hand $hold-time $key $mod (timeout hold))))
+(deftemplate
+  hrm (key mod)
+  (defalias $key
+            (tap-hold-opposite-hand-release $hold-time $key $mod (timeout hold))))
+
+(deftemplate
+  hrm-t (layer key mod)
+  (defalias (concat $layer $key)
+            (tap-hold-opposite-hand-release $hold-time $key $mod (timeout hold)
+                                    (require-prior-idle 0))))
 
 (deftemplate hrm-hand (k1 k2 k3 k4 m1 m2 m3 m4)
              (t! hrm $k1 $m1) (t! hrm $k2 $m2) (t! hrm $k3 $m3) (t! hrm $k4 $m4))
 
+(deftemplate hrm-t-hand (p k1 k2 k3 k4 m1 m2 m3 m4)
+             (t! hrm-t $p $k1 $m1) (t! hrm-t $p $k2 $m2)
+             (t! hrm-t $p $k3 $m3) (t! hrm-t $p $k4 $m4))
+
 (t! hrm-hand a s d f lmet lalt lsft lctl)
 (t! hrm-hand ; l k j rmet ralt rsft rctl)
+
+(t! hrm-t-hand l a s d f lmet lalt lsft lctl)
+(t! hrm-t-hand r 0 4 5 6 lmet lalt lsft lctl)
+(t! hrm-t-hand r ' ] [ j rmet ralt rsft rctl)
 
 ;; non hrm
 (defalias
