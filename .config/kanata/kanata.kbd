@@ -6,13 +6,10 @@
   lctl   lmet   lalt                 spc                  ralt   rctl   rmet
 )
 
-(deflayer default
-  _
-  @tlow  _      _      _      _      _      _      _      _      _      _      _
-  lctl   @a     @s     @d     @f     _      _      @j     @k     @l     @;     _
-  _      _      _      _      _      _      _      _      _      _      _      @sgrv
-  caps   _      @alow                @aspc                _      lmet   _
-)
+(deflayermap (default)
+             a @a s @s d @d f @f
+             j @j k @k l @l ; @;
+             q @qlow spc @aspc)
 
 (deflayermap (lower)
              a @la s @ls d @ld f @lf
@@ -30,7 +27,6 @@
   process-unmapped-keys yes
   concurrent-tap-hold yes
   tap-hold-require-prior-idle 150 ;; typing streak → tap-hold resolves as tap
-  ;; chords-v2-min-idle 150       ;; disabled — was blocking chord-after-typing
 )
 
 (defvar
@@ -71,23 +67,23 @@
 
 ;; non hrm
 (defalias
-  ;; space → tap: spc, hold: raise layer
   aspc (tap-hold $tap-time $hold-time spc (layer-while-held raise))
-  alow (layer-toggle lower)
-  tlow (tap-hold $tap-time $hold-time tab (layer-toggle lower))
-  sgrv (tap-hold $tap-time $hold-time grv rsft)
+  qlow (tap-hold $tap-time $hold-time q (layer-while-held lower))
+  cop  (switch ((layer raise)) del break () bspc break)
+  cqw  (switch ((layer raise)) esc break () tab break)
 )
 
 (defchordsv2
   ;;   Lateral combos
   ;; right hand
-  (o p) bspc $chord-timeout first-release ()
+  (o p) @cop $chord-timeout first-release (lower)
   (l ;) ret  $chord-timeout first-release ()
   (j k) -    $chord-timeout first-release (raise lower)
   (m ,) =    $chord-timeout first-release (raise lower)
   ;; left hand
-  (q w) tab  $chord-timeout first-release (raise lower)
+  (q w) @cqw $chord-timeout first-release (lower)
   (w e) S-2  $chord-timeout first-release (raise lower)
+  (e r) S-3  $chord-timeout first-release (raise lower)
   (a s) S-4  $chord-timeout first-release (raise lower)
   (s d) S-5  $chord-timeout first-release (raise lower)
   (d f) S-6  $chord-timeout first-release (raise lower)

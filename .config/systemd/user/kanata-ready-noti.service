@@ -1,0 +1,18 @@
+[Unit]
+Description=Notify when kanata finishes initializing
+After=kanata.service
+BindsTo=kanata.service
+
+[Service]
+Type=simple
+ExecStart=/bin/sh -c 'exec journalctl --user -u kanata.service -f -n 0 -o cat \
+  | while IFS= read -r line; do \
+      case "$line" in *"Starting kanata proper"*) \
+        notify-send -a kanata -t 1500 "kanata" "ready" ;; \
+      esac; \
+    done'
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
