@@ -115,9 +115,7 @@ function pn() {
       ln -s ~/dev/datum-monorepo/.claude/commands/rodney-datum.md .claude/commands/rodney-datum.md
       ln -s ~/dev/datum-monorepo/infrastructure/live/.terraform/ infrastructure/live/.terraform
       pn i
-      app=api; pn -F env extract-env-manifest ../../apps/$app/src/lib/env.ts ../../apps/$app/env.manifest.json
-      app=client; pn -F env extract-env-manifest ../../apps/$app/src/lib/env.ts ../../apps/$app/env.manifest.json
-      app=pipeline; pn -F env extract-env-manifest ../../apps/$app/src/lib/env.ts ../../apps/$app/env.manifest.json
+      pn -F './apps/*' extract-env-manifest
       pn -F env generate-env development
       pn -F env generate-env test
       pn d build

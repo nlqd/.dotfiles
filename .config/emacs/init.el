@@ -20,7 +20,7 @@
   :ensure t
   :after evil
   :config
-  (evil-collection-init '(dired magit org eglot)))
+  (evil-collection-init '(minibuffer dired magit org eglot)))
 
 (use-package evil-commentary
   :ensure t
@@ -43,6 +43,17 @@
 (use-package hyperbole
   :ensure t
   :defer t)
+
+(use-package org
+  :defer t
+  :custom
+  (org-confirm-babel-evaluate nil)
+  :config
+  (org-babel-do-load-languages
+   'org-babel-load-languages
+   '((emacs-lisp . t)
+     (shell      . t)
+     (python     . t))))
 
 (use-package eglot
   :defer t

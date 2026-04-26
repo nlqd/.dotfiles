@@ -21,6 +21,12 @@
       }
     ]
   },
+  "permissions": {
+    "allow": [
+      "WebFetch",
+      "WebSearch"
+    ]
+  },
   "enabledPlugins": {
     "pyright-lsp@claude-plugins-official": true,
     "typescript-lsp@claude-plugins-official": true,
@@ -34,10 +40,11 @@
   "tui": "fullscreen",
   "autoDreamEnabled": true,
   "skipDangerousModePermissionPrompt": true,
+  "editorMode": "vim",
+  "preferredNotifChannel": "terminal_bell",
+  "teammateMode": "auto",
   "voiceEnabled": false,
   "autoUpdates": true,
-  "preferredNotifChannel": "terminal_bell",
-  "verbose": true,
   "feedbackSurveyState": {
     "lastShownTime": 1754036669161
   },

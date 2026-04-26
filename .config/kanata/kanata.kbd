@@ -69,21 +69,19 @@
 (defalias
   aspc (tap-hold $tap-time $hold-time spc (layer-while-held raise))
   qlow (tap-hold $tap-time $hold-time q (layer-while-held lower))
-  cop  (switch ((layer raise)) del break () bspc break)
   cqw  (switch ((layer raise)) esc break () tab break)
 )
 
 (defchordsv2
   ;;   Lateral combos
   ;; right hand
-  (o p) @cop $chord-timeout first-release (lower)
+  (o p) bspc $chord-timeout first-release (lower)
   (l ;) ret  $chord-timeout first-release ()
   (j k) -    $chord-timeout first-release (raise lower)
   (m ,) =    $chord-timeout first-release (raise lower)
   ;; left hand
   (q w) @cqw $chord-timeout first-release (lower)
   (w e) S-2  $chord-timeout first-release (raise lower)
-  (e r) S-3  $chord-timeout first-release (raise lower)
   (a s) S-4  $chord-timeout first-release (raise lower)
   (s d) S-5  $chord-timeout first-release (raise lower)
   (d f) S-6  $chord-timeout first-release (raise lower)
