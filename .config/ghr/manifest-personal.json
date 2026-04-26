@@ -42,7 +42,7 @@
   {
     "repo": "neovim/neovim",
     "asset": "nvim-linux-x86_64.tar.gz",
-    "version": "v0.12.1",
+    "version": "v0.12.2",
     "links": {
       "nvim-linux-x86_64/bin/nvim": "/usr/local/bin/nvim"
     }
