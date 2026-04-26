@@ -27,8 +27,8 @@ current_block=-1
 month_col_start=-1
 month_col_end=-1
 
-# ncal -y structure: line 1 = year, then 3 blocks of (1 month header + 7 day rows)
-# Day rows 1-5 = Mon-Fri, rows 6-7 = Sat-Sun
+# ncal -y structure: line 1 = year, then 3 blocks of (1 month header + 7 day rows + 1 blank)
+# Day rows 1-5 = Mon-Fri, rows 6-7 = Sat-Sun, row 8 = blank separator
 while IFS= read -r line; do
   line_num=$((line_num + 1))
 
@@ -37,10 +37,15 @@ while IFS= read -r line; do
     continue
   fi
 
-  block_row=$(( (line_num - 2) % 8 ))
+  block_row=$(( (line_num - 2) % 9 ))
+
+  if [[ $block_row -eq 8 ]]; then
+    echo "$line"
+    continue
+  fi
 
   if [[ $block_row -eq 0 ]]; then
-    current_block=$(( (line_num - 2) / 8 ))
+    current_block=$(( (line_num - 2) / 9 ))
 
     if $highlight_today && [[ $current_block -eq $target_block ]]; then
       col_width=$(( ${#line} / 4 ))

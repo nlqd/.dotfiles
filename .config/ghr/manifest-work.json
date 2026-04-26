@@ -1,21 +1,5 @@
 [
   {
-    "repo": "neovim/neovim",
-    "asset": "nvim-linux-x86_64.appimage",
-    "version": "v0.12.0",
-    "links": {
-      "nvim-linux-x86_64.appimage": "/home/dungngo/.local/bin/nvim"
-    }
-  },
-  {
-    "repo": "LuaLS/lua-language-server",
-    "asset": "lua-language-server-3.18.1-darwin-arm64.tar.gz",
-    "version": "3.18.1",
-    "links": {
-      "bin/lua-language-server": "/home/dungngo/.local/bin/lua-language-server"
-    }
-  },
-  {
     "repo": "bugzmanov/bookokrat",
     "asset": "bookokrat-v0.3.9-aarch64-apple-darwin.tar.gz",
     "version": "v0.3.9",
@@ -32,14 +16,6 @@
     }
   },
   {
-    "repo": "Alexsjones/llmfit",
-    "asset": "llmfit-v0.9.5-aarch64-apple-darwin.tar.gz",
-    "version": "v0.9.5",
-    "links": {
-      "llmfit-v0.8.4-x86_64-unknown-linux-gnu/llmfit": "/home/dungngo/.local/bin/llmfit"
-    }
-  },
-  {
     "repo": "rustonbsd/iroh-ssh",
     "asset": "iroh-ssh.linux",
     "version": "0.2.10",
@@ -53,6 +29,30 @@
     "version": "2026.03.17",
     "links": {
       "yt-dlp": "/home/dungngo/.local/bin/yt-dlp"
+    }
+  },
+  {
+    "repo": "neovim/neovim",
+    "asset": "nvim-linux-x86_64.tar.gz",
+    "version": "v0.12.2",
+    "links": {
+      "nvim-linux-x86_64/bin/nvim": "/usr/local/bin/nvim"
+    }
+  },
+  {
+    "repo": "LuaLS/lua-language-server",
+    "asset": "lua-language-server-3.18.2-darwin-arm64.tar.gz",
+    "version": "3.18.2",
+    "links": {
+      "bin/lua-language-server": "/home/dungngo/.local/bin/lua-language-server"
+    }
+  },
+  {
+    "repo": "Alexsjones/llmfit",
+    "asset": "llmfit-v0.9.14-aarch64-apple-darwin.tar.gz",
+    "version": "v0.9.14",
+    "links": {
+      "llmfit-v0.8.4-x86_64-unknown-linux-gnu/llmfit": "/home/dungngo/.local/bin/llmfit"
     }
   }
 ]
