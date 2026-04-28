@@ -8,6 +8,12 @@
     "BASH_MAX_TIMEOUT_MS": "6000000"
   },
   "includeCoAuthoredBy": false,
+  "permissions": {
+    "allow": [
+      "WebFetch",
+      "WebSearch"
+    ]
+  },
   "hooks": {
     "Notification": [
       {
@@ -21,12 +27,6 @@
       }
     ]
   },
-  "permissions": {
-    "allow": [
-      "WebFetch",
-      "WebSearch"
-    ]
-  },
   "enabledPlugins": {
     "pyright-lsp@claude-plugins-official": true,
     "typescript-lsp@claude-plugins-official": true,
@@ -34,19 +34,21 @@
     "feature-dev@claude-code-plugins": true,
     "code-simplifier@claude-plugins-official": true,
     "superpowers@claude-plugins-official": true,
-    "context7@claude-plugins-official": true
+    "context7@claude-plugins-official": true,
+    "rust-analyzer-lsp@claude-plugins-official": true
   },
   "alwaysThinkingEnabled": true,
   "tui": "fullscreen",
   "autoDreamEnabled": true,
   "skipDangerousModePermissionPrompt": true,
   "editorMode": "vim",
-  "preferredNotifChannel": "terminal_bell",
-  "teammateMode": "auto",
+  "preferredNotifChannel": "auto",
+  "teammateMode": "tmux",
+  "agentPushNotifEnabled": false,
+  "skipAutoPermissionPrompt": true,
   "voiceEnabled": false,
   "autoUpdates": true,
   "feedbackSurveyState": {
     "lastShownTime": 1754036669161
-  },
-  "skipAutoPermissionPrompt": true
+  }
 }

@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 
 current_brightness=$(
-  xrandr --verbose | rg " connected" -A5 | rg "Brightness" | cut -d" " -f2
+  xrandr --verbose | rg " connected" -A5 | rg "Brightness" | awk '{ print $2 }'
+)
+current_monitor=$(
+  xrandr | rg " connected" | awk '{ print $1 }'
 )
 
 # +0.05 for example
@@ -16,4 +19,4 @@ elif (( $(echo "$new_brightness < 0.25" | bc -l) )); then
     new_brightness=0.25
 fi
 
-xrandr --output DP-0 --brightness $new_brightness
+xrandr --output $current_monitor --brightness $new_brightness

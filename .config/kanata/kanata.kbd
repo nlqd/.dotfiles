@@ -9,7 +9,8 @@
 (deflayermap (default)
              a @a s @s d @d f @f
              j @j k @k l @l ; @;
-             q @qlow spc @aspc)
+             q @qlow
+             v @vrai m @mrai)
 
 (deflayermap (lower)
              a @la s @ls d @ld f @lf
@@ -67,9 +68,9 @@
 
 ;; non hrm
 (defalias
-  aspc (tap-hold $tap-time $hold-time spc (layer-while-held raise))
   qlow (tap-hold $tap-time $hold-time q (layer-while-held lower))
-  cqw  (switch ((layer raise)) esc break () tab break)
+  vrai (tap-hold-opposite-hand-release $hold-time v (layer-while-held raise) (timeout hold))
+  mrai (tap-hold-opposite-hand-release $hold-time m (layer-while-held raise) (timeout hold))
 )
 
 (defchordsv2
@@ -80,7 +81,8 @@
   (j k) -    $chord-timeout first-release (raise lower)
   (m ,) =    $chord-timeout first-release (raise lower)
   ;; left hand
-  (q w) @cqw $chord-timeout first-release (lower)
+  (q w) esc  $chord-timeout first-release (lower)
+  (z x) tab  $chord-timeout first-release (lower)
   (w e) S-2  $chord-timeout first-release (raise lower)
   (a s) S-4  $chord-timeout first-release (raise lower)
   (s d) S-5  $chord-timeout first-release (raise lower)
@@ -100,6 +102,7 @@
   (j m) S-]  $chord-timeout first-release (raise lower)
   (p ;) S-\  $chord-timeout first-release (raise lower)
   (; /) \    $chord-timeout first-release (raise lower)
+  (. /) del  $chord-timeout first-release (lower)
 
   ;;   Other non-traditional combos
   ;; two rings = caps word
