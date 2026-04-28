@@ -35,26 +35,36 @@ fi
 
 # Find symlinks under $PWD and $HOME/.claude (skip node_modules for speed)
 # whose resolved targets live outside their root, then ro-bind each unique target.
-while IFS= read -r -d '' link; do
-    target=$(realpath "$link" 2>/dev/null) || continue
-    [[ "$target" == "$PWD"/* ]] && continue
-    [[ "$target" == "$HOME/.claude"/* ]] && continue
+# Strip trailing slashes so prefix-match guards work even when PWD/HOME carry one.
+# Resolve all symlinks in a single batched realpath so we don't fork once per link
+# (16k symlinks under data/ would otherwise cost ~80s of fork+exec).
+pwd_norm="${PWD%/}"
+claude_norm="${HOME%/}/.claude"
+while IFS= read -r -d '' target; do
+    [[ "$target" == "$pwd_norm"/* ]] && continue
+    [[ "$target" == "$claude_norm"/* ]] && continue
     [ -z "${seen_binds[$target]}" ] || continue
     extra_binds+=(--ro-bind "$target" "$target")
     seen_binds[$target]=1
-done < <(find "$PWD" "$HOME/.claude" -not -path "*/node_modules/*" -type l -print0 2>/dev/null)
+done < <(find "$pwd_norm" "$claude_norm" -not -path "*/node_modules/*" -type l -print0 2>/dev/null \
+    | xargs -0 realpath -ez 2>/dev/null)
 
 exec /usr/bin/bwrap \
     --bind /tmp /tmp \
     --dev /dev \
     --proc /proc \
     --hostname bubblewrap --unshare-uts \
+    --unshare-pid \
+    --die-with-parent \
     --ro-bind /bin /bin \
     --ro-bind /lib /lib \
     --ro-bind /lib32 /lib32 \
     --ro-bind /lib64 /lib64 \
     --ro-bind /usr/bin /usr/bin \
     --ro-bind /usr/lib /usr/lib \
+    --ro-bind-try /usr/libexec /usr/libexec \
+    --ro-bind-try /usr/include /usr/include \
+    --ro-bind-try /var/lib/dpkg /var/lib/dpkg \
     --tmpfs /usr/local/bin \
     --args 4 \
     --tmpfs /bwrap-bin \
@@ -82,12 +92,11 @@ exec /usr/bin/bwrap \
     --ro-bind $HOME/.profile $HOME/.profile \
     --ro-bind $HOME/.local $HOME/.local \
     --ro-bind $HOME/.local/bin $HOME/.local/bin \
-    --ro-bind $HOME/.cargo $HOME/.cargo \
     --ro-bind $HOME/go/bin $HOME/go/bin \
-    --ro-bind $HOME/.cargo/bin $HOME/.cargo/bin \
     --ro-bind $HOME/Downloads $HOME/Downloads \
     --ro-bind $HOME/.asdf $HOME/.asdf \
     --ro-bind $HOME/.tool-versions $HOME/.tool-versions \
+    --bind $HOME/.cargo $HOME/.cargo \
     --bind $HOME/.claude $HOME/.claude \
     --bind $HOME/.cache $HOME/.cache \
     --file 3 $HOME/.claude.json \
