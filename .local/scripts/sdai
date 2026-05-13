@@ -20,23 +20,13 @@ CLR='\e[0m'
 
 declare -A MODELS
 
-MODELS["cld-45-haiku"]=7634
-MODELS["cld-45-sonnet"]=7467
-MODELS["cld-45-opus"]=7968
-MODELS["gem-3-flash"]=8392
-MODELS["gem-3-pro"]=7942
-MODELS["gpt-5-mini"]=7239
-MODELS["gpt-5-nano"]=7295
-MODELS["gpt-5-pro"]=7574
-MODELS["gpt-5"]=7183
-MODELS["grok-3"]=6891
-MODELS["grok-3-fast"]=6897
-MODELS["grok-3-mini"]=6894
+MODELS["cld-45-haiku"]=7640
+MODELS["cld-46-sonnet"]=8564
+MODELS["cld-47-opus"]=9010
+MODELS["gem-31-flash"]=8681
+MODELS["gem-31-pro"]=8545
+MODELS["gpt-55"]=9181
 MODELS["grok-4"]=6986
-MODELS["grok-code"]=7464
-MODELS["deep-r1"]=6913
-MODELS["deep-v3"]=6699
-MODELS["qwen-3-coder"]=7008
 
 # global context
 STREAMING="false"
@@ -286,7 +276,8 @@ start_chat_session() {
     fi
 
     if [[ -z "$MESSAGE" ]]; then
-      inline nvim $(QUERY_FILE)
+      # inline nvim $(QUERY_FILE)
+      nvim $(QUERY_FILE)
       MESSAGE=$(cat $(QUERY_FILE))
     else
       echo "$MESSAGE"
@@ -301,7 +292,8 @@ start_chat_session() {
     # use aidd prompt
     if [[ "$MESSAGE" =~ ^/u ]]; then
       aidd ${MESSAGE#* } >$(QUERY_FILE)
-      inline nvim "$(QUERY_FILE)"
+      # inline nvim "$(QUERY_FILE)"
+      nvim "$(QUERY_FILE)"
       MESSAGE=$(cat "$(QUERY_FILE)")
     fi
 

@@ -32,7 +32,7 @@ manifest_upsert() {
     --arg asset "$asset" \
     --arg version "$version" \
     --argjson links "$links_json" \
-    '[.[] | select(.repo != $repo)] + [{repo: $repo, asset: $asset, version: $version, links: $links}]' \
+    '[.[] | select(.repo != $repo)] + [{repo: $repo, asset: $asset, version: $version, links: $links}] | sort_by(.repo)' \
     >"$tmp" && mv "$tmp" "$MANIFEST"
 }
 
@@ -449,7 +449,7 @@ remove_repo() {
   rm -rf "$dir"
 
   local tmp="$MANIFEST.tmp"
-  echo "$manifest" | jq --arg repo "$repo" '[.[] | select(.repo != $repo)]' >"$tmp" && mv "$tmp" "$MANIFEST"
+  echo "$manifest" | jq --arg repo "$repo" '[.[] | select(.repo != $repo)] | sort_by(.repo)' >"$tmp" && mv "$tmp" "$MANIFEST"
 
   echo "Removed $repo"
 }

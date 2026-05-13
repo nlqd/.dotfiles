@@ -1,230 +1,326 @@
 #!/usr/bin/env python3
+"""Streaming Markdown highlighter for terminal output.
 
+Reads Markdown from stdin and emits ANSI-colored output to stdout. Designed
+to handle character-level streaming where chunk boundaries may split tokens.
+
+Recognized features: fenced code blocks (``` / ~~~), ATX headings (# .. ######),
+inline code (`x`), bold (**x**), italic (*x*), and <think>...</think> blocks.
+"""
+
+import codecs
+import os
 import sys
-import re
 
-ESC = "\033["  # real ESC
+
+ESC = "\033["
 RESET = f"{ESC}0m"
-HEADR = f"{ESC}96m"  # headings
-FENCE = f"{ESC}33m"  # ``` / ~~~ lines
-CODE = f"{ESC}92m"  # fenced code content
-ICOD = f"{ESC}95m"  # inline `code`
-THINK = f"{ESC}90m"  # <think>…</think>
-BOLD = f"{ESC}1m"  # **bold**
-ITAL = f"{ESC}3m"  # *italic*
+HEADR = f"{ESC}96m"
+FENCE = f"{ESC}33m"
+CODE = f"{ESC}92m"
+ICOD = f"{ESC}95m"
+THINK = f"{ESC}90m"
+BOLD = f"{ESC}1m"
+ITAL = f"{ESC}3m"
 
-fence_re = re.compile(r"^([`]{3,}|[~]{3,})")
-head_re = re.compile(r"^(#{1,6})\s+(.+)$")
-inline_re = re.compile(r"`([^`\n]+)`")
-bold_re = re.compile(r"\*\*([^*\n]+)\*\*")
-ital_re = re.compile(r"(?<!\*)\*([^*\n]+)\*(?!\*)")
+OPEN_THINK = "<think>"
+CLOSE_THINK = "</think>"
 
-CHUNK_SIZE = 20
+LINE_NORMAL = "normal"
+LINE_HEADING = "heading"
+LINE_FENCE_OPEN = "fence_open"
 
 
-class StreamProcessor:
-    def __init__(self):
-        self.buffer = ""
-        self.in_block = False
-        self.fence_ch = None
+class Highlighter:
+    def __init__(self, out=None):
+        self.out = out if out is not None else sys.stdout
+
+        self.in_fence = False
+        self.fence_char = None
+        self.fence_len = 0
+        self.fence_run_open = False  # leading-fence-char run still being counted
         self.in_think = False
-        self.line_start = True
 
-    def process_line(self, line):
-        m = fence_re.match(line)
-        if m:
-            ch = m.group(1)[0]
-            if not self.in_block:
-                self.in_block, self.fence_ch = True, ch
-            elif ch == self.fence_ch:
-                self.in_block, self.fence_ch = False, None
-            return f"{FENCE}{line}{RESET}\n"
+        self.line_chars = []
+        self.line_decided = False
+        self.line_mode = LINE_NORMAL
 
-        if self.in_block:
-            return f"{CODE}{line}{RESET}\n"
+        self.in_inline_code = False
+        self.in_bold = False
+        self.in_italic = False
+        self.pending_star = False
+        self.tag_buf = ""
 
-        if self.in_think:
-            if "</think>" in line:
-                i = line.find("</think>")
-                self.in_think = False
-                return f"{THINK}{line[: i + 8]}{RESET}{line[i + 8 :]}"
-            else:
-                return f"{THINK}{line}{RESET}\n"
-
-        line = re.sub(
-            r"(<think>.*?</think>)", lambda m: f"{THINK}{m.group(1)}{RESET}", line
-        )
-
-        if "<think>" in line and not self.in_think:
-            self.in_think = True
-            return f"{THINK}{line}{RESET}\n"
-
-        if head_re.match(line):
-            return f"{HEADR}{line}{RESET}\n"
-
-        line = inline_re.sub(lambda m: f"{ICOD}`{m.group(1)}`{RESET}", line)
-        line = bold_re.sub(lambda m: f"{BOLD}**{m.group(1)}**{RESET}", line)
-        line = ital_re.sub(lambda m: f"{ITAL}*{m.group(1)}*{RESET}", line)
-        return line + "\n"
-
-    def process_chunk(self, chunk):
-        if not chunk:
+    # ---------------------------------------------------------------- API
+    def feed(self, text):
+        if not text:
             return
-
-        self.buffer += chunk
-        output = []
-
-        while "\n" in self.buffer:
-            line, self.buffer = self.buffer.split("\n", 1)
-            self.line_start = True
-            processed = self.process_line(line)
-            output.append(processed)
-            sys.stdout.write(processed)
-            sys.stdout.flush()
-
-        if self.buffer and not self.in_block and not self.in_think:
-            if self.can_process_partial():
-                processed = self.process_partial()
-                if processed:
-                    sys.stdout.write(processed)
-                    sys.stdout.flush()
-
-    def can_process_partial(self):
-        if len(self.buffer) < 2:
-            return False
-
-        if self.buffer.startswith("<think"):
-            return False
-        if (
-            self.buffer.endswith("<")
-            or self.buffer.endswith("<t")
-            or self.buffer.endswith("<th")
-        ):
-            return False
-        if (
-            self.buffer.endswith("<thi")
-            or self.buffer.endswith("<thin")
-            or self.buffer.endswith("<think")
-        ):
-            return False
-
-        if "`" in self.buffer:
-            backtick_count = self.buffer.count("`")
-            if backtick_count % 2 == 1:
-                last_backtick = self.buffer.rfind("`")
-                if last_backtick == len(self.buffer) - 1:
-                    return False
-
-        if self.buffer.endswith("*"):
-            return False
-
-        if self.buffer.startswith("```") or self.buffer.startswith("~~~"):
-            return False
-        if self.buffer.startswith("#"):
-            return False
-
-        return True
-
-    def process_partial(self):
-        safe_len = len(self.buffer)
-
-        if self.buffer.endswith("`"):
-            safe_len -= 1
-        elif self.buffer.endswith("<"):
-            safe_len -= 1
-        elif self.buffer.endswith("*"):
-            safe_len -= 1
-
-        if safe_len <= 0:
-            return ""
-
-        safe_content = self.buffer[:safe_len]
-        self.buffer = self.buffer[safe_len:]
-
-        if "`" in safe_content:
-            safe_content = inline_re.sub(
-                lambda m: f"{ICOD}`{m.group(1)}`{RESET}", safe_content
-            )
-
-        if "**" in safe_content:
-            safe_content = bold_re.sub(
-                lambda m: f"{BOLD}**{m.group(1)}**{RESET}", safe_content
-            )
-
-        if "*" in safe_content:
-            safe_content = ital_re.sub(
-                lambda m: f"{ITAL}*{m.group(1)}*{RESET}", safe_content
-            )
-
-        if "<think>" in safe_content and "</think>" in safe_content:
-            safe_content = re.sub(
-                r"(<think>.*?</think>)",
-                lambda m: f"{THINK}{m.group(1)}{RESET}",
-                safe_content,
-            )
-
-        return safe_content
+        for ch in text:
+            self._process(ch)
 
     def flush(self):
-        if self.buffer:
-            if "\n" in self.buffer:
-                lines = self.buffer.split("\n")
-                for i, line in enumerate(lines[:-1]):
-                    processed = self.process_line(line)
-                    sys.stdout.write(processed)
-                self.buffer = lines[-1]
+        if self.line_chars or self.tag_buf or self.pending_star:
+            self._end_line(emit_newline=False)
+        else:
+            self._close_inline_styles()
+        if self.in_think:
+            self._w(RESET)
+            self.in_think = False
+        try:
+            self.out.flush()
+        except Exception:
+            pass
 
-            if self.buffer:
-                if self.in_block:
-                    sys.stdout.write(f"{CODE}{self.buffer}{RESET}")
-                elif self.in_think:
-                    sys.stdout.write(f"{THINK}{self.buffer}{RESET}")
+    # ----------------------------------------------------------- internals
+    def _w(self, s):
+        self.out.write(s)
+
+    def _process(self, ch):
+        if ch == "\n":
+            self._end_line()
+            return
+
+        if self.in_fence:
+            self.line_chars.append(ch)
+            return
+
+        if self.in_think:
+            self._inline(ch)
+            return
+
+        if not self.line_decided:
+            self.line_chars.append(ch)
+            self._try_classify_line()
+            if self.line_decided:
+                buf = "".join(self.line_chars)
+                self.line_chars = []
+                self._begin_decided_line(buf)
+            return
+
+        if self.line_mode == LINE_NORMAL:
+            self._inline(ch)
+            return
+
+        if self.line_mode == LINE_FENCE_OPEN and self.fence_run_open:
+            if ch == self.fence_char:
+                self.fence_len += 1
+            else:
+                self.fence_run_open = False
+        self._w(ch)
+
+    # ------------------------------------------------- line classification
+    def _try_classify_line(self):
+        s = self.line_chars
+        n = len(s)
+        c0 = s[0]
+
+        if c0 == "#":
+            i = 0
+            while i < n and s[i] == "#":
+                i += 1
+            if i > 6:
+                self._decide(LINE_NORMAL)
+                return
+            if i == n:
+                return
+            self._decide(LINE_HEADING if s[i] == " " else LINE_NORMAL)
+            return
+
+        if c0 in ("`", "~"):
+            i = 0
+            while i < n and s[i] == c0:
+                i += 1
+            if i >= 3:
+                self.fence_char = c0
+                self.fence_len = i
+                self._decide(LINE_FENCE_OPEN)
+                return
+            if i == n:
+                return
+            self._decide(LINE_NORMAL)
+            return
+
+        self._decide(LINE_NORMAL)
+
+    def _decide(self, mode):
+        self.line_mode = mode
+        self.line_decided = True
+
+    def _begin_decided_line(self, buf):
+        if self.line_mode == LINE_HEADING:
+            self._w(HEADR + buf)
+        elif self.line_mode == LINE_FENCE_OPEN:
+            self.fence_run_open = len(buf) == self.fence_len
+            self._w(FENCE + buf)
+        else:
+            for c in buf:
+                self._inline(c)
+
+    # -------------------------------------------------------- end of line
+    def _end_line(self, emit_newline=True):
+        if self.in_fence:
+            line = "".join(self.line_chars)
+            self.line_chars = []
+            if self._is_fence_close(line):
+                self._w(FENCE + line + RESET)
+                self.in_fence = False
+            else:
+                self._w(CODE + line + RESET)
+            if emit_newline:
+                self._w("\n")
+            return
+
+        self._flush_pending_literals()
+
+        # <think> spans newlines: preserve in_bold/in_italic flags and the
+        # THINK color across the boundary so they restore on </think>.
+        if not self.in_think:
+            self._close_inline_styles()
+            if not self.line_decided:
+                self._w("".join(self.line_chars))
+            if self.line_mode in (LINE_HEADING, LINE_FENCE_OPEN):
+                self._w(RESET)
+            if self.line_mode == LINE_FENCE_OPEN:
+                self.in_fence = True
+
+        if emit_newline:
+            self._w("\n")
+
+        self.line_decided = False
+        self.line_mode = LINE_NORMAL
+        self.line_chars = []
+
+    def _is_fence_close(self, line):
+        stripped = line.rstrip()
+        return set(stripped) == {self.fence_char} and len(stripped) >= self.fence_len
+
+    # ----------------------------------------------------- inline machine
+    def _inline(self, ch):
+        if self.in_inline_code:
+            if ch == "`":
+                self._w("`" + RESET)
+                self.in_inline_code = False
+                return
+            self._w(ch)
+            return
+
+        if self.tag_buf or ch == "<":
+            candidate = self.tag_buf + ch
+            if candidate == OPEN_THINK:
+                self.tag_buf = ""
+                # Drop any active inline styles around the tag so THINK reads cleanly
+                if self.in_bold or self.in_italic:
+                    self._w(RESET)
+                self._w(THINK + OPEN_THINK)
+                self.in_think = True
+                return
+            if candidate == CLOSE_THINK:
+                self.tag_buf = ""
+                self._w(CLOSE_THINK + RESET)
+                self.in_think = False
+                # Restore any inline styles that were active before the tag
+                if self.in_bold:
+                    self._w(BOLD)
+                if self.in_italic:
+                    self._w(ITAL)
+                return
+            if OPEN_THINK.startswith(candidate) or CLOSE_THINK.startswith(candidate):
+                self.tag_buf = candidate
+                return
+            # Tag mismatch: emit accumulated chars as literal text
+            self._w(self.tag_buf)
+            self.tag_buf = ""
+            if ch == "<":
+                self.tag_buf = "<"
+                return
+
+        if self.in_think:
+            self._w(ch)
+            return
+
+        if ch == "*":
+            if self.pending_star:
+                if self.in_bold:
+                    self._w("**" + RESET)
+                    self.in_bold = False
                 else:
-                    line = self.buffer
-                    if head_re.match(line):
-                        sys.stdout.write(f"{HEADR}{line}{RESET}")
-                    else:
-                        line = inline_re.sub(
-                            lambda m: f"{ICOD}`{m.group(1)}`{RESET}", line
-                        )
-                        line = bold_re.sub(
-                            lambda m: f"{BOLD}**{m.group(1)}**{RESET}", line
-                        )
-                        line = ital_re.sub(
-                            lambda m: f"{ITAL}*{m.group(1)}*{RESET}", line
-                        )
-                        sys.stdout.write(line)
-                self.buffer = ""
+                    self._w(BOLD + "**")
+                    self.in_bold = True
+                self.pending_star = False
+            else:
+                self.pending_star = True
+            return
 
-            sys.stdout.flush()
+        self._resolve_pending_star()
+
+        if ch == "`":
+            self._w(ICOD + "`")
+            self.in_inline_code = True
+            return
+
+        self._w(ch)
+
+    def _resolve_pending_star(self):
+        if not self.pending_star:
+            return
+        self.pending_star = False
+        if self.in_italic:
+            self._w("*" + RESET)
+            self.in_italic = False
+        elif self.in_bold:
+            self._w("*")
+        else:
+            self._w(ITAL + "*")
+            self.in_italic = True
+
+    def _flush_pending_literals(self):
+        if self.tag_buf:
+            self._w(self.tag_buf)
+            self.tag_buf = ""
+        if self.pending_star:
+            self._w("*")
+            self.pending_star = False
+
+    def _close_inline_styles(self):
+        if self.in_inline_code or self.in_bold or self.in_italic:
+            self._w(RESET)
+            self.in_inline_code = False
+            self.in_bold = False
+            self.in_italic = False
 
 
-def main():
-    processor = StreamProcessor()
+# ----------------------------------------------------------------- main
 
+
+def _run():
+    h = Highlighter()
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    fd = 0
     try:
         while True:
-            chunk = sys.stdin.read(CHUNK_SIZE)
+            chunk = os.read(fd, 4096)
             if not chunk:
                 break
-            processor.process_chunk(chunk)
-
-        processor.flush()
-
+            text = decoder.decode(chunk)
+            if text:
+                h.feed(text)
+                sys.stdout.flush()
+        tail = decoder.decode(b"", final=True)
+        if tail:
+            h.feed(tail)
+        h.flush()
     except KeyboardInterrupt:
-        processor.flush()
-        sys.exit(0)
+        h.flush()
     except BrokenPipeError:
         try:
             sys.stdout.close()
-        except:
+        except Exception:
             pass
         try:
             sys.stderr.close()
-        except:
+        except Exception:
             pass
-        sys.exit(0)
 
 
 if __name__ == "__main__":
-    main()
+    _run()

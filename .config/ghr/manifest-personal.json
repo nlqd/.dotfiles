@@ -1,13 +1,5 @@
 [
   {
-    "repo": "ahrm/sioyek",
-    "asset": "sioyek-release-linux-portable.zip",
-    "version": "v2.0.0",
-    "links": {
-      "Sioyek-x86_64.AppImage": "/home/qd/.local/bin/sioyek"
-    }
-  },
-  {
     "repo": "H-M-H/Weylus",
     "asset": "Weylus_0.11.4_amd64.deb",
     "version": "v0.11.4",
@@ -16,11 +8,27 @@
     }
   },
   {
+    "repo": "ahrm/sioyek",
+    "asset": "sioyek-release-linux-portable.zip",
+    "version": "v2.0.0",
+    "links": {
+      "Sioyek-x86_64.AppImage": "/home/qd/.local/bin/sioyek"
+    }
+  },
+  {
     "repo": "koalaman/shellcheck",
     "asset": "shellcheck-v0.11.0.linux.x86_64.tar.gz",
     "version": "v0.11.0",
     "links": {
       "shellcheck-v0.11.0/shellcheck": "/home/qd/.local/bin/shellcheck"
+    }
+  },
+  {
+    "repo": "neovim/neovim",
+    "asset": "nvim-linux-x86_64.tar.gz",
+    "version": "v0.12.1",
+    "links": {
+      "nvim-linux-x86_64/bin/nvim": "/usr/local/bin/nvim"
     }
   },
   {
@@ -37,14 +45,6 @@
     "version": "2026.03.17",
     "links": {
       "yt-dlp": "/home/qd/.local/bin/yt-dlp"
-    }
-  },
-  {
-    "repo": "neovim/neovim",
-    "asset": "nvim-linux-x86_64.tar.gz",
-    "version": "v0.12.2",
-    "links": {
-      "nvim-linux-x86_64/bin/nvim": "/usr/local/bin/nvim"
     }
   }
 ]

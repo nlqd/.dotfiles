@@ -13,9 +13,13 @@ exec 4<"$localbin_args"
 rm "$localbin_args"
 
 # FDs for /usr/bin blocked binaries (PATH shadow via /bwrap-bin).
-exec 5<$HOME/.local/scripts/bwrap-block  # gh
-exec 6<$HOME/.local/scripts/bwrap-block  # rsync
-exec 7<$HOME/.local/scripts/bwrap-block  # terraform
+extra_blocked_bin=()
+exec 5<$HOME/.local/scripts/bwrap-block
+extra_blocked_bin+=(--perms 0755 --ro-bind-data 5 /bwrap-bin/gh)
+exec 6<$HOME/.local/scripts/bwrap-block
+extra_blocked_bin+=(--perms 0755 --ro-bind-data 6 /bwrap-bin/rsync)
+exec 7<$HOME/.local/scripts/bwrap-block
+extra_blocked_bin+=(--perms 0755 --ro-bind-data 7 /bwrap-bin/terraform)
 
 # Build extra --ro-bind args for paths outside $PWD that bwrap would otherwise miss.
 extra_binds=()
@@ -68,9 +72,7 @@ exec /usr/bin/bwrap \
     --tmpfs /usr/local/bin \
     --args 4 \
     --tmpfs /bwrap-bin \
-    --perms 0755 --ro-bind-data 5 /bwrap-bin/gh \
-    --perms 0755 --ro-bind-data 6 /bwrap-bin/rsync \
-    --perms 0755 --ro-bind-data 7 /bwrap-bin/terraform \
+    "${extra_blocked_bin[@]}" \
     --setenv PATH /bwrap-bin:$PATH \
     --ro-bind /usr/local/lib /usr/local/lib \
     --ro-bind /etc/alternatives /etc/alternatives \
@@ -91,7 +93,6 @@ exec /usr/bin/bwrap \
     --ro-bind $HOME/.bashrc $HOME/.bashrc \
     --ro-bind $HOME/.profile $HOME/.profile \
     --ro-bind $HOME/.local $HOME/.local \
-    --ro-bind $HOME/.local/bin $HOME/.local/bin \
     --ro-bind $HOME/go/bin $HOME/go/bin \
     --ro-bind $HOME/Downloads $HOME/Downloads \
     --ro-bind $HOME/.asdf $HOME/.asdf \
@@ -102,4 +103,4 @@ exec /usr/bin/bwrap \
     --file 3 $HOME/.claude.json \
     "${extra_binds[@]}" \
     --bind "$PWD" "$PWD" \
-    claude --dangerously-skip-permissions $@
+    claude --dangerously-skip-permissions "$@"

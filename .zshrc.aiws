@@ -168,6 +168,7 @@ bindkey '^n' __tmux_fzf_autocomplete_widget__
 tmux has-session -t main 2> /dev/null || tmux new-session -d -s main
 
 eval "$(zoxide init zsh)"
-eval "$(starship init zsh)"
+[[ -z "$STARSHIP_SHELL" ]] && eval "$(starship init zsh)"
 eval "$(gh completion --shell zsh)"
 complete -C '/usr/local/bin/aws_completer' aws
+eval "$(kubectl completion zsh)"
