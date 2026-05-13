@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Search roots used when no PATH argument is given. Missing dirs are skipped.
+ROOTS=(
+  "$HOME/Downloads"
+  "$HOME/Desktop"
+  "$HOME/Documents"
+  "$HOME/Pictures"
+  "$HOME/Videos"
+  "$HOME/Music"
+)
+
+# Directory names pruned from the search at any depth.
+EXCLUDES=(
+  .git
+  node_modules
+  target
+  .venv
+  venv
+  __pycache__
+)
+
+MAX_DEPTH=3
+
+usage() {
+  cat <<'EOF'
+Usage: quicklaunch [MODE] [PATH]
+  MODE: drag | open   (omit to dmenu-pick)
+  PATH: single search root (overrides the built-in ROOTS list)
+
+Picks file(s) via fzf in a floating terminal, then either drags
+them (dragon/ripdrag) or opens them (xdg-open). Edit ROOTS and
+EXCLUDES at the top of this script to tune the default search.
+EOF
+}
+
+die() {
+  notify-send --urgency=critical quicklaunch "$1"
+  exit 1
+}
+
+pick_mode() {
+  printf 'drag\nopen\n' | dmenu -i -p 'quicklaunch:' -fn 'JetBrainsMono NF'
+}
+
+# Spawn floating alacritty, run fzf over mtime-sorted files under the given
+# roots. Writes selected absolute paths to $1. $2 is "multi"|"single". Remaining
+# args are search roots (already filtered to existing dirs).
+pick_files() {
+  local outfile=$1 mode=$2
+  shift 2
+  local multi_flag=''
+  [[ $mode == multi ]] && multi_flag='--multi'
+
+  local roots_str exclude_str
+  roots_str=$(printf ' %q' "$@")
+  exclude_str=$(printf ' --exclude %q' "${EXCLUDES[@]}")
+
+  alacritty --class quicklaunch --title quicklaunch -e bash -c "
+    fd --type f --hidden --max-depth $MAX_DEPTH$exclude_str . $roots_str \
+        --exec-batch stat --format='%Y %n' -- \
+      | sort --reverse --numeric-sort \
+      | cut --delimiter=' ' --fields=2- \
+      | fzf $multi_flag \
+          --prompt='quicklaunch> ' \
+          --preview='bat --color=always --line-range :100 {} 2>/dev/null || file --brief {}' \
+          --preview-window=right:50%:wrap \
+      > $(printf %q "$outfile") || true
+  " || true
+}
+
+drag_files() {
+  local cmd
+  if [[ -n ${WAYLAND_DISPLAY:-} ]]; then
+    command -v ripdrag >/dev/null || die 'ripdrag not installed (Wayland)'
+    cmd=ripdrag
+  else
+    command -v dragon >/dev/null || die 'dragon not installed (X11)'
+    cmd=dragon
+  fi
+  "$cmd" --and-exit "$@" &
+  disown
+}
+
+open_file() {
+  xdg-open "$1" &
+  disown
+}
+
+main() {
+  local mode=${1:-} override=${2:-}
+
+  case $mode in
+    -h|--help) usage; exit 0 ;;
+    '') mode=$(pick_mode) || exit 0 ;;
+    drag|open) ;;
+    *) usage >&2; exit 2 ;;
+  esac
+  [[ -z $mode ]] && exit 0
+
+  local roots=() d
+  if [[ -n $override ]]; then
+    [[ -d $override ]] || die "Not a directory: $override"
+    roots=("$override")
+  else
+    for d in "${ROOTS[@]}"; do
+      [[ -d $d ]] && roots+=("$d")
+    done
+  fi
+  [[ ${#roots[@]} -gt 0 ]] || die 'No existing search roots — edit ROOTS or pass a PATH'
+
+  case $mode in
+    drag) pick_files "$outfile" multi  "${roots[@]}" ;;
+    open) pick_files "$outfile" single "${roots[@]}" ;;
+  esac
+
+  [[ -s $outfile ]] || exit 0
+  mapfile -t files < "$outfile"
+
+  case $mode in
+    drag) drag_files "${files[@]}" ;;
+    open) open_file "${files[0]}" ;;
+  esac
+}
+
+outfile=$(mktemp --tmpdir quicklaunch.XXXXXX)
+trap 'rm --force "$outfile"' EXIT
+
+main "$@"

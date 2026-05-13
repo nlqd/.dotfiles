@@ -12,6 +12,7 @@ exec --no-startup-id systemctl --user start clipmenud.service
 # alt is on right hand...
 floating_modifier $mod
 for_window [class="^zoom$"] floating enable
+for_window [class="^quicklaunch$"] floating enable, resize set 60 ppt 40 ppt, move position center
 
 gaps inner 10px
 gaps horizontal 300px
