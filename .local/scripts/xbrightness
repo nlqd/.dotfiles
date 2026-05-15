@@ -1,22 +1,39 @@
 #!/usr/bin/env bash
 
-current_brightness=$(
-  xrandr --verbose | rg " connected" -A5 | rg "Brightness" | awk '{ print $2 }'
-)
-current_monitor=$(
-  xrandr | rg " connected" | awk '{ print $1 }'
-)
+# Cache to avoid xrandr on every read. xrandr on the NVIDIA proprietary
+# driver triggers a full connector re-probe + ~25 lines of EDID log spam,
+# so a status-bar polling this rapidly fills /var/log/syslog.
 
-# +0.05 for example
-step="$@"
-[[ -z $step ]] && echo $current_brightness
+CACHE="${XDG_RUNTIME_DIR:-/tmp}/xbrightness.cache"
 
-new_brightness=$(echo $current_brightness $step | bc)
+read_via_xrandr() {
+  xrandr --verbose 2>/dev/null \
+    | rg ' connected' -A5 \
+    | rg 'Brightness' \
+    | awk '{print $2; exit}'
+}
 
-if (( $(echo "$new_brightness > 1" | bc -l) )); then
-    new_brightness=1
-elif (( $(echo "$new_brightness < 0.25" | bc -l) )); then
-    new_brightness=0.25
+get_monitor() {
+  xrandr 2>/dev/null | rg ' connected' | awk '{print $1; exit}'
+}
+
+current=$(cat "$CACHE" 2>/dev/null)
+if [[ -z $current ]]; then
+  current=$(read_via_xrandr)
+  [[ -n $current ]] && echo "$current" >"$CACHE"
 fi
 
-xrandr --output $current_monitor --brightness $new_brightness
+step="$*"
+if [[ -z $step ]]; then
+  echo "$current"
+  exit 0
+fi
+
+new=$(echo "$current $step" | bc)
+(($(echo "$new > 1" | bc -l))) && new=1
+(($(echo "$new < 0.25" | bc -l))) && new=0.25
+
+monitor=$(get_monitor)
+xrandr --output "$monitor" --brightness "$new"
+echo "$new" >"$CACHE"
+echo "$new"
