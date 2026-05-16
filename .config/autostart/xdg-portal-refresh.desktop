@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Refresh xdg-desktop-portal
+Comment=Restart portal so it picks up XDG_CURRENT_DESKTOP=COSMIC and uses xdg-desktop-portal-cosmic for screen sharing (sway has its own version in ~/.config/sway/config)
+Exec=systemctl --user restart xdg-desktop-portal.service
+OnlyShowIn=COSMIC
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
