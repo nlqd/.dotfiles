@@ -3,6 +3,14 @@ font pango:Iosevka NF 11
 set $wallpaper /home/qd/Pictures/Wallpapers/mountain-03.jpg
 output * background $wallpaper fill
 
+# Wayland screen sharing: sway doesn't push XDG_CURRENT_DESKTOP into the systemd
+# user env on its own (https://github.com/swaywm/sway/pull/4876), so xdg-desktop-portal
+# can't match UseIn=sway and pick the wlr backend. Push the env, then restart the
+# portal to drop any state left from a previous COSMIC session.
+# COSMIC has its own counterpart in .config/autostart/xdg-portal-refresh.desktop
+exec dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP=sway
+exec sh -c 'systemctl --user reset-failed xdg-desktop-portal-wlr.service 2>/dev/null; systemctl --user restart xdg-desktop-portal.service'
+
 # Notification daemon
 # https://github.com/emersion/mako
 exec --no-startup-id mako
