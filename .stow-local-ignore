@@ -1,0 +1,13 @@
+# Stow ignore list — see `info stow` for syntax.
+# Custom file replaces stow's built-in defaults, so preserve the useful ones.
+
+\.git
+\.gitignore
+\.gitmodules
+\.stow-local-ignore
+^/README.*
+^/LICENSE.*
+
+# Project content that isn't dotfiles
+^/ansible
+^/docs
