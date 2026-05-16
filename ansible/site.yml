@@ -1,5 +1,12 @@
 - hosts: all
   become: true
+  gather_facts: true
+  # Only ansible_distribution_release is actually used in roles; the rest
+  # (ansible_host, ansible_user, ansible_ssh_private_key_file) are inventory vars.
+  gather_subset:
+    - "!all"
+    - "!min"
+    - distribution
   vars_files:
     - vault.yml
   roles:

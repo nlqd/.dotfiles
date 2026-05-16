@@ -12,6 +12,7 @@
   ansible.builtin.user:
     name: dungngo
     groups: sudo
+    append: true
     shell: /bin/bash
 
 - name: Ensure .ssh directory
