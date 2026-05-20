@@ -16,68 +16,15 @@ When you understand the rules, please start with "I UNDERSTAND THE GLOBAL ORDER"
 ### Simplicity Means
 
 - Single responsibility per function/class
+- Data first. Adopt functional programming doctrine where make sense
+- Functional core. Imperative shell
 - Avoid premature abstractions
 - No clever tricks - choose the boring solution
 - If you need to explain it, it's too complex
 - Hence, it does not warrant a comment on each line. Semantic and simple code needs not comment.
 - I repeat. Simple code needs not comment. MAJOR DECISIONS should be commented.
 
-## Process
-
-### 1. Planning & Staging
-
-IF THE WORK IS COMPLEX, break complex work into 3-5 stages. Document in `IMPLEMENTATION_PLAN.md`:
-
-```markdown
-## Stage N: [Name]
-**Goal**: [Specific deliverable]
-**Success Criteria**: [Testable outcomes]
-**Tests**: [Specific test cases]
-**Status**: [Not Started|In Progress|Complete]
-```
-- Update status as you progress
-- Remove file when all stages are done
-
-### 2. Implementation Flow
-
-1. **Understand** - Study existing patterns in codebase
-2. **Test** - Write test first (red)
-3. **Implement** - Minimal code to pass (green)
-4. **Refactor** - Clean up with tests passing
-5. **Commit** - With clear message linking to task, only AFTER the human in the loop is satisfied, or if he explicitly allows you to run wild.
-
-### 3. When Stuck (After 3 Attempts)
-
-**CRITICAL**: Maximum 3 attempts per issue, then STOP.
-
-1. **Document what failed**:
-   - What you tried
-   - Specific error messages
-   - Why you think it failed
-
-2. **Research alternatives**:
-   - Find 2-3 similar implementation
-   - Look up similar issues online, using agents to search for you
-   - Note different approaches used
-
-3. **Question fundamentals**:
-   - Is this the right abstraction level?
-   - Can this be split into smaller problems?
-   - Is there a simpler approach entirely?
-
-4. **Try different angle**:
-   - Different library/framework feature?
-   - Different architectural pattern?
-   - Remove abstraction instead of adding?
-
 ## Technical Standards
-
-### Architecture Principles
-
-- **Composition over inheritance** - Use dependency injection
-- **Interfaces over singletons** - Enable testing and flexibility
-- **Explicit over implicit** - Clear data flow and dependencies
-- **Test-driven when possible** - Never disable tests, fix them
 
 ### Code Quality
 
@@ -99,7 +46,7 @@ IF THE WORK IS COMPLEX, break complex work into 3-5 stages. Document in `IMPLEME
 - Handle errors at appropriate level
 - Never silently swallow exceptions
 
-## Decision Framework
+### Decision Framework
 
 When multiple valid approaches exist, choose based on:
 
@@ -109,32 +56,12 @@ When multiple valid approaches exist, choose based on:
 4. **Simplicity** - Is this the simplest solution that works?
 5. **Reversibility** - How hard to change later?
 
-## Project Integration
-
 ### Learning the Codebase
 
 - Find 3 similar features/components
 - Identify common patterns and conventions
 - Use same libraries/utilities when possible
 - Follow existing test patterns
-
-### Tooling
-
-- Use project's existing build system
-- Use project's test framework
-- Use project's formatter/linter settings
-- Don't introduce new tools without strong justification
-
-## Quality Gates
-
-### Definition of Done
-
-- [ ] Tests written and passing
-- [ ] Code follows project conventions
-- [ ] No linter/formatter warnings
-- [ ] Commit messages are clear
-- [ ] Implementation matches plan
-- [ ] No TODOs without issue numbers
 
 ### Test Guidelines
 
@@ -217,3 +144,7 @@ PR descriptions should read smoothly to a human reviewer. Three rules:
 - When a user asks a general concept question (e.g., 'what is X'), answer the general concept first before diving into project-specific details.
 - When the user provides a terse or minimal prompt, ask one clarifying question before proceeding rather than guessing the intent. But for clearly scoped tasks, proceed without asking.
 - When refactoring, for readability reason, please collocate variable w/ where they are used, so the reading flow from top to bottom is more flowish.
+- Recommended to Use these following skills:
+   - normal nav: Skill(fast-code-search) to quickly grasp structure in large codebase
+   - brower (or when web fetch is blocked): Skill(rodney)
+   - communication: Skill(ops-room)
