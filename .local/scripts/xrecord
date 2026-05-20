@@ -42,7 +42,18 @@ end() {
         rm -f /tmp/recgif
         notify-send -t 1000 "Converting to gif..."
 
+        dur=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$output.mp4")
+        # drawbox's `w` expression doesn't honor `t` in ffmpeg 6 (it's the
+        # thickness option). Build a segmented bar gated by `enable` instead.
+        N=40
+        bar="drawbox=x=0:y=ih-4:w=iw:h=4:color=black@0.4:t=fill"
+        for i in $(seq 0 $((N-1))); do
+            start=$(awk "BEGIN{printf \"%.4f\", ${dur}*${i}/${N}}")
+            bar="${bar},drawbox=x=iw*${i}/${N}:y=ih-4:w=iw/${N}:h=4:color=red:t=fill:enable=gte(t\\,${start})"
+        done
+
         vf_opts=()
+        vf_opts+=("$bar")               # burn-in progress bar at bottom
         vf_opts+=(fps=10)               # reduce framerate (default ~30)
         # vf_opts+=(scale=iw/2:-1)        # halve resolution
 
@@ -58,7 +69,7 @@ end() {
         use=$(IFS=:; echo "${use_opts[*]}")
 
         if command -v gifski &>/dev/null; then
-            ffmpeg -loglevel error -i "$output.mp4" -vf fps=10 -f yuv4mpegpipe - | \
+            ffmpeg -loglevel error -i "$output.mp4" -vf "${bar},fps=10" -f yuv4mpegpipe - | \
                 gifski --fps 10 --quality 80 --output "$output.gif" -
         else
             ffmpeg -i "$output.mp4" -filter_complex \
