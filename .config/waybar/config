@@ -19,7 +19,6 @@
         "memory",
         "cpu",
         // "temperature",
-        "custom/keyboard-layout",
         "backlight",
         "pulseaudio",
         "pulseaudio#mic",
@@ -70,14 +69,6 @@
             "warning": 70,
             "critical": 90
         }
-    },
-
-    "custom/keyboard-layout": {
-        "exec": "ibus engine",
-        "on-click": "/home/qd/Dev/personal/dotfiles/.local/scripts/ibus-toggle",
-        "signal": 3,
-        "format": "  {}", // Icon: keyboard
-        "tooltip": false
     },
 
     "custom/player": {

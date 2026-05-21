@@ -1,21 +1,21 @@
 local enabled = false
 
-vim.api.nvim_create_augroup('IBusHandler', { clear = true })
+vim.api.nvim_create_augroup('Fcitx5Handler', { clear = true })
 
 local function magic()
     vim.api.nvim_create_autocmd('InsertEnter', {
         pattern = { '*.md' },
-        group = 'IBusHandler',
+        group = 'Fcitx5Handler',
         callback = function ()
-            vim.fn.execute([[ !ibus engine Bamboo ]], 'silent!')
+            vim.fn.execute([[ !fcitx5-remote -o ]], 'silent!')
         end,
     })
 
     vim.api.nvim_create_autocmd('InsertLeave', {
         pattern = { '*.md' },
-        group = 'IBusHandler',
+        group = 'Fcitx5Handler',
         callback = function ()
-            vim.fn.execute([[ !ibus engine BambooUs ]], 'silent!')
+            vim.fn.execute([[ !fcitx5-remote -c ]], 'silent!')
         end,
     })
 end
@@ -25,7 +25,6 @@ vim.api.nvim_create_user_command('Bamboo', function()
     if enabled then
         magic()
     else
-        vim.api.nvim_clear_autocmds({ group = 'IBusHandler' })
+        vim.api.nvim_clear_autocmds({ group = 'Fcitx5Handler' })
     end
 end, {})
-

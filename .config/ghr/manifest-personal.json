@@ -24,6 +24,14 @@
     }
   },
   {
+    "repo": "mesonbuild/meson",
+    "asset": "meson-1.11.1.tar.gz",
+    "version": "1.11.1",
+    "links": {
+      "meson-1.11.1/meson.py": "/usr/bin/meson"
+    }
+  },
+  {
     "repo": "neovim/neovim",
     "asset": "nvim-linux-x86_64.tar.gz",
     "version": "v0.12.1",
