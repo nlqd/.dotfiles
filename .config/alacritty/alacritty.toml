@@ -64,6 +64,11 @@ key = "C"
 mods = "Control|Shift"
 
 [[keyboard.bindings]]
+action = "CreateNewWindow"
+key = "N"
+mods = "Control|Shift"
+
+[[keyboard.bindings]]
 action = "PasteSelection"
 key = "Insert"
 mods = "Shift"

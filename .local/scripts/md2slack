@@ -69,6 +69,14 @@ def to_html(md: str) -> str:
         flags=re.DOTALL,
     )
     html = re.sub(r"<(/?)del>", r"<\1s>", html)
+    # Slack collapses <p> margins on paste, so blank lines between blocks
+    # in the source disappear. Insert an empty paragraph at each block
+    # boundary to make the spacing visible in the rendered output.
+    html = re.sub(
+        r"(</(?:p|ul|ol|pre|blockquote|table)>)\s*(<(?:p|ul|ol|pre|blockquote|table)\b)",
+        r"\1<p><br></p>\2",
+        html,
+    )
     return html
 
 
