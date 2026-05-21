@@ -3,7 +3,6 @@
     name:
       - nginx
       - certbot
-      - python3-certbot-nginx
     state: present
 
 - name: Create /var/www/html
@@ -26,11 +25,27 @@
     state: link
     owner: dungngo
 
+- name: Stat certs
+  ansible.builtin.stat:
+    path: "/etc/letsencrypt/live/{{ item.domain }}/fullchain.pem"
+  loop: "{{ nginx_sites }}"
+  loop_control:
+    label: "{{ item.domain }}"
+  register: cert_stats
+
+- name: Build cert existence map
+  ansible.builtin.set_fact:
+    cert_exists_for: >-
+      {{ dict(cert_stats.results | map(attribute='item.domain')
+              | zip(cert_stats.results | map(attribute='stat.exists'))) }}
+
 - name: Template nginx site configs
   ansible.builtin.template:
     src: "{{ item.template }}"
     dest: "/etc/nginx/sites-available/{{ item.name }}"
   loop: "{{ nginx_sites }}"
+  vars:
+    cert_exists: "{{ cert_exists_for[item.domain] }}"
   notify: reload nginx
 
 - name: Enable nginx sites
@@ -54,23 +69,41 @@
     state: absent
   notify: reload nginx
 
-- name: Flush handlers before certbot
+# Reload nginx before certbot so /.well-known/acme-challenge is served.
+- name: Flush handlers
   ansible.builtin.meta: flush_handlers
 
-# Listing all certs and searching by `Domains: <domain>` is robust against
-# certbot's `<name>-0001` suffix versioning, which `--cert-name` is not.
-- name: List existing certs
+- name: Issue certs via webroot
   ansible.builtin.command:
-    cmd: certbot certificates
-  register: cert_list
-  changed_when: false
-
-- name: Run certbot for sites that need it
-  ansible.builtin.command:
-    cmd: "certbot --nginx -d {{ item.domain }} --non-interactive --agree-tos --email admin@dzungngo.com"
+    cmd: "certbot certonly --webroot -w /var/www/html -d {{ item.domain }} --non-interactive --agree-tos --email admin@dzungngo.com"
   loop: "{{ nginx_sites | selectattr('certbot', 'defined') | selectattr('certbot') | list }}"
   when:
     - item.enabled | default(true)
-    - "'Domains: ' + item.domain not in cert_list.stdout"
+    - not cert_exists_for[item.domain]
   register: certbot_result
   changed_when: "'Successfully received certificate' in (certbot_result.stdout | default(''))"
+
+# Re-stat + re-template so newly issued certs get their HTTPS server block.
+# No-op on subsequent runs.
+- name: Re-stat certs
+  ansible.builtin.stat:
+    path: "/etc/letsencrypt/live/{{ item.domain }}/fullchain.pem"
+  loop: "{{ nginx_sites }}"
+  loop_control:
+    label: "{{ item.domain }}"
+  register: cert_stats_post
+
+- name: Update cert existence map
+  ansible.builtin.set_fact:
+    cert_exists_for: >-
+      {{ dict(cert_stats_post.results | map(attribute='item.domain')
+              | zip(cert_stats_post.results | map(attribute='stat.exists'))) }}
+
+- name: Re-template nginx site configs with SSL
+  ansible.builtin.template:
+    src: "{{ item.template }}"
+    dest: "/etc/nginx/sites-available/{{ item.name }}"
+  loop: "{{ nginx_sites }}"
+  vars:
+    cert_exists: "{{ cert_exists_for[item.domain] }}"
+  notify: reload nginx
