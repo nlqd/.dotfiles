@@ -14,6 +14,8 @@
 !.claude/commands/
 !.claude/commands/**
 !.claude/settings.json
+!.claude/themes/
+!.claude/themes/**
 .config/btop
 .config/emacs/**
 !.config/emacs/init.el

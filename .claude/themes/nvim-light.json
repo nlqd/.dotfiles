@@ -1,0 +1,53 @@
+{
+  "name": "Nvim Light",
+  "base": "light",
+  "overrides": {
+    "text": "ansi:white",
+    "subtle": "ansi:black",
+
+    "claude": "ansi:green",
+    "claudeShimmer": "ansi:greenBright",
+
+    "suggestion": "ansi:magenta",
+    "remember": "ansi:magenta",
+
+    "success": "ansi:green",
+    "error": "ansi:red",
+    "warning": "ansi:yellow",
+    "warningShimmer": "ansi:yellowBright",
+    "merged": "ansi:magenta",
+
+    "promptBorder": "ansi:yellow",
+    "promptBorderShimmer": "ansi:yellowBright",
+    "permission": "ansi:yellow",
+    "permissionShimmer": "ansi:yellowBright",
+    "planMode": "ansi:magenta",
+    "autoAccept": "ansi:green",
+    "bashBorder": "ansi:cyan",
+    "ide": "ansi:cyan",
+    "fastMode": "ansi:magenta",
+    "fastModeShimmer": "ansi:magentaBright",
+
+    "briefLabelYou": "ansi:yellow",
+    "briefLabelClaude": "ansi:green",
+
+    "rate_limit_fill": "ansi:green",
+    "rate_limit_empty": "ansi:black",
+
+    "diffAdded": "#a8d4b4",
+    "diffRemoved": "#e8b0b4",
+    "diffAddedDimmed": "#dceadf",
+    "diffRemovedDimmed": "#f2dadc",
+    "diffAddedWord": "#6fb585",
+    "diffRemovedWord": "#d68285",
+
+    "red_FOR_SUBAGENTS_ONLY": "ansi:red",
+    "blue_FOR_SUBAGENTS_ONLY": "ansi:blue",
+    "green_FOR_SUBAGENTS_ONLY": "ansi:green",
+    "yellow_FOR_SUBAGENTS_ONLY": "ansi:yellow",
+    "purple_FOR_SUBAGENTS_ONLY": "ansi:magenta",
+    "orange_FOR_SUBAGENTS_ONLY": "ansi:yellow",
+    "pink_FOR_SUBAGENTS_ONLY": "ansi:magentaBright",
+    "cyan_FOR_SUBAGENTS_ONLY": "ansi:cyan"
+  }
+}
