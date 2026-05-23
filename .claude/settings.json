@@ -49,6 +49,7 @@
   "tui": "fullscreen",
   "autoDreamEnabled": true,
   "skipDangerousModePermissionPrompt": true,
+  "theme": "custom:nvim-light",
   "editorMode": "vim",
   "preferredNotifChannel": "auto",
   "teammateMode": "tmux",
