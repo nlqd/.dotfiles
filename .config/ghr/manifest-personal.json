@@ -42,7 +42,7 @@
   {
     "repo": "rustonbsd/iroh-ssh",
     "asset": "iroh-ssh.linux",
-    "version": "0.2.10",
+    "version": "0.2.11",
     "links": {
       "iroh-ssh.linux": "/home/qd/.local/bin/iroh-ssh.linux"
     }
