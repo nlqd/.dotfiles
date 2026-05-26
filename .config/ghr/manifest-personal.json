@@ -1,5 +1,13 @@
 [
   {
+    "repo": "Genymobile/scrcpy",
+    "asset": "scrcpy-linux-x86_64-v4.0.tar.gz",
+    "version": "v4.0",
+    "links": {
+      "scrcpy-linux-x86_64-v4.0/scrcpy": "/home/qd/.local/bin/scrcpy"
+    }
+  },
+  {
     "repo": "H-M-H/Weylus",
     "asset": "Weylus_0.11.4_amd64.deb",
     "version": "v0.11.4",
