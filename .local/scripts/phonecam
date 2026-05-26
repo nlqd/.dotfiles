@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+LOOPBACK_LABEL="PixelCam"
+VIRTUAL_MIC_NAME="PhoneMic"
+PREFERRED_SIZE="1920x1080"
+PREFERRED_FPS="30"
+PW_LOOPBACK_PID=""
+SCRCPY_PID=""
+ROUTE_PID=""
+
+usage() {
+  cat <<EOF
+Usage: phonecam [orientation] [--camera-id=N] [--preview] [--audio] [--list]
+
+  orientation   flip0, flip90, flip180, flip270 (default: none)
+  --camera-id=N override camera (default: first available)
+  --preview     show a local preview window
+  --audio       enable virtual mic setup
+  --list        list cameras and exit
+
+Audio: scrcpy's audio is routed into a virtual mic ("$VIRTUAL_MIC_NAME")
+       via pw-loopback. Select it as your input device in your app.
+
+Examples:
+  phonecam              # default orientation
+  phonecam flip0        # horizontal mirror (selfie-natural)
+  phonecam flip180      # upside down + mirror
+  phonecam --audio      # video + virtual mic
+  phonecam --list       # show available cameras
+
+Dependencies: scrcpy, adb, v4l2loopback-dkms
+              --audio also needs: pw-loopback, wpctl, pw-cli (pipewire)
+EOF
+  exit "${1:-0}"
+}
+
+find_loopback_dev() {
+  for dev in /sys/devices/virtual/video4linux/video*; do
+    [ -d "$dev" ] || continue
+    label=$(cat "$dev/name" 2>/dev/null || true)
+    if [[ "$label" == *"$LOOPBACK_LABEL"* ]]; then
+      echo "/dev/$(basename "$dev")"
+      return
+    fi
+  done
+}
+
+ensure_loopback() {
+  local dev
+  dev=$(find_loopback_dev)
+  if [ -n "$dev" ]; then
+    # v4l2loopback locks to the pixel format from its first writer;
+    # reload to accept a fresh format from scrcpy
+    echo "Resetting v4l2loopback..." >&2
+    sudo rmmod v4l2loopback
+    sleep 0.3
+  fi
+
+  echo "Loading v4l2loopback..." >&2
+  local next_nr
+  next_nr=$(command find /dev -maxdepth 1 -regex '.*/video[0-9]+' -printf '%f\n' 2>/dev/null \
+    | sed 's/video//' | sort -n | tail -1)
+  next_nr=${next_nr:-0}
+  next_nr=$((next_nr + 1))
+
+  sudo modprobe v4l2loopback exclusive_caps=1 video_nr="$next_nr" card_label="$LOOPBACK_LABEL"
+  sleep 0.5
+
+  dev=$(find_loopback_dev)
+  if [ -z "$dev" ]; then
+    echo "Failed to create loopback device" >&2
+    exit 1
+  fi
+  echo "$dev"
+}
+
+wait_for_device() {
+  if ! adb devices 2>/dev/null | grep -q "device$"; then
+    echo "No ADB device found" >&2
+    exit 1
+  fi
+}
+
+cleanup() {
+  if [ -n "$ROUTE_PID" ]; then
+    kill "$ROUTE_PID" 2>/dev/null || true
+  fi
+  if [ -n "$SCRCPY_PID" ]; then
+    kill "$SCRCPY_PID" 2>/dev/null || true
+  fi
+  if [ -n "$PW_LOOPBACK_PID" ]; then
+    kill "$PW_LOOPBACK_PID" 2>/dev/null || true
+  fi
+  wait 2>/dev/null || true
+}
+trap cleanup INT TERM EXIT
+
+setup_virtual_mic() {
+  pw-loopback \
+    --capture-props="media.class=Audio/Sink node.name=$VIRTUAL_MIC_NAME node.description=$VIRTUAL_MIC_NAME" \
+    --playback-props="media.class=Audio/Source node.name=${VIRTUAL_MIC_NAME}.source node.description=$VIRTUAL_MIC_NAME" &
+  PW_LOOPBACK_PID=$!
+  sleep 0.5
+  echo "Virtual mic '$VIRTUAL_MIC_NAME' ready" >&2
+}
+
+route_scrcpy_audio() {
+  local sink_id
+  sink_id=$(pw-cli list-objects Node 2>/dev/null \
+    | grep -B2 "$VIRTUAL_MIC_NAME" | grep -oP '(?<=id )\d+' | head -1)
+  [ -z "$sink_id" ] && return
+
+  for _ in $(seq 1 20); do
+    local stream_id
+    stream_id=$(pw-cli list-objects Node 2>/dev/null \
+      | grep -B5 -i "scrcpy" | grep -oP '(?<=id )\d+' | head -1)
+    if [ -n "$stream_id" ]; then
+      pw-cli set-param "$stream_id" Props "{audio.target-node: $sink_id}" 2>/dev/null || true
+      echo "Routed scrcpy audio -> $VIRTUAL_MIC_NAME" >&2
+      return
+    fi
+    sleep 0.5
+  done
+  echo "Could not find scrcpy audio stream to route automatically" >&2
+}
+
+orientation=""
+camera_id=""
+preview=""
+list_only=""
+audio=""
+
+for arg in "$@"; do
+  case "$arg" in
+    --help|-h) usage 0 ;;
+    --preview) preview=1 ;;
+    --audio) audio=1 ;;
+    --list) list_only=1 ;;
+    --camera-id=*) camera_id="${arg#--camera-id=}" ;;
+    flip0|flip90|flip180|flip270) orientation="$arg" ;;
+    *) echo "Unknown argument: $arg" >&2; usage 1 ;;
+  esac
+done
+
+wait_for_device
+
+if [ -n "$list_only" ]; then
+  scrcpy --video-source=camera --list-cameras 2>&1 | grep -E "camera-id|INFO: List"
+  exit 0
+fi
+
+if [ -z "$camera_id" ]; then
+  camera_id=$(scrcpy --video-source=camera --list-cameras 2>&1 \
+    | grep -oP '(?<=--camera-id=)\d+' | head -1)
+fi
+
+v4l2_dev=$(ensure_loopback)
+
+cmd=(
+  scrcpy
+  --video-source=camera
+  "--camera-id=$camera_id"
+  "--camera-size=$PREFERRED_SIZE"
+  "--camera-fps=$PREFERRED_FPS"
+  "--v4l2-sink=$v4l2_dev"
+)
+
+[ -n "$orientation" ] && cmd+=("--capture-orientation=$orientation")
+[ -z "$preview" ] && cmd+=("--no-window")
+
+if [ -n "$audio" ]; then
+  setup_virtual_mic
+  cmd+=("--audio-source=mic")
+else
+  cmd+=("--no-audio")
+fi
+
+echo ">>> ${cmd[*]}" >&2
+"${cmd[@]}" &
+SCRCPY_PID=$!
+
+if [ -n "$audio" ]; then
+  route_scrcpy_audio &
+  ROUTE_PID=$!
+fi
+
+wait "$SCRCPY_PID" || true
