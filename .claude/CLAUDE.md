@@ -145,7 +145,8 @@ PR descriptions should read smoothly to a human reviewer. Three rules:
 - When the user provides a terse or minimal prompt, ask one clarifying question before proceeding rather than guessing the intent. But for clearly scoped tasks, proceed without asking.
 - When refactoring, for readability reason, please collocate variable w/ where they are used, so the reading flow from top to bottom is more flowish.
 
-- Must use these following skills:
-   - Skill(fast-code-search): quickly grasp structure in large codebase
-   - Skill(rodney): brower (or when web fetch is blocked)
-   - Skill(ops-room): communication
+- Must use these following skills at the beginning of any conversation:
+   - Skill(fast-code-search)
+   - Skill(ops-room)
+- Should use these skills:
+   - Skill(rodney): for when web fetch is blocked (bot blocking) -- rodney would help you circumvent that
