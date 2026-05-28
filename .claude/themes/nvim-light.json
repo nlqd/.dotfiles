@@ -2,7 +2,7 @@
   "name": "Nvim Light",
   "base": "light",
   "overrides": {
-    "text": "ansi:white",
+    "inactive": "#aaaaaa",
     "subtle": "ansi:black",
 
     "claude": "ansi:green",

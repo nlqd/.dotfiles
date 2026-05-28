@@ -40,10 +40,6 @@
   :config
   (org-roam-db-autosync-mode))
 
-(use-package hyperbole
-  :ensure t
-  :defer t)
-
 (use-package org
   :defer t
   :custom

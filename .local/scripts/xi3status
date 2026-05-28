@@ -146,7 +146,7 @@ while :; do
 	echo "${custom}" || exit 1
 
 	for ((_w = 0; _w < 10; _w++)); do
-		rm -f "$_poke_file" 2>/dev/null && break
+		[[ -f "$_poke_file" ]] && rm -f "$_poke_file" && break
 		sleep 0.1
 	done
 done
