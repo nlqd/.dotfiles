@@ -18,7 +18,7 @@ ET.register_namespace("", ATOM)
 
 feed = ET.Element(f"{{{ATOM}}}feed")
 ET.SubElement(feed, f"{{{ATOM}}}title").text = "DBLP Search"
-ET.SubElement(feed, f"{{{ATOM}}}updated").text = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+ET.SubElement(feed, f"{{{ATOM}}}updated").text = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 for hit in root.findall(".//hit"):
     info = hit.find("info")
