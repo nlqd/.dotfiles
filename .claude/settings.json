@@ -35,13 +35,26 @@
     "code-simplifier@claude-plugins-official": true,
     "superpowers@claude-plugins-official": true,
     "context7@claude-plugins-official": true,
-    "crit@crit": true
+    "crit@crit": true,
+    "code-review@claude-plugins-official": true,
+    "learning-opportunities-auto@learning-opportunities": true,
+    "security-guidance@claude-plugins-official": true,
+    "remember@claude-plugins-official": true,
+    "rust@east-agile": true,
+    "learning-opportunities@learning-opportunities": true,
+    "frontend-design@claude-plugins-official": true
   },
   "extraKnownMarketplaces": {
     "crit": {
       "source": {
         "source": "github",
         "repo": "tomasz-tomczyk/crit"
+      }
+    },
+    "sas94-tools": {
+      "source": {
+        "source": "github",
+        "repo": "thtea/sas_mcp"
       }
     }
   },
