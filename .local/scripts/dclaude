@@ -1,106 +1,35 @@
 #!/usr/bin/bash
+# Strict sandbox for claude: write-action / prod tools are shadowed so an
+# autonomous agent cannot grant itself a foothold. gh and git push are blocked
+# here (use dclaude-jen for the allow-listed push profile).
+set -euo pipefail
 
-exec 3<$HOME/.claude.json
+DBOX_PROFILE=dclaude
+source "$HOME/.local/scripts/dbox-lib.sh"
+dbox_parse "$@"
 
-blocked=(gh rsync aws kubectl helm terraform docker heroku)
-localbin_args=$(mktemp)
-for f in /usr/local/bin/*; do
-    name=$(basename "$f")
-    for b in "${blocked[@]}"; do [[ "$name" == "$b" ]] && continue 2; done
-    printf '%s\0%s\0%s\0' '--ro-bind-try' "$f" "$f"
-done > "$localbin_args"
-exec 4<"$localbin_args"
-rm "$localbin_args"
+exec {claude_json}<"$HOME/.claude.json"
 
-# FDs for /usr/bin blocked binaries (PATH shadow via /bwrap-bin).
-extra_blocked_bin=()
-exec 5<$HOME/.local/scripts/bwrap-block
-extra_blocked_bin+=(--perms 0755 --ro-bind-data 5 /bwrap-bin/gh)
-exec 6<$HOME/.local/scripts/bwrap-block
-extra_blocked_bin+=(--perms 0755 --ro-bind-data 6 /bwrap-bin/rsync)
-exec 7<$HOME/.local/scripts/bwrap-block
-extra_blocked_bin+=(--perms 0755 --ro-bind-data 7 /bwrap-bin/terraform)
+dbox_namespaces
+dbox_system
+dbox_block gh rsync aws kubectl helm terraform docker heroku
 
-# Build extra --ro-bind args for paths outside $PWD that bwrap would otherwise miss.
-extra_binds=()
-declare -A seen_binds
+dbox_home                                       # persistent home, before the dotfile binds
+dbox_add \
+    --ro-bind "$HOME/.bashrc" "$HOME/.bashrc" \
+    --ro-bind "$HOME/.profile" "$HOME/.profile" \
+    --ro-bind "$HOME/.local" "$HOME/.local" \
+    --ro-bind-try "$HOME/go/bin" "$HOME/go/bin" \
+    --ro-bind-try "$HOME/Downloads" "$HOME/Downloads" \
+    --ro-bind-try "$HOME/.asdf" "$HOME/.asdf" \
+    --ro-bind-try "$HOME/.tool-versions" "$HOME/.tool-versions" \
+    --bind "$HOME/.cargo" "$HOME/.cargo" \
+    --bind "$HOME/.claude" "$HOME/.claude" \
+    --bind "$HOME/.cache" "$HOME/.cache" \
+    --file "$claude_json" "$HOME/.claude.json"
 
-# If .git is a file we're in a worktree. Bind the main repo's .git common dir
-# so git operations work (objects, refs, etc. all live there).
-if [ -f "$PWD/.git" ]; then
-    git_common_dir=$(git rev-parse --git-common-dir 2>/dev/null)
-    if [ -n "$git_common_dir" ]; then
-        git_common_dir=$(realpath "$git_common_dir")
-        extra_binds+=(--ro-bind "$git_common_dir" "$git_common_dir")
-        seen_binds[$git_common_dir]=1
-    fi
-    extra_binds+=(--ro-bind $HOME/.gitconfig $HOME/.gitconfig)
-fi
+dbox_resolve_links ro
+dbox_shared "${DBOX_SHARES[@]}"
+dbox_project "$DBOX_MODE"
 
-# Find symlinks under $PWD and $HOME/.claude (skip node_modules for speed)
-# whose resolved targets live outside their root, then ro-bind each unique target.
-# Strip trailing slashes so prefix-match guards work even when PWD/HOME carry one.
-# Resolve all symlinks in a single batched realpath so we don't fork once per link
-# (16k symlinks under data/ would otherwise cost ~80s of fork+exec).
-pwd_norm="${PWD%/}"
-claude_norm="${HOME%/}/.claude"
-while IFS= read -r -d '' target; do
-    [[ "$target" == "$pwd_norm"/* ]] && continue
-    [[ "$target" == "$claude_norm"/* ]] && continue
-    [ -z "${seen_binds[$target]}" ] || continue
-    extra_binds+=(--ro-bind "$target" "$target")
-    seen_binds[$target]=1
-done < <(find "$pwd_norm" "$claude_norm" -not -path "*/node_modules/*" -type l -print0 2>/dev/null \
-    | xargs -0 realpath -ez 2>/dev/null)
-
-exec /usr/bin/bwrap \
-    --bind /tmp /tmp \
-    --dev /dev \
-    --proc /proc \
-    --hostname bubblewrap --unshare-uts \
-    --unshare-pid \
-    --die-with-parent \
-    --ro-bind /bin /bin \
-    --ro-bind /lib /lib \
-    --ro-bind /lib32 /lib32 \
-    --ro-bind /lib64 /lib64 \
-    --ro-bind /usr/bin /usr/bin \
-    --ro-bind /usr/lib /usr/lib \
-    --ro-bind-try /usr/libexec /usr/libexec \
-    --ro-bind-try /usr/include /usr/include \
-    --ro-bind-try /var/lib/dpkg /var/lib/dpkg \
-    --tmpfs /usr/local/bin \
-    --args 4 \
-    --tmpfs /bwrap-bin \
-    "${extra_blocked_bin[@]}" \
-    --setenv PATH /bwrap-bin:$PATH \
-    --ro-bind /usr/local/lib /usr/local/lib \
-    --ro-bind /etc/alternatives /etc/alternatives \
-    --ro-bind /etc/resolv.conf /etc/resolv.conf \
-    --ro-bind /etc/profile.d /etc/profile.d \
-    --ro-bind /etc/bash_completion.d /etc/bash_completion.d \
-    --ro-bind /etc/ssl/certs /etc/ssl/certs \
-    --ro-bind /etc/ld.so.cache /etc/ld.so.cache \
-    --ro-bind /etc/ld.so.conf /etc/ld.so.conf \
-    --ro-bind /etc/ld.so.conf.d /etc/ld.so.conf.d \
-    --ro-bind /etc/localtime /etc/localtime \
-    --ro-bind /usr/share/terminfo /usr/share/terminfo \
-    --ro-bind /usr/share/ca-certificates /usr/share/ca-certificates \
-    --ro-bind /etc/nsswitch.conf /etc/nsswitch.conf \
-    --ro-bind /etc/hosts /etc/hosts \
-    --ro-bind /etc/ssl/openssl.cnf /etc/ssl/openssl.cnf \
-    --ro-bind /usr/share/zoneinfo /usr/share/zoneinfo \
-    --ro-bind $HOME/.bashrc $HOME/.bashrc \
-    --ro-bind $HOME/.profile $HOME/.profile \
-    --ro-bind $HOME/.local $HOME/.local \
-    --ro-bind $HOME/go/bin $HOME/go/bin \
-    --ro-bind $HOME/Downloads $HOME/Downloads \
-    --ro-bind $HOME/.asdf $HOME/.asdf \
-    --ro-bind $HOME/.tool-versions $HOME/.tool-versions \
-    --bind $HOME/.cargo $HOME/.cargo \
-    --bind $HOME/.claude $HOME/.claude \
-    --bind $HOME/.cache $HOME/.cache \
-    --file 3 $HOME/.claude.json \
-    "${extra_binds[@]}" \
-    --bind "$PWD" "$PWD" \
-    claude --dangerously-skip-permissions "$@"
+dbox_exec claude --dangerously-skip-permissions "${DBOX_REST[@]}"
