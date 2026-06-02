@@ -25,6 +25,11 @@ dbox_namespaces() {
         --hostname bubblewrap --unshare-uts \
         --unshare-pid \
         --die-with-parent
+    # /tmp is a private tmpfs, but bind the host tmux socket dir back: an agent in
+    # one tmux window can then `tmux send-keys` to sibling windows on the same host
+    # server (how claude drives the GPU shells). Only this dir is shared; the rest
+    # of /tmp stays isolated. -try keeps it harmless when no tmux server is up.
+    dbox_add --bind-try "/tmp/tmux-$(id -u)" "/tmp/tmux-$(id -u)"
 }
 
 # Read-only host system. -try on anything not guaranteed present so a missing
