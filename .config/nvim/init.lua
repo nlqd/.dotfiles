@@ -100,14 +100,17 @@ vim.pack.add({
     gh 'neovim/nvim-lspconfig',
     gh 'j-hui/fidget.nvim',
     gh 'nvimtools/none-ls.nvim',
-    { src = gh 'saghen/blink.cmp', version = vim.version.range('1.*') },
+    gh 'saghen/blink.lib',
+    gh 'saghen/blink.cmp',
     gh 'rafamadriz/friendly-snippets',
 })
 require('fidget').setup({})
 require('null-ls').setup({
     sources = { require('null-ls').builtins.formatting.prettier },
 })
-require('blink.cmp').setup({
+local cmp = require('blink.cmp')
+cmp.build():pwait()
+cmp.setup({
     keymap = {
         preset = 'cmdline',
     },
@@ -129,6 +132,7 @@ require('blink.cmp').setup({
     },
     signature = { enabled = true },
     -- opts_extend = { "sources.default" },
+    fuzzy = { implementation = "rust" },
 })
 vim.diagnostic.config({ virtual_text = { current_line = true } })
 vim.keymap.set('n', '<leader>gf', vim.lsp.buf.format, { desc = '[G]o and [F]ormat the code' })
