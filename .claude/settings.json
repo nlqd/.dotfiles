@@ -5,7 +5,8 @@
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
     "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR": "1",
     "BASH_DEFAULT_TIMEOUT_MS": "30000",
-    "BASH_MAX_TIMEOUT_MS": "6000000"
+    "BASH_MAX_TIMEOUT_MS": "6000000",
+    "SAS_MCP_INDEX_DIR": "/home/dungngo/.claude/data/sas94-index"
   },
   "includeCoAuthoredBy": false,
   "permissions": {
@@ -70,6 +71,7 @@
   "skipAutoPermissionPrompt": true,
   "voiceEnabled": false,
   "autoUpdates": true,
+  "skipWorkflowUsageWarning": true,
   "feedbackSurveyState": {
     "lastShownTime": 1754036669161
   }
