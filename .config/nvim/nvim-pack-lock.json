@@ -81,6 +81,10 @@
       "rev": "6a6a9e28e1713b9e9db99eec1e6672e5666c01b9",
       "src": "https://github.com/stefandtw/quickfix-reflector.vim"
     },
+    "render-markdown.nvim": {
+      "rev": "5adf0895310c1904e5abfaad40a2baad7fe44a07",
+      "src": "https://github.com/MeanderingProgrammer/render-markdown.nvim"
+    },
     "todo-comments.nvim": {
       "rev": "31e3c38ce9b29781e4422fc0322eb0a21f4e8668",
       "src": "https://github.com/folke/todo-comments.nvim"
