@@ -1,0 +1,431 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CREDS_FILE="$HOME/.config/router-monitor/creds"
+TELNET_HELPER="$HOME/.local/scripts/.router-telnet.py"
+WATCH_HELPER="$HOME/.local/scripts/.router-watch.py"
+
+TMPDIR="${XDG_RUNTIME_DIR:-/tmp}/router-monitor-$$"
+mkdir -p "$TMPDIR"
+trap 'rm -rf "$TMPDIR"' EXIT
+
+RED='\033[0;31m'
+YEL='\033[0;33m'
+DIM='\033[2m'
+RST='\033[0m'
+BOLD='\033[1m'
+
+case "${1:-}" in
+    --setup|--teardown) ;;
+    *)
+        # shellcheck source=/dev/null
+        source "$CREDS_FILE"
+        ;;
+esac
+
+ISSUES_FILE="$TMPDIR/issues"
+: > "$ISSUES_FILE"
+
+add_issue() {
+    echo "$1" >> "$ISSUES_FILE"
+}
+
+STATE_DIR="$HOME/.local/state/router-monitor"
+mkdir -p "$STATE_DIR"
+
+# --- helpers ---
+
+telnet_cmds() {
+    local host="$1" user="$2" pass="$3"
+    shift 3
+    ROUTER_PASS="$pass" python3 "$TELNET_HELPER" "$host" "$user" "$@"
+}
+
+format_rate() {
+    local bps="$1"
+    if (( bps >= 1000000 )); then
+        printf "%.1fM" "$(echo "$bps / 1000000" | bc -l)"
+    elif (( bps >= 1000 )); then
+        printf "%.0fK" "$(echo "$bps / 1000" | bc -l)"
+    else
+        printf "%d" "$bps"
+    fi
+}
+
+format_uptime() {
+    local raw="$1"
+    [[ "$raw" == "—" ]] && echo "—" && return
+    local hours
+    hours=$(echo "$raw" | cut -d: -f1)
+    if (( hours >= 24 )); then
+        printf "%dd%dh" "$((hours / 24))" "$((hours % 24))"
+    else
+        printf "%s" "$raw"
+    fi
+}
+
+# --- collect data from .1 and .2 via telnet ---
+
+collect_draytek() {
+    local host="$1" label="$2" user="$3" pass="$4"
+
+    local raw wan_raw wan1 session_raw arp_raw
+    raw=$(telnet_cmds "$host" "$user" "$pass" "wan status" "show session" "ip arp status") || true
+    wan_raw=$(echo "$raw" | sed -n '/^=== wan status ===/,/^=== show session ===/{//!p}') || true
+    wan1=$(echo "$wan_raw" | sed -n '/^WAN1:/,/^WAN2:\|^USB_WAN/{p}') || true
+    session_raw=$(echo "$raw" | sed -n '/^=== show session ===/,/^=== ip arp status ===/{//!p}') || true
+    arp_raw=$(echo "$raw" | sed -n '/^=== ip arp status ===/,${//!p}') || true
+
+    local status stall ip uptime tx_rate rx_rate sess_cur sess_max clients
+    status=$(echo "$wan1" | grep -m1 -oP 'WAN1: \K\w+') || status="unknown"
+    stall=$(echo "$wan1" | grep -m1 -oP 'stall=\K\w') || stall="?"
+    ip=$(echo "$wan1" | grep -m1 -oP '(?<![A-Z]) IP=\K[0-9.]+') || ip="—"
+    uptime=$(echo "$wan1" | grep -m1 -oP 'Up Time=\K[0-9:]+') || uptime="—"
+    tx_rate=$(echo "$wan1" | grep -m1 -oP 'TX Rate\([Bb]ps\)=\K[0-9]+') || tx_rate="0"
+    rx_rate=$(echo "$wan1" | grep -m1 -oP 'RX Rate\([Bb]ps\)=\K[0-9]+') || rx_rate="0"
+    sess_cur=$(echo "$session_raw" | grep -m1 -oP '% Current Session Usage: \K[0-9]+') || sess_cur="0"
+    sess_max=$(echo "$session_raw" | grep -m1 -oP 'Maximum Session Number: \K[0-9]+') || sess_max="60000"
+    clients=$(echo "$arp_raw" | grep -cP '^\s+\d+\s+192\.168\.') || clients="0"
+
+    if [[ "$status" != "Online" ]]; then
+        add_issue "${RED}${label}: WAN is ${status}${RST}"
+    fi
+    if [[ "$stall" == "Y" ]]; then
+        add_issue "${RED}${label}: WAN stalled${RST}"
+    fi
+    if (( sess_max > 0 )); then
+        local sess_pct=$(( sess_cur * 100 / sess_max ))
+        if (( sess_pct > 50 )); then
+            add_issue "${YEL}${label}: sessions at ${sess_pct}% (${sess_cur}/${sess_max})${RST}"
+        fi
+    fi
+
+    local up_fmt tx_fmt rx_fmt
+    up_fmt=$(format_uptime "$uptime")
+    tx_fmt=$(format_rate "$tx_rate")
+    rx_fmt=$(format_rate "$rx_rate")
+
+    # save raw uptime for flap detection
+    echo "$uptime" > "$TMPDIR/uptime-${host##*.}"
+
+    printf "%s\t%s\t%s\t%s/%s\t%s\t%s\t%s / %s\n" \
+        "$label" "$status" "$ip" "$sess_cur" "$sess_max" "$clients" "$up_fmt" "$tx_fmt" "$rx_fmt"
+}
+
+# --- collect data from .3 via curl ---
+
+ont_login() {
+    local cookie_file="$TMPDIR/ont-cookies.txt"
+    curl --silent --max-time 5 --insecure \
+        --cookie-jar "$cookie_file" \
+        "https://192.168.1.3/cgi-bin/login.asp" > /dev/null 2>&1
+
+    curl --silent --max-time 5 --insecure \
+        --cookie "$cookie_file" \
+        --cookie-jar "$cookie_file" \
+        --referer "https://192.168.1.3/cgi-bin/login.asp" \
+        --data "Username=${ONT_USER}&Password=${ONT_PASS}&StatusActionFlag=-1" \
+        "https://192.168.1.3/cgi-bin/login.asp" > /dev/null 2>&1
+}
+
+ont_get() {
+    local page="$1"
+    curl --silent --max-time 5 --insecure \
+        --cookie "$TMPDIR/ont-cookies.txt" \
+        "https://192.168.1.3/cgi-bin/$page" 2>/dev/null
+}
+
+collect_ont() {
+    ont_login
+
+    local device_raw user_raw
+    device_raw=$(ont_get "sta-device.asp")
+    user_raw=$(ont_get "sta-user.asp")
+
+    if echo "$device_raw" | grep -q 'login.asp'; then
+        add_issue "${RED}.3 (ONT): login failed${RST}"
+        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+            ".3 (ONT)" "???" "—" "—" "—" "—" "login failed"
+        return
+    fi
+
+    local wan_status wan_ip pon_state pon_tx pon_rx
+    wan_status=$(echo "$device_raw" | grep -oP 'vArrayStr = "\K[^"]+' | sed -n '8p' | cut -d, -f1)
+    wan_ip=$(echo "$device_raw" | grep -oP 'vArrayStr = "\K[^"]+' | sed -n '9p' | cut -d, -f1)
+    pon_state=$(echo "$device_raw" | grep -oP "trafficstate\s*=\s*'\K[^']+" || echo "unknown")
+    pon_tx=$(echo "$device_raw" | grep -oP "PonSendPkt\s*=\s*'\K[0-9]+" || echo "0")
+    pon_rx=$(echo "$device_raw" | grep -oP "PonRecvPkt\s*=\s*'\K[0-9]+" || echo "0")
+
+    local client_ips client_count
+    client_ips=$(echo "$user_raw" | grep -m1 'var aryInfoTemp' | grep -oP '"\K[^"]+' || echo "")
+    client_count=$(echo "$client_ips" | tr ',' '\n' | grep -c '192\.168\.' || echo "0")
+
+    if [[ "$wan_status" != "up" ]]; then
+        add_issue "${RED}.3 (ONT): WAN is ${wan_status:-down}${RST}"
+    fi
+    if [[ "$pon_state" != "up" ]]; then
+        add_issue "${RED}.3 (ONT): PON link ${pon_state:-down}${RST}"
+    fi
+
+    local display_status="up"
+    [[ "$wan_status" != "up" ]] && display_status="DOWN"
+
+    local tx_fmt rx_fmt
+    tx_fmt=$(format_rate "$pon_tx")
+    rx_fmt=$(format_rate "$pon_rx")
+
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s / %s\n" \
+        ".3 (ONT)" "$display_status" "${wan_ip:-—}" "—" "$client_count" "—" \
+        "${tx_fmt}pkt" "${rx_fmt}pkt"
+}
+
+# --- DNS health check ---
+
+dns_check_one() {
+    local label="$1" bind_ip="$2"
+    local ms
+    ms=$(dig +time=3 +tries=1 +stats @8.8.8.8 -b "$bind_ip" google.com 2>/dev/null \
+        | grep -oP 'Query time: \K[0-9]+') || ms=""
+    if [[ -n "$ms" ]]; then
+        printf "%s\t%sms\n" "$label" "$ms"
+        if (( ms > 500 )); then
+            add_issue "${YEL}${label}: DNS slow (${ms}ms)${RST}"
+        fi
+    else
+        printf "%s\tFAIL\n" "$label"
+        add_issue "${RED}${label}: DNS resolution failed${RST}"
+    fi
+}
+
+start_dns_bg() {
+    speed_has_bind_ips || return 0
+    dns_check_one ".1" "${SPEED_BIND_IPS[0]}" > "$TMPDIR/dns-1.txt" 2>/dev/null &
+    dns_check_one ".2" "${SPEED_BIND_IPS[1]}" > "$TMPDIR/dns-2.txt" 2>/dev/null &
+    dns_check_one ".3" "${SPEED_BIND_IPS[2]}" > "$TMPDIR/dns-3.txt" 2>/dev/null &
+}
+
+# --- WAN flap detection ---
+
+check_wan_flap() {
+    local label="$1" uptime_raw="$2"
+    [[ "$uptime_raw" == "—" || -z "$uptime_raw" ]] && return
+
+    local state_file="$STATE_DIR/${label// /_}_wan_uptime"
+    local prev_hours=0
+    [[ -f "$state_file" ]] && prev_hours=$(cat "$state_file")
+
+    # uptime_raw is HH:MM:SS from DrayTek
+    local cur_hours
+    cur_hours=$(echo "$uptime_raw" | cut -d: -f1)
+    [[ -z "$cur_hours" || "$cur_hours" == "—" ]] && return
+
+    if (( prev_hours > 0 && cur_hours < prev_hours )); then
+        local prev_fmt cur_fmt
+        prev_fmt=$(format_uptime "${prev_hours}:00:00")
+        cur_fmt=$(format_uptime "${cur_hours}:00:00")
+        add_issue "${YEL}${label}: WAN reconnected (was ${prev_fmt}, now ${cur_fmt})${RST}"
+        echo "${label}|$(date '+%Y-%m-%d %H:%M')|${prev_fmt} -> ${cur_fmt}" >> "$STATE_DIR/flap_log"
+    fi
+
+    echo "$cur_hours" > "$state_file"
+}
+
+show_flap_log() {
+    local logfile="$STATE_DIR/flap_log"
+    [[ -f "$logfile" ]] || return
+    local count
+    count=$(wc -l < "$logfile")
+    (( count == 0 )) && return
+
+    echo ""
+    printf "%bWAN Flap History%b %b(last 10)%b\n" "$BOLD" "$RST" "$DIM" "$RST"
+    tail -10 "$logfile" | while IFS='|' read -r lbl when detail; do
+        printf "  %b%s%b  %s  %s\n" "$DIM" "$when" "$RST" "$lbl" "$detail"
+    done
+}
+
+# --- client list ---
+
+show_clients() {
+    echo ""
+    printf "%bConnected Clients%b %b(.2 ARP table)%b\n" "$BOLD" "$RST" "$DIM" "$RST"
+
+    local raw arp
+    raw=$(telnet_cmds "192.168.1.2" "$R2_USER" "$R2_PASS" "ip arp status") || { echo "  (telnet failed)"; return; }
+    arp=$(echo "$raw" | sed -n '/^=== ip arp status ===/,${//!p}') || true
+
+    local has_clients=false
+    {
+        printf "IP\tMAC\tHostname\n"
+        echo "$arp" | grep -P '^\s+\d+\s+192\.168\.' | while read -r _idx ip mac host _rest; do
+            has_clients=true
+            [[ -z "$host" ]] && host="—"
+            printf "%s\t%s\t%s\n" "$ip" "$mac" "$host"
+        done
+    } | column -t -s$'\t'
+}
+
+# --- speed test ---
+
+SPEED_BIND_IPS=(192.168.1.211 192.168.1.212 192.168.1.213)
+SPEED_URL="http://speedtest3.vtn.com.vn/speedtest/random4000x4000.jpg"
+
+speed_test_one() {
+    local label="$1" bind_ip="$2"
+    local bytes time_total speed
+    bytes=$(curl --silent --max-time 15 --interface "$bind_ip" \
+        -o /dev/null -w '%{size_download} %{time_total}' \
+        "$SPEED_URL" 2>/dev/null) || bytes="0 0"
+    local size=${bytes%% *}
+    time_total=${bytes##* }
+
+    if (( size > 0 )) && [[ "$time_total" != "0.000000" && "$time_total" != "0" ]]; then
+        speed=$(echo "scale=1; $size * 8 / $time_total / 1000000" | bc)
+        printf "%s\t%s Mbps\n" "$label" "$speed"
+    else
+        printf "%s\tfailed\n" "$label"
+    fi
+}
+
+speed_has_bind_ips() {
+    ip addr show dev eno2 2>/dev/null | grep -q "${SPEED_BIND_IPS[0]}"
+}
+
+start_speed_bg() {
+    speed_has_bind_ips || return 0
+    speed_test_one ".1" "${SPEED_BIND_IPS[0]}" > "$TMPDIR/speed-1.txt" 2>/dev/null &
+    speed_test_one ".2" "${SPEED_BIND_IPS[1]}" > "$TMPDIR/speed-2.txt" 2>/dev/null &
+    speed_test_one ".3" "${SPEED_BIND_IPS[2]}" > "$TMPDIR/speed-3.txt" 2>/dev/null &
+}
+
+show_probes() {
+    if ! speed_has_bind_ips; then
+        printf "\n%bprobes: run 'sudo =router-status --setup' first%b\n" "$DIM" "$RST"
+        return
+    fi
+    wait
+    echo ""
+
+    local has_speed=false
+    [[ -s "$TMPDIR/speed-1.txt" ]] && has_speed=true
+
+    {
+        if $has_speed; then
+            printf "Router\tDNS\tDown\n"
+        else
+            printf "Router\tDNS\n"
+        fi
+        for i in 1 2 3; do
+            local dns speed
+            dns=$(cut -d$'\t' -f2 "$TMPDIR/dns-${i}.txt" 2>/dev/null) || dns="—"
+            if $has_speed; then
+                speed=$(cut -d$'\t' -f2 "$TMPDIR/speed-${i}.txt" 2>/dev/null) || speed="—"
+                printf ".%s\t%s\t%s\n" "$i" "$dns" "$speed"
+            else
+                printf ".%s\t%s\n" "$i" "$dns"
+            fi
+        done
+    } | column -t -s$'\t'
+}
+
+# --- setup/teardown for secondary IPs ---
+
+HOST_IF="eno2"
+SETUP_BIND_IPS=(192.168.1.211 192.168.1.212 192.168.1.213)
+SETUP_GATEWAYS=(192.168.1.1 192.168.1.2 192.168.1.3)
+SETUP_TABLES=(211 212 213)
+
+do_setup() {
+    for i in 0 1 2; do
+        local idx=$((i + 1)) ip="${SETUP_BIND_IPS[$i]}" gw="${SETUP_GATEWAYS[$i]}" table="${SETUP_TABLES[$i]}"
+        ip addr show dev "$HOST_IF" | grep -q "$ip" || ip addr add "${ip}/24" dev "$HOST_IF"
+        grep -q "^${table} " /etc/iproute2/rt_tables 2>/dev/null || echo "${table} via_gw${idx}" >> /etc/iproute2/rt_tables
+        ip route replace default via "$gw" dev "$HOST_IF" table "$table"
+        ip route replace 192.168.1.0/24 dev "$HOST_IF" scope link table "$table" 2>/dev/null || true
+        ip rule del from "$ip" 2>/dev/null || true
+        ip rule add from "$ip" table "$table"
+        echo ".${idx}: ${ip} -> ${gw}"
+    done
+    echo ""
+    echo "verifying..."
+    for i in 0 1 2; do
+        local idx=$((i + 1)) ip="${SETUP_BIND_IPS[$i]}" pub
+        pub=$(curl --silent --max-time 5 --interface "$ip" "http://ifconfig.me" 2>/dev/null) || pub="FAIL"
+        echo "  .${idx} (${ip}): public=${pub}"
+    done
+}
+
+do_teardown() {
+    for i in 0 1 2; do
+        ip addr del "${SETUP_BIND_IPS[$i]}/24" dev "$HOST_IF" 2>/dev/null || true
+        ip rule del from "${SETUP_BIND_IPS[$i]}" 2>/dev/null || true
+        ip route del default table "${SETUP_TABLES[$i]}" 2>/dev/null || true
+        ip route del 192.168.1.0/24 table "${SETUP_TABLES[$i]}" 2>/dev/null || true
+    done
+    sed -i '/via_gw[123]/d' /etc/iproute2/rt_tables 2>/dev/null || true
+    echo "secondary IPs and routes removed"
+}
+
+# --- main ---
+
+case "${1:-}" in
+    --setup)    do_setup; exit 0 ;;
+    --teardown) do_teardown; exit 0 ;;
+    --watch)    python3 "$WATCH_HELPER" "${2:-30s}"; exit 0 ;;
+esac
+
+NO_SPEED=false
+VERBOSE=false
+for arg in "$@"; do
+    case "$arg" in
+        --no-speed) NO_SPEED=true ;;
+        --verbose|-v) VERBOSE=true ;;
+    esac
+done
+
+echo ""
+printf "%bRouter Status%b  %b%s%b\n" "$BOLD" "$RST" "$DIM" "$(date '+%Y-%m-%d %H:%M:%S')" "$RST"
+echo ""
+
+# kick off background jobs
+$NO_SPEED || start_speed_bg
+start_dns_bg
+
+printf "%bcollecting...%b\r" "$DIM" "$RST"
+
+r1=$(collect_draytek "192.168.1.1" ".1 (2925)" "$R1_USER" "$R1_PASS" 2>/dev/null) \
+    || r1=$(printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" ".1 (2925)" "ERR" "—" "—" "—" "—" "telnet failed")
+r2=$(collect_draytek "192.168.1.2" ".2 (2927)" "$R2_USER" "$R2_PASS" 2>/dev/null) \
+    || r2=$(printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" ".2 (2927)" "ERR" "—" "—" "—" "—" "telnet failed")
+r3=$(collect_ont 2>/dev/null) \
+    || r3=$(printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" ".3 (ONT)" "ERR" "—" "—" "—" "—" "curl failed")
+
+printf "              \r"
+
+# WAN flap detection using raw uptimes saved by collect_draytek
+check_wan_flap ".1" "$(cat "$TMPDIR/uptime-1" 2>/dev/null || echo "—")" 2>/dev/null || true
+check_wan_flap ".2" "$(cat "$TMPDIR/uptime-2" 2>/dev/null || echo "—")" 2>/dev/null || true
+
+if [[ -s "$ISSUES_FILE" ]]; then
+    printf "%b%bIssues%b\n" "$BOLD" "$RED" "$RST"
+    while IFS= read -r issue; do
+        printf "  %b\n" "$issue"
+    done < "$ISSUES_FILE"
+    echo ""
+fi
+
+{
+    printf "Router\tWAN\tIP\tSessions\tClnt\tUptime\tTX / RX\n"
+    echo "$r1"
+    echo "$r2"
+    echo "$r3"
+} | column -t -s$'\t'
+
+show_probes || true
+
+if $VERBOSE; then
+    show_flap_log || true
+    show_clients || true
+fi
+
+echo ""
