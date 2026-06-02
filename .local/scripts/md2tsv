@@ -1,0 +1,89 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# ///
+"""Read a GFM markdown table and write TSV.
+
+Input: stdin if piped, otherwise the clipboard. Output: stdout; when
+stdout is a tty the same TSV is also pushed back onto the clipboard
+(replacing the markdown source), so bare `md2tsv` is a complete
+clipboard-to-clipboard conversion. Piping to anything else preserves
+normal pipe semantics and leaves the clipboard alone.
+"""
+
+import os
+import re
+import stat
+import subprocess
+import sys
+
+SEP_ROW = re.compile(r"\|[\s\-:|]+\|")
+
+
+def is_wayland() -> bool:
+    return bool(os.environ.get("WAYLAND_DISPLAY")) and not os.environ.get("DISPLAY")
+
+
+def read_clipboard() -> str:
+    cmd = (
+        ["wl-paste", "--no-newline"]
+        if is_wayland()
+        else ["xclip", "-selection", "clipboard", "-o"]
+    )
+    return subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
+
+
+def write_clipboard(content: str) -> None:
+    if is_wayland():
+        subprocess.run(
+            ["wl-copy", "--type", "text/plain"],
+            input=content.encode("utf-8"),
+            check=True,
+        )
+        return
+    # X11 xclip holds the selection in the foreground; double-fork so we
+    # don't block the caller and let it serve until something else takes
+    # the selection (same idiom as md2slack).
+    if os.fork() > 0:
+        return
+    os.setsid()
+    if os.fork() > 0:
+        os._exit(0)
+    devnull = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(devnull, fd)
+    os.close(devnull)
+    subprocess.run(
+        ["xclip", "-selection", "clipboard"],
+        input=content.encode("utf-8"),
+        check=False,
+    )
+    os._exit(0)
+
+
+def has_data(fd: int) -> bool:
+    # True for pipes and regular files; False for ttys and /dev/null.
+    # Matters because dmenu launches us with stdio on /dev/null, where
+    # isatty() would lie.
+    mode = os.fstat(fd).st_mode
+    return stat.S_ISFIFO(mode) or stat.S_ISREG(mode)
+
+
+def main() -> int:
+    md = sys.stdin.read() if has_data(0) else read_clipboard()
+    rows = []
+    for line in md.splitlines():
+        line = line.strip()
+        if not line or SEP_ROW.fullmatch(line):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        rows.append("\t".join(cells))
+    out = "\n".join(rows)
+    print(out)
+    if not has_data(1):
+        write_clipboard(out)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
