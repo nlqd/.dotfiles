@@ -108,9 +108,21 @@ dbox_home() {
 }
 
 # Resolve symlinks under $PWD and ~/.claude whose targets live outside both, then
-# bind each unique target so the link resolves inside. Batched realpath keeps it
-# to one fork even with thousands of links. git_mode = ro|rw for the worktree
-# common dir + gitconfig.
+# bind each unique target so the link resolves inside. git_mode = ro|rw for the
+# worktree common dir + gitconfig.
+#
+# Walking whole trees for symlinks is the launch bottleneck: a research repo holds
+# tens of thousands of internal dataset links, and ~/.claude is ~15G (plugin npm
+# trees, conversation logs). So we don't walk either deeply. The links worth
+# binding are enumerated cheaply, no deep traversal:
+#   - ~/.claude (depth <= 2): the central config links (CLAUDE.md, skills, ...) that
+#     point into ~/dotfiles. Deeper venv pythons under plugins/ resolve via the
+#     ~/.asdf and ~/.local toolchain binds, so we needn't hunt them here.
+#   - $PWD tracked symlinks: read straight from the git index (mode 120000).
+#   - $PWD shallow links (depth <= 2): catches hand-made top-level links git can't
+#     see, e.g. a worktree's `.claude` -> the main worktree's central config.
+# Deep *gitignored* links (dataset/build trees) are skipped on purpose; their
+# targets are internal or belong under --share. Non-git dirs fall back to a walk.
 dbox_resolve_links() {
     local git_mode="${1:-ro}" bind="--ro-bind"
     [ "$git_mode" = rw ] && bind="--bind"
@@ -131,8 +143,18 @@ dbox_resolve_links() {
         [[ "$target" == "$claude_norm"/* ]] && continue
         [ -z "${seen[$target]:-}" ] || continue
         dbox_add --ro-bind "$target" "$target"; seen[$target]=1
-    done < <(find "$pwd_norm" "$claude_norm" -not -path "*/node_modules/*" -type l -print0 2>/dev/null \
-        | xargs -0 realpath -ez 2>/dev/null)
+    done < <(
+        {
+            find "$claude_norm" -maxdepth 2 -type l -print0 2>/dev/null
+            if git -C "$pwd_norm" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+                git -C "$pwd_norm" ls-files -s -z 2>/dev/null \
+                    | gawk -v RS='\0' -v ORS='\0' -v p="$pwd_norm/" \
+                        '$1 == "120000" { sub(/^[^\t]*\t/, ""); print p $0 }'
+                find "$pwd_norm" -maxdepth 2 -type l -print0 2>/dev/null
+            else
+                find "$pwd_norm" -type l -print0 2>/dev/null
+            fi
+        } | xargs -0 realpath -ez 2>/dev/null)
 }
 
 # Always-on shared dropbox at /shared (a stable host dir, empty until used) plus
