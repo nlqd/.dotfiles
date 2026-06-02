@@ -30,7 +30,6 @@ export ZSH="$HOME/.oh-my-zsh"
 export FLYCTL_INSTALL="/home/qd/.fly"
 export PATH="$FLYCTL_INSTALL/bin:$PATH"
 
-alias nvim='NVIM_APPNAME=nvim-0.12 nvim'
 alias v='nvim'
 alias vg='nvim +G'
 alias lmk='latexmk'
@@ -40,13 +39,10 @@ alias nrvn='newsraft -f ~/.config/newsraft/feeds-vn'
 alias upgrade='sudo apt update && sudo apt upgrade && flatpak update -y'
 alias ez='nvim ~/.zshrc'
 alias sz='. ~/.zshrc'
-alias ck='nvim ~/.sdai/cookies'
 alias tma='tmux -2 a'
 alias lg='lazygit'
-alias ldk='lazydocker'
 alias dbui='nvim -c "DBUI"'
-
-alias duchs='du -chs -- * | sort -h'
+alias cr='claude -r'
 
 y() {
   local tmp="$(mktemp -t "yazi-cwd.XXXXXX")" cwd
@@ -70,10 +66,6 @@ function gdiff() {
   branch=${1:-main}
   [[ $branch -ne main ]] && shift
   git diff -w $(git merge-base @ $branch) --stat -p "$@"
-}
-
-function duchs() {
-  du -chs -- * | sort -h
 }
 
 function sshaiws() {
