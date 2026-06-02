@@ -1,0 +1,47 @@
+#!/usr/bin/bash
+# allow-list profile: vibe-hard-mode for a project where the agent is
+# trusted to push to GitHub. gh and git are exposed (and GH_TOKEN injected);
+# rsync/terraform/docker stay blocked. Adds R toolchain and binds the parent dir
+# so sibling git worktrees are reachable.
+set -euo pipefail
+
+DBOX_PROFILE=dclaude-jen
+source "$HOME/.local/scripts/dbox-lib.sh"
+dbox_parse "$@"
+
+exec {claude_json}<"$HOME/.claude.json"
+
+dbox_namespaces
+dbox_system
+dbox_block rsync terraform docker
+
+dbox_home
+dbox_add \
+    --ro-bind "$HOME/.bashrc" "$HOME/.bashrc" \
+    --ro-bind "$HOME/.profile" "$HOME/.profile" \
+    --ro-bind "$HOME/.local" "$HOME/.local" \
+    --ro-bind-try "$HOME/go/bin" "$HOME/go/bin" \
+    --ro-bind-try "$HOME/Downloads" "$HOME/Downloads" \
+    --ro-bind-try "$HOME/.asdf" "$HOME/.asdf" \
+    --ro-bind-try "$HOME/.tool-versions" "$HOME/.tool-versions" \
+    --ro-bind-try "$HOME/.config/gh" "$HOME/.config/gh" \
+    --ro-bind-try "$HOME/.circleci" "$HOME/.circleci" \
+    --bind "$HOME/.cargo" "$HOME/.cargo" \
+    --bind "$HOME/.claude" "$HOME/.claude" \
+    --bind "$HOME/.cache" "$HOME/.cache" \
+    --file "$claude_json" "$HOME/.claude.json" \
+    --setenv GH_TOKEN "$(gh auth token)"
+
+# System R toolchain.
+dbox_add \
+    --ro-bind-try /etc/R /etc/R \
+    --ro-bind-try /usr/lib/R /usr/lib/R \
+    --ro-bind-try /usr/share/R /usr/share/R \
+    --bind-try "$HOME/.R" "$HOME/.R"
+
+dbox_resolve_links rw
+dbox_shared "${DBOX_SHARES[@]}"
+dbox_add --bind "$PWD/.." "$PWD/.."        # sibling worktrees (created mid-session) reachable
+dbox_project "$DBOX_MODE"
+
+dbox_exec claude --dangerously-skip-permissions "${DBOX_REST[@]}"
