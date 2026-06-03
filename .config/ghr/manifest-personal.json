@@ -56,6 +56,14 @@
     }
   },
   {
+    "repo": "sharkdp/fd",
+    "asset": "fd-v10.4.2-x86_64-unknown-linux-gnu.tar.gz",
+    "version": "v10.4.2",
+    "links": {
+      "fd-v10.4.2-x86_64-unknown-linux-gnu/fd": "/home/qd/.local/bin/fd"
+    }
+  },
+  {
     "repo": "yt-dlp/yt-dlp",
     "asset": "yt-dlp",
     "version": "2026.03.17",
