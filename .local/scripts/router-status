@@ -149,12 +149,10 @@ collect_ont() {
         return
     fi
 
-    local wan_status wan_ip pon_state pon_tx pon_rx
+    local wan_status wan_ip pon_state
     wan_status=$(echo "$device_raw" | grep -oP 'vArrayStr = "\K[^"]+' | sed -n '8p' | cut -d, -f1)
     wan_ip=$(echo "$device_raw" | grep -oP 'vArrayStr = "\K[^"]+' | sed -n '9p' | cut -d, -f1)
     pon_state=$(echo "$device_raw" | grep -oP "trafficstate\s*=\s*'\K[^']+" || echo "unknown")
-    pon_tx=$(echo "$device_raw" | grep -oP "PonSendPkt\s*=\s*'\K[0-9]+" || echo "0")
-    pon_rx=$(echo "$device_raw" | grep -oP "PonRecvPkt\s*=\s*'\K[0-9]+" || echo "0")
 
     local client_ips client_count
     client_ips=$(echo "$user_raw" | grep -m1 'var aryInfoTemp' | grep -oP '"\K[^"]+' || echo "")
@@ -167,16 +165,13 @@ collect_ont() {
         add_issue "${RED}.3 (ONT): PON link ${pon_state:-down}${RST}"
     fi
 
-    local display_status="up"
+    # Homogenize status with DrayTek output: Online when WAN is up, DOWN otherwise.
+    # ONT cumulative packet counters aren't comparable to DrayTek bps rates, so TX/RX is "—".
+    local display_status="Online"
     [[ "$wan_status" != "up" ]] && display_status="DOWN"
 
-    local tx_fmt rx_fmt
-    tx_fmt=$(format_rate "$pon_tx")
-    rx_fmt=$(format_rate "$pon_rx")
-
-    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s / %s\n" \
-        ".3 (ONT)" "$display_status" "${wan_ip:-—}" "—" "$client_count" "—" \
-        "${tx_fmt}pkt" "${rx_fmt}pkt"
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+        ".3 (ONT)" "$display_status" "${wan_ip:-—}" "—" "$client_count" "—" "—"
 }
 
 # --- DNS health check ---
