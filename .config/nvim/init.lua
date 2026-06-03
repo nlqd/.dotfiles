@@ -87,6 +87,32 @@ vim.pack.add({ gh 'tpope/vim-sleuth' })
 -- markdown
 vim.pack.add({ gh 'iamcco/markdown-preview.nvim' })
 vim.pack.add({ gh 'MeanderingProgrammer/render-markdown.nvim' })
+require('render-markdown').setup({ heading = { backgrounds = {} } })
+local function render_markdown_ansi()
+    local hl = {
+        RenderMarkdownH1 = { ctermfg = 1, fg = '#c0392b' },
+        RenderMarkdownH2 = { ctermfg = 4, fg = '#2563eb' },
+        RenderMarkdownH3 = { ctermfg = 2, fg = '#2e7d32' },
+        RenderMarkdownH4 = { ctermfg = 5, fg = '#9333ea' },
+        RenderMarkdownH5 = { ctermfg = 6, fg = '#0e7490' },
+        RenderMarkdownH6 = { ctermfg = 3, fg = '#b45309' },
+        RenderMarkdownCode = { ctermbg = 7, bg = '#eeeeee' },
+        RenderMarkdownBullet = { ctermfg = 3, fg = '#b45309' },
+        RenderMarkdownQuote = { ctermfg = 8, fg = '#6b7280' },
+        RenderMarkdownDash = { ctermfg = 8, fg = '#9ca3af' },
+        RenderMarkdownLink = { ctermfg = 4, fg = '#2563eb', underline = true },
+        RenderMarkdownUnchecked = { ctermfg = 8, fg = '#9ca3af' },
+        RenderMarkdownChecked = { ctermfg = 2, fg = '#16a34a' },
+    }
+    for group, val in pairs(hl) do
+        vim.api.nvim_set_hl(0, group, val)
+    end
+end
+vim.api.nvim_create_autocmd('ColorScheme', {
+    pattern = '*',
+    callback = render_markdown_ansi,
+})
+render_markdown_ansi()
 
 -- git
 vim.api.nvim_create_user_command('Gdiff', function(opts)
