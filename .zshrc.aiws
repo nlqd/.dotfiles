@@ -168,6 +168,17 @@ tmux has-session -t main 2> /dev/null || tmux new-session -d -s main
 
 eval "$(zoxide init zsh)"
 [[ -z "$STARSHIP_SHELL" ]] && eval "$(starship init zsh)"
+
+# OSC 133 prompt marks for tmux copy-last-output (prefix+O); starship won't emit them (starship#5463).
+# A must ride inside PROMPT: a precmd-printed mark dies when zle redraws the prompt line.
+if [[ -z "$__osc133_done" ]]; then
+  __osc133_done=1
+  PROMPT=$'%{\e]133;A\e\\%}'"$PROMPT"
+  __osc133_c() { print -n '\e]133;C\e\\' }
+  preexec_functions+=(__osc133_c)
+fi
+
 eval "$(gh completion --shell zsh)"
 complete -C '/usr/local/bin/aws_completer' aws
 eval "$(kubectl completion zsh)"
+eval "$(hcloud completion zsh)"
