@@ -48,9 +48,17 @@
     }
   },
   {
+    "repo": "neurosnap/zmx",
+    "asset": "zmx-0.6.0-linux-x86_64.tar.gz",
+    "version": "v0.6.0",
+    "links": {
+      "zmx": "/home/qd/.local/bin/zmx"
+    }
+  },
+  {
     "repo": "rustonbsd/iroh-ssh",
     "asset": "iroh-ssh.linux",
-    "version": "0.2.11",
+    "version": "0.2.12",
     "links": {
       "iroh-ssh.linux": "/home/qd/.local/bin/iroh-ssh.linux"
     }
