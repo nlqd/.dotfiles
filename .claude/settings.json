@@ -6,7 +6,8 @@
     "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR": "1",
     "BASH_DEFAULT_TIMEOUT_MS": "30000",
     "BASH_MAX_TIMEOUT_MS": "6000000",
-    "SAS_MCP_INDEX_DIR": "/home/dungngo/.claude/data/sas94-index"
+    "SAS_MCP_INDEX_DIR": "/home/dungngo/.claude/data/sas94-index",
+    "CLAUDE_CODE_SCROLL_SPEED": "3"
   },
   "includeCoAuthoredBy": false,
   "permissions": {
@@ -64,6 +65,7 @@
   "tui": "fullscreen",
   "autoDreamEnabled": true,
   "skipDangerousModePermissionPrompt": true,
+  "skipWorkflowUsageWarning": true,
   "theme": "custom:nvim-light",
   "editorMode": "vim",
   "preferredNotifChannel": "auto",
@@ -72,7 +74,6 @@
   "skipAutoPermissionPrompt": true,
   "voiceEnabled": false,
   "autoUpdates": true,
-  "skipWorkflowUsageWarning": true,
   "feedbackSurveyState": {
     "lastShownTime": 1754036669161
   }
