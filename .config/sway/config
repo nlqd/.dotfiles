@@ -56,9 +56,9 @@ input type:touchpad {
     scroll_factor 0.5
 }
 
-# Lid behavior: disable screen and suspend when lid closes
-bindswitch --locked lid:on output $laptop disable; exec systemctl suspend
-bindswitch --locked lid:off output $laptop enable
+# Lid behavior: server mode keeps machine on with screen off; normal mode suspends
+bindswitch --locked lid:on  exec $dot_local/sway-lid-handler close
+bindswitch --locked lid:off exec $dot_local/sway-lid-handler open
 
 # Key bindings
 bindsym $mod+XF86AudioMute    exec pactl     set-source-mute @DEFAULT_SOURCE@ toggle
