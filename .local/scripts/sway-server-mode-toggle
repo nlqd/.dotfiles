@@ -3,17 +3,11 @@
 STATE_FILE="$HOME/.cache/sway-server-mode"
 
 if [ -f "$STATE_FILE" ]; then
-    # Currently in server mode, disable it - restore normal behavior
-    swaymsg "bindswitch lid:on output eDP-1 disable"
-    swaymsg "bindswitch lid:off output eDP-1 enable"
     rm "$STATE_FILE"
-    notify-send "Server Mode OFF" "Closing lid will turn off screen"
+    notify-send "Server Mode OFF" "Closing lid suspends the machine"
 else
-    # Enable server mode - lid close does nothing, lid open ALWAYS enables screen
-    swaymsg "bindswitch lid:on exec /bin/true"
-    swaymsg "bindswitch lid:off output eDP-1 enable"
     touch "$STATE_FILE"
-    notify-send "Server Mode ON" "Closing lid does nothing, opening lid always enables screen"
+    notify-send "Server Mode ON" "Lid close turns screen off, lid open turns it back on"
 fi
 
 # Signal waybar to update (signal 4 = SIGRTMIN+4)

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Lid dispatch: in server mode only cut panel power; otherwise suspend.
+
+STATE_FILE="$HOME/.cache/sway-server-mode"
+LAPTOP="eDP-1"
+
+case "$1" in
+    close)
+        if [ -f "$STATE_FILE" ]; then
+            swaymsg "output $LAPTOP power off"
+        else
+            swaymsg "output $LAPTOP disable"
+            systemctl suspend
+        fi
+        ;;
+    open)
+        swaymsg "output $LAPTOP enable"
+        swaymsg "output $LAPTOP power on"
+        ;;
+    *)
+        echo "usage: ${0##*/} close|open" >&2
+        exit 1
+        ;;
+esac
