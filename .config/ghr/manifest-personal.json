@@ -24,6 +24,14 @@
     }
   },
   {
+    "repo": "altsem/gitu",
+    "asset": "gitu-v0.42.0-x86_64-unknown-linux-gnu.zip",
+    "version": "v0.42.0",
+    "links": {
+      "gitu-v0.42.0-x86_64-unknown-linux-gnu/gitu": "/home/qd/.local/bin/gitu"
+    }
+  },
+  {
     "repo": "koalaman/shellcheck",
     "asset": "shellcheck-v0.11.0.linux.x86_64.tar.gz",
     "version": "v0.11.0",
