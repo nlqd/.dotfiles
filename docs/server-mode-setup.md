@@ -19,11 +19,14 @@ Then `sudo systemctl restart systemd-logind` (or reboot).
 
 ## 2. sudoers: let the toggle flip the Dell charge policy without a password
 
-    sudo install -m 0440 -o root -g root \
-      ~/.local/scripts/battery-charge-mode.sudoers /etc/sudoers.d/battery-charge-mode
-    sudo visudo -cf /etc/sudoers.d/battery-charge-mode      # expect: parsed OK
+Create `/etc/sudoers.d/battery-charge-mode` with this one rule. It is scoped to a
+single BIOS attribute; the only values the kernel accepts there are the charge
+policies (Adaptive/Standard/Express/PrimAcUse/Custom), all benign.
 
-Scoped to one BIOS attribute (the charge policy); details in the file header.
+    sudo install -m 0440 /dev/stdin /etc/sudoers.d/battery-charge-mode <<'EOF'
+    qd ALL=(root) NOPASSWD: /usr/bin/tee /sys/class/firmware-attributes/dell-wmi-sysman/attributes/PrimaryBattChargeCfg/current_value
+    EOF
+    sudo visudo -cf /etc/sudoers.d/battery-charge-mode      # expect: parsed OK
 
 ## 3. BIOS / firmware prerequisites (Dell)
 
@@ -32,8 +35,12 @@ Scoped to one BIOS attribute (the charge policy); details in the file header.
 - No BIOS admin / power-on password set, else writes need authentication
   (check `.../authentication/*/is_enabled` is `0`).
 - The cap window lives in BIOS NVRAM, not this repo. Set once:
-  `CustomChargeStart=50`, `CustomChargeStop=60`. Retune the cap by changing
-  `CustomChargeStop`.
+  `CustomChargeStart=80`, `CustomChargeStop=90`. Retune the cap by changing
+  `CustomChargeStop` (firmware allows stop 55-100, start 50-95). The window is
+  kept high here on purpose: this battery is worn to ~50% of design, so a low
+  cap left too little reserve to undock with. Write order matters -- raise
+  `CustomChargeStop` before raising `CustomChargeStart` (start must stay below
+  stop).
 
 ## How it works (all in this repo)
 
