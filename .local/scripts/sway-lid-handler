@@ -3,19 +3,40 @@
 
 STATE_FILE="$HOME/.cache/sway-server-mode"
 LAPTOP="eDP-1"
+LID_STATE="/proc/acpi/button/lid/LID0/state"
 
 case "$1" in
     close)
         if [ -f "$STATE_FILE" ]; then
+            logger --tag sway-lid "close: server mode, panel power off"
             swaymsg "output $LAPTOP power off"
         else
+            logger --tag sway-lid "close: normal mode, suspending"
             swaymsg "output $LAPTOP disable"
             systemctl suspend
         fi
         ;;
     open)
-        swaymsg "output $LAPTOP enable"
-        swaymsg "output $LAPTOP power on"
+        # libinput can fabricate a lid-open while the lid is physically shut:
+        # the kanata virtual keyboard (bus i8042, so tagged internal and paired
+        # with the lid) relays an unmapped Dell EC key, and libinput's "keyboard
+        # while lid closed => lid must be open" heuristic emits a synthetic open.
+        # The raw SW_LID never moves, which is why logind ignores it. Do the same:
+        # cross-check the firmware ACPI lid and refuse to power on if it says
+        # closed. Settle briefly first (seen 2026-06-07 23:48, 2026-06-08 08:57).
+        #
+        # Why guard here and not tag kanata external in libinput: the lid
+        # heuristic and touchpad disable-while-typing share one tag
+        # (EVDEV_TAG_INTERNAL_KEYBOARD), so externalizing kanata would also kill
+        # disable-while-typing. Guarding here keeps that feature intact.
+        sleep 1
+        if grep --quiet "closed" "$LID_STATE" 2>/dev/null; then
+            logger --tag sway-lid "open: IGNORED phantom (ACPI says lid closed)"
+        else
+            logger --tag sway-lid "open: panel power on"
+            swaymsg "output $LAPTOP enable"
+            swaymsg "output $LAPTOP power on"
+        fi
         ;;
     *)
         echo "usage: ${0##*/} close|open" >&2

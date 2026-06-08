@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Match the Dell battery charge policy to server mode.
+#   cap  -> Custom   (stop charging at the BIOS CustomChargeStop, currently 60%;
+#                     above that the laptop runs straight off AC)
+#   full -> Standard (charge to 100% for travel)
+#   sync -> pick cap/full from the saved server-mode state (boot hook)
+#
+# PrimaryBattChargeCfg is a dell-wmi-sysman firmware attribute; writing it needs
+# root, so we go through a sudoers drop-in scoped to exactly this one file
+# (see battery-charge-mode.sudoers). Carrying these dotfiles to a non-Dell box
+# is harmless: the attribute is absent there and we no-op.
+set -euo pipefail
+
+ATTR=/sys/class/firmware-attributes/dell-wmi-sysman/attributes/PrimaryBattChargeCfg/current_value
+STATE_FILE="$HOME/.cache/sway-server-mode"
+
+set_policy() {
+    [ -e "$ATTR" ] || { logger --tag battery-charge "no charge attr on $(uname -n), skipping"; return 0; }
+    printf '%s' "$1" | sudo -n /usr/bin/tee "$ATTR" >/dev/null
+    logger --tag battery-charge "policy -> $1"
+}
+
+case "${1:-}" in
+    cap)  set_policy Custom ;;
+    full) set_policy Standard ;;
+    sync) [ -f "$STATE_FILE" ] && exec "$0" cap || exec "$0" full ;;
+    *) echo "usage: ${0##*/} cap|full|sync" >&2; exit 1 ;;
+esac
