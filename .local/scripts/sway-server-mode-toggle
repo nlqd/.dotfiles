@@ -4,10 +4,14 @@ STATE_FILE="$HOME/.cache/sway-server-mode"
 
 if [ -f "$STATE_FILE" ]; then
     rm "$STATE_FILE"
-    notify-send "Server Mode OFF" "Closing lid suspends the machine"
+    logger --tag sway-server-mode "OFF"
+    "$HOME/.local/scripts/battery-charge-mode" full || logger --tag sway-server-mode "battery full failed"
+    notify-send "Server Mode OFF" "Lid suspends the machine; battery charges to full"
 else
     touch "$STATE_FILE"
-    notify-send "Server Mode ON" "Lid close turns screen off, lid open turns it back on"
+    logger --tag sway-server-mode "ON"
+    "$HOME/.local/scripts/battery-charge-mode" cap || logger --tag sway-server-mode "battery cap failed"
+    notify-send "Server Mode ON" "Lid close = screen off; battery capped ~60% on AC"
 fi
 
 # Signal waybar to update (signal 4 = SIGRTMIN+4)

@@ -8,6 +8,9 @@ output * background $wallpaper fill
 exec --no-startup-id mako
 exec --no-startup-id fcitx5 -d --replace
 exec --no-startup-id nm-applet
+# Sync battery charge policy to saved server-mode state on boot (literal path:
+# $dot_local is defined further down, after this exec block).
+exec --no-startup-id /home/qd/.local/scripts/battery-charge-mode sync
 
 # Variables
 set $mod Mod4

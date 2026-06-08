@@ -1,0 +1,9 @@
+# Lets battery-charge-mode flip the Dell charge policy without a password.
+# Scoped to one BIOS attribute; the only values the kernel accepts there are the
+# charge policies (Adaptive/Standard/Express/PrimAcUse/Custom), all benign.
+#
+# Install (per machine):
+#   sudo install -m 0440 -o root -g root \
+#     ~/.local/scripts/battery-charge-mode.sudoers /etc/sudoers.d/battery-charge-mode
+#   sudo visudo -cf /etc/sudoers.d/battery-charge-mode
+qd ALL=(root) NOPASSWD: /usr/bin/tee /sys/class/firmware-attributes/dell-wmi-sysman/attributes/PrimaryBattChargeCfg/current_value
