@@ -81,7 +81,6 @@
 
     "custom/server-mode": {
         "exec": "/home/qd/.local/scripts/sway-server-mode-status",
-        "on-click": "/home/qd/.local/scripts/sway-server-mode-toggle",
         "return-type": "json",
         "signal": 4,
         "interval": 10,
