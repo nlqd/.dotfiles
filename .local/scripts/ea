@@ -1,0 +1,373 @@
+#!/usr/bin/env bash
+#
+# ea - East Agile Tracker CLI (read + write). Grammar: ea ENTITY ACTION [path-args] [--field value]
+#
+# The API surface is generated from the live OpenAPI spec by `ea api gen` into
+# the `#:[entity action]` comment block below. Those comments are the single
+# source of truth: the dispatcher greps them for routing, `--help` greps them
+# for docs. Routing and pretty rendering live on top, hand-written.
+#
+# Config: ~/.config/eatracker/config.json
+#   { "api_key": "ea_user_...", "projects": [ { "local_path": "/repo", "pid": N, "name": "..." } ] }
+#
+# Unhandled from the spec (deliberate, for a personal tool):
+#   - Idempotency-Key on writes: the API honours it for safe replay (and 409s on
+#     a body-mismatch replay), but without an in-process retry loop a fresh key
+#     per run buys nothing, so writes send none. Add a stable key + retry/backoff
+#     if create/transition ever need at-least-once safety.
+#   - State machine: GET /meta returns the per-type allowed transitions; we don't
+#     pre-validate `stories transition --to`, so an illegal move just round-trips
+#     a 409 instead of being caught locally.
+#   - Sparse fieldsets: passing `--fields ...` to a list/get can starve the pretty
+#     renderers (they read fields that may now be absent -> blank cells).
+
+set -euo pipefail
+
+SELF=$(readlink -f "${BASH_SOURCE[0]}")
+CONFIG_FILE="${HOME}/.config/eatracker/config.json"
+BASE="https://api.eastagiletracker.com/api/v1"
+DEFAULT_PROJECT=14   # Jenner Analytics
+
+bar() { printf '%.0s=' {1..60}; echo; }
+
+# Render tab-separated stdin as a table. Optional arg is the column number to
+# wrap. Only fit/wrap to a width when stdout is a real terminal; when piped or
+# redirected, emit full untruncated cells so downstream tools get everything.
+tab() {
+  [[ -t 1 ]] || { column -t -s $'\t'; return; }
+  # Read width from the controlling terminal: tput cols in a $() reads a pipe,
+  # not the tty, and falls back to terminfo's stale 80.
+  local w; w=$(stty size </dev/tty 2>/dev/null | awk '{print $2}')
+  [[ $w =~ ^[0-9]+$ ]] || w=$(tput cols 2>/dev/null)
+  [[ $w =~ ^[0-9]+$ && $w -ge 40 ]] || w=100
+  column -t -s $'\t' -c "$w" ${1:+-W "$1"}
+}
+
+cfg() {
+  [[ -f $CONFIG_FILE ]] || return 0
+  jq -r "$1 // empty" "$CONFIG_FILE" 2>/dev/null || true
+}
+
+# Auth: api_key from config, emitted as the X-TrackerToken request header line.
+auth_header() {
+  local key; key=$(cfg .api_key)
+  [[ -n $key ]] || { echo "Error: no api_key in $CONFIG_FILE" >&2; exit 1; }
+  echo "X-TrackerToken: $key"
+}
+
+name_for_pid() {
+  [[ -f $CONFIG_FILE ]] || return
+  jq -r --argjson p "$1" '.projects // [] | map(select(.pid == $p)) | (first // {}) | .name // empty' "$CONFIG_FILE" 2>/dev/null
+}
+
+# Project resolution: -p flag > $EA_PROJECT > the config project whose local_path
+# is the longest prefix of $PWD > DEFAULT_PROJECT.
+project_id() {
+  [[ -n ${EA_PROJECT_OVERRIDE:-} ]] && { echo "$EA_PROJECT_OVERRIDE"; return; }
+  [[ -n ${EA_PROJECT:-} ]] && { echo "$EA_PROJECT"; return; }
+  local m=""
+  [[ -f $CONFIG_FILE ]] && m=$(jq -r --arg pwd "${PWD}/" '.projects // []
+    | map(select($pwd | startswith(.local_path + "/")))
+    | sort_by(.local_path | length) | (last // empty) | .pid // empty' "$CONFIG_FILE" 2>/dev/null)
+  echo "${m:-$DEFAULT_PROJECT}"
+}
+
+# Make a request; on HTTP >= 400, print the API's error message (or the raw body)
+# and fail. Otherwise emit the response body. The trailing %{http_code} is split
+# off the last line so the body stays intact.
+api() {
+  local method="${1:-GET}" path="$2" data="${3:-}"
+  local args=(-sS --max-time 30 --connect-timeout 10 -X "$method" -H "$(auth_header)")
+  [[ -n $data ]] && args+=(-H 'Content-Type: application/json' -d "$data")
+  local out; out=$(curl "${args[@]}" -w $'\n%{http_code}' "${BASE}${path}") \
+    || { echo "Request failed: $method $path" >&2; return 1; }
+  local code="${out##*$'\n'}" body="${out%$'\n'*}"
+  if [[ $code -ge 400 ]]; then
+    local msg; msg=$(jq -re '(.error // .detail // (.errors[0]? | (.message? // .)) // empty) | tostring' <<<"$body" 2>/dev/null || true)
+    echo "API error (HTTP $code): ${msg:-$body}" >&2
+    return 1
+  fi
+  echo "$body"
+}
+
+# Auto-follow next_cursor for list endpoints (--all), merging every page's items.
+paginate() {
+  local base="$1" sep acc='[]' body cur=""
+  [[ $base == *\?* ]] && sep='&' || sep='?'
+  while :; do
+    local url="$base"; [[ -n $cur ]] && url="${base}${sep}cursor=${cur}"
+    body=$(api GET "$url") || return 1
+    acc=$(jq -c --argjson a "$acc" '$a + (.items? // .)' <<<"$body")
+    cur=$(jq -r '.next_cursor // empty' <<<"$body" 2>/dev/null || true)
+    [[ -n $cur ]] || break
+  done
+  jq -cn --argjson items "$acc" '{items: $items}'
+}
+
+# Resolve a human story_ref / short_ref to a numeric story_id (digits pass through).
+resolve_story() {
+  local pid="$1" ref="$2"
+  [[ $ref =~ ^[0-9]+$ ]] && { echo "$ref"; return; }
+  api GET "/projects/${pid}/stories?fields=story_id,story_ref,short_ref&limit=200" \
+    | jq -r --arg r "$ref" '.items[] | select((.story_ref|ascii_downcase)==($r|ascii_downcase) or (.short_ref|ascii_downcase)==($r|ascii_downcase)) | .story_id' \
+    | head -1
+}
+
+# ==========================================================================
+# API manifest - generated by `ea api gen`. Do not hand-edit between markers.
+# Each line: #:[entity action] METHOD /path   (+ optional query:/body: lines).
+# ==========================================================================
+# >>> EA_API
+#:[meta get] GET /meta
+#:[events list] GET /projects/{project_id}/events
+#:[events list] query: since types cursor limit
+#:[stories list] GET /projects/{project_id}/stories
+#:[stories list] query: state label story_type cursor limit fields
+#:[stories create] POST /projects/{project_id}/stories
+#:[stories create] body: current_state description estimate icebox labels[] name* owners[] priority_id story_type
+#:[stories bulk_transition] POST /projects/{project_id}/stories/bulk_transition
+#:[stories bulk_transition] body: reason story_ids[]* to*
+#:[stories get] GET /projects/{project_id}/stories/{story_id}
+#:[stories update] PUT /projects/{project_id}/stories/{story_id}
+#:[stories update] body: current_state description estimate force_state_change icebox iteration_id labels[] name position priority_id story_type
+#:[stories delete] DELETE /projects/{project_id}/stories/{story_id}
+#:[comments list] GET /projects/{project_id}/stories/{story_id}/comments
+#:[comments list] query: cursor limit
+#:[comments create] POST /projects/{project_id}/stories/{story_id}/comments
+#:[comments create] body: comment_emoji comment_text text
+#:[comments get] GET /projects/{project_id}/stories/{story_id}/comments/{comment_id}
+#:[comments update] PUT /projects/{project_id}/stories/{story_id}/comments/{comment_id}
+#:[comments update] body: comment_emoji comment_text text
+#:[comments delete] DELETE /projects/{project_id}/stories/{story_id}/comments/{comment_id}
+#:[tasks list] GET /projects/{project_id}/stories/{story_id}/tasks
+#:[tasks create] POST /projects/{project_id}/stories/{story_id}/tasks
+#:[tasks create] body: complete description task_desc task_order
+#:[tasks get] GET /projects/{project_id}/stories/{story_id}/tasks/{task_id}
+#:[tasks update] PUT /projects/{project_id}/stories/{story_id}/tasks/{task_id}
+#:[tasks update] body: complete description task_desc task_order
+#:[tasks delete] DELETE /projects/{project_id}/stories/{story_id}/tasks/{task_id}
+#:[stories transition] POST /projects/{project_id}/stories/{story_id}/transitions
+#:[stories transition] body: reason to*
+# <<< EA_API
+
+# Build a JSON body from --key value pairs. Values coerce via JSON (numbers,
+# booleans, arrays, objects); anything that is not valid JSON stays a string.
+# try/catch, not `fromjson? //`: jq's // also falls back on parsed false/null.
+build_body() {
+  local json='{}' pair k v
+  for pair in "$@"; do
+    k="${pair%%=*}"; v="${pair#*=}"
+    json=$(jq --arg k "$k" --arg v "$v" '. + {($k): ($v | (try fromjson catch $v))}' <<<"$json")
+  done
+  echo "$json"
+}
+
+# Pretty renderers keyed by "entity action"; default dumps JSON for piping.
+story_line() {
+  jq -r '(.items? // .) | .[]? |
+    "[\(.story_id)]\t\(.story_ref)\t\(.current_state)\t\(.story_type[0:4])\t\(.estimate // "-")\t" +
+    "\((.owners // []) | map(.actor.initials // .actor.name) | join(",") | if .=="" then "-" else . end)\t" +
+    "\(.title)" +
+    (if (.blocker_count // 0) > 0 then "  blocked:\(.blocker_count)" else "" end) +
+    (if (.tasks_count // 0) > 0 then "  tasks:\(.tasks_complete_count)/\(.tasks_count)" else "" end)'
+}
+render_story_detail() {
+  jq -r '
+    "Ref:        \(.story_ref)  (id \(.story_id), short \(.short_ref))",
+    "Title:      \(.title)",
+    "Type:       \(.story_type)   State: \(.current_state)   Estimate: \(.estimate // "-")",
+    "Priority:   \(.priority_name // "-")   Icebox: \(.icebox)   Labels: \((.labels // []) | map(.label_name) | join(", "))",
+    "Owners:     \((.owners // []) | map(.actor.name) | join(", ") | if .=="" then "-" else . end)",
+    "",
+    "Description:",
+    (.description // "(none)"),
+    "",
+    "Tasks:",
+    ((.tasks // []) | if length==0 then "  (none)" else (.[] | "  [\(if .complete then "x" else " " end)] (\(.task_id)) \(.task_desc)") end),
+    "",
+    "Blockers:",
+    ((.blockers // []) | if length==0 then "  (none)" else (.[] | "  - \(.description // .)") end)'
+}
+events_tsv() {
+  jq -r '(.items? // .) | .[]? | "\(.created_at)\t\(.actor.name // .actor // "?")\t\(.event_type)\t\(.target_type) \(.target_id)"'
+}
+render() {
+  case "$1 $2" in
+    "stories list")  story_line | tab 7 ;;
+    "stories get")   render_story_detail ;;
+    "events list")   events_tsv | tab 4 ;;
+    *)               jq . ;;
+  esac
+}
+
+# Generic dispatch: route by grepping the manifest, bind path params positionally,
+# turn --flags into a query string (GET) or JSON body (POST/PUT).
+dispatch() {
+  local pid; pid=$(project_id)
+  [[ -n ${1:-} ]] || { cmd_help; return; }
+  local entity="$1"; shift
+  [[ -n ${1:-} ]] || { entity_help "$entity"; return; }
+  local action="$1"; shift
+
+  local a
+  for a in "$@"; do [[ $a == --help || $a == -h || $a == help ]] && { op_help "$entity" "$action"; return; }; done
+
+  local route; route=$(grep -E "^#:\[$entity $action\][[:space:]]+(GET|POST|PUT|DELETE) " "$SELF" | head -1) || true
+  [[ -n $route ]] || { echo "Unknown: ea $entity $action  (try: ea $entity help)" >&2; return 1; }
+  local rest="${route#*] }" method path
+  method="${rest%% *}"; path="${rest#* }"
+
+  local -a pos=() kv=(); local want_all=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --all) want_all=1; shift ;;
+      --*)   [[ $# -ge 2 ]] || { echo "Flag $1 needs a value" >&2; return 1; }
+             kv+=("${1#--}=$2"); shift 2 ;;
+      *)     pos+=("$1"); shift ;;
+    esac
+  done
+
+  local tok val pi=0
+  for tok in $(grep -oE '\{[a-z_]+\}' <<<"$path" | tr -d '{}'); do
+    if [[ $tok == project_id ]]; then
+      val="$pid"
+    else
+      val="${pos[$pi]:-}"; pi=$((pi + 1))
+      [[ -n $val ]] || { echo "Missing path arg: $tok" >&2; op_help "$entity" "$action"; return 1; }
+      [[ $tok == story_id ]] && val=$(resolve_story "$pid" "$val")
+    fi
+    path="${path/\{$tok\}/$val}"
+  done
+
+  local resp
+  if [[ $method == GET ]]; then
+    local qs="" pair k v
+    for pair in "${kv[@]}"; do
+      k="${pair%%=*}"; v=$(jq -rn --arg v "${pair#*=}" '$v|@uri')
+      qs+="${qs:+&}${k}=${v}"
+    done
+    [[ -n $qs ]] && path="${path}?${qs}"
+    if [[ -n $want_all ]]; then resp=$(paginate "$path") || return 1
+    else resp=$(api GET "$path") || return 1; fi
+  elif [[ $method == DELETE ]]; then
+    resp=$(api DELETE "$path") || return 1
+  else
+    resp=$(api "$method" "$path" "$(build_body "${kv[@]}")") || return 1
+  fi
+  echo "$resp" | render "$entity" "$action"
+}
+
+# ---- help (greps the manifest comments) ----
+op_help() {
+  echo "ea $1 $2"
+  grep -F "#:[$1 $2]" "$SELF" | sed -E 's/^#:\[[^]]*\][[:space:]]+/  /'
+}
+entity_help() {
+  echo "ea $1 ACTION:"
+  grep -oE "^#:\[$1 [a-z_]+\][[:space:]]+(GET|POST|PUT|DELETE)" "$SELF" \
+    | sed -E "s/^#:\[$1 ([a-z_]+)\].*/  \1/" | sort -u || true
+}
+cmd_help() {
+  cat <<EOF
+ea - East Agile Tracker CLI
+
+Grammar:  ea [-p PID] ENTITY ACTION [path-args] [--field value ...]
+Help:     ea ENTITY            list its actions
+          ea ENTITY ACTION --help   show path/query/body fields
+
+Curated commands:
+  dash            Overview: non-icebox stories grouped by state
+  projects        List your projects
+  api gen         Regenerate the API manifest from the live OpenAPI spec
+
+API surface (generated):
+EOF
+  grep -oE '^#:\[[a-z]+ [a-z_]+\][[:space:]]+(GET|POST|PUT|DELETE)' "$SELF" \
+    | sed -E 's/^#:\[([a-z]+) ([a-z_]+)\].*/  \1 \2/' | sort -u
+}
+
+# ---- curated commands ----
+cmd_projects() {
+  bar; echo "Projects"; bar
+  api GET "/projects" | jq -r '.[] | "\(.project_id)\t\(.project_title)\(if .is_project_member then "" else "  (not a member)" end)"' \
+    | tab 2
+}
+cmd_dash() {
+  local pid="$1" name; name=$(name_for_pid "$pid")
+  bar; echo "Tracker dashboard: ${name:-project}"; bar; echo
+  local all
+  all=$(api GET "/projects/${pid}/stories?fields=story_id,story_ref,title,current_state,story_type,estimate,owners,blocker_count,tasks_count,tasks_complete_count,icebox&limit=200") || return 1
+  local st block n
+  for st in started unstarted finished delivered rejected; do
+    block=$(echo "$all" | jq --arg s "$st" '{items: [.items[] | select(.current_state==$s and (.icebox|not))]}')
+    n=$(echo "$block" | jq '.items|length')
+    [[ $n -gt 0 ]] || continue
+    echo "--- ${st} (${n}) ---"
+    echo "$block" | story_line | tab 7
+    echo
+  done
+}
+
+# ---- codegen: rewrite the manifest block from the live spec ----
+api_gen() {
+  local spec; spec=$(api GET "/openapi.json")
+  echo "$spec" | jq -e '.paths' &>/dev/null || { echo "Failed to fetch spec" >&2; return 1; }
+  local block
+  block=$(echo "$spec" | jq -r '
+    . as $root
+    | def bfields($ref):
+        ($ref | sub("^#/components/schemas/"; "")) as $n
+        | $root.components.schemas[$n] as $s
+        | ($s.required // []) as $req
+        | [ ($s.properties // {} | to_entries[]) | (.key) as $f | (.value.type) as $t
+            | $f
+              + (if ($t == "array") or (($t|type=="array") and ($t|index("array"))) then "[]" else "" end)
+              + (if ($req|index($f)) then "*" else "" end) ];
+      .paths | to_entries[] | .key as $p | (.value|to_entries[]) | .key as $m | .value as $op
+      | ($p | sub("^/api/v1"; "") | split("/")
+          | map(select(. != "" and . != "projects" and (startswith("{")|not)))) as $segs
+      | (if ($segs[-1] | test("transition")) then $segs[-2] else $segs[-1] end) as $E
+      | ($op.operationId | if .=="list_events" then "list" elif .=="get_meta" then "get" else . end) as $A
+      | ($p | sub("^/api/v1"; "")) as $path
+      | ($m|ascii_upcase) as $method
+      | ([ $op.parameters[]? | select(.in=="query") | (.name + (if .required then "*" else "" end)) ]) as $q
+      | ($op.requestBody.content."application/json".schema."$ref" // null) as $bref
+      | ( "#:[\($E) \($A)] \($method) \($path)" ),
+        ( if ($q|length)>0 then "#:[\($E) \($A)] query: " + ($q|join(" ")) else empty end ),
+        ( if $bref then "#:[\($E) \($A)] body: " + (bfields($bref)|join(" ")) else empty end )')
+  awk -v b="$block" '
+    /^# >>> EA_API/ { print; print b; skip=1; next }
+    /^# <<< EA_API/ { skip=0 }
+    !skip { print }
+  ' "$SELF" > "${SELF}.tmp" && chmod +x "${SELF}.tmp" && mv "${SELF}.tmp" "$SELF"
+  echo "Regenerated EA_API manifest: $(echo "$block" | grep -cE '] (GET|POST|PUT|DELETE) ') operations."
+}
+cmd_api() {
+  case "${1:-}" in
+    gen) api_gen ;;
+    *)   echo "Usage: ea api gen" >&2; return 1 ;;
+  esac
+}
+
+main() {
+  # Only leading options belong to ea itself; stop at the first positional so
+  # flags like --help after the entity reach dispatch.
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -p|--project) EA_PROJECT_OVERRIDE="$2"; shift 2 ;;
+      -h|--help)    cmd_help; exit 0 ;;
+      --)           shift; break ;;
+      *)            break ;;
+    esac
+  done
+
+  case "${1:-help}" in
+    help)     cmd_help ;;
+    api)      shift; cmd_api "$@" ;;
+    dash|d)   cmd_dash "$(project_id)" ;;
+    projects) cmd_projects ;;
+    *)        dispatch "$@" ;;
+  esac
+}
+
+main "$@"
