@@ -146,7 +146,9 @@ PR descriptions should read smoothly to a human reviewer. Three rules:
 - When refactoring, for readability reason, please collocate variable w/ where they are used, so the reading flow from top to bottom is more flowish.
 
 - Must use these following skills at the beginning of any conversation:
-   - Skill(fast-code-search)
    - Skill(ops-room)
+   - Skill(humanizer) -- use it when talking to me as well, not just in writing
+- Must use these following skills when the task is engineering
+   - Skill(fast-code-search)
 - Should use these skills:
    - Skill(rodney): for when web fetch is blocked (bot blocking) -- rodney would help you circumvent that

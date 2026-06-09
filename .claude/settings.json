@@ -6,14 +6,15 @@
     "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR": "1",
     "BASH_DEFAULT_TIMEOUT_MS": "30000",
     "BASH_MAX_TIMEOUT_MS": "6000000",
-    "SAS_MCP_INDEX_DIR": "/home/dungngo/.claude/data/sas94-index",
-    "CLAUDE_CODE_SCROLL_SPEED": "3"
+    "CLAUDE_CODE_SCROLL_SPEED": "3",
+    "SAS_MCP_INDEX_DIR": "/home/dungngo/.claude/data/sas94-index"
   },
   "includeCoAuthoredBy": false,
   "permissions": {
     "allow": [
       "WebFetch",
-      "WebSearch"
+      "WebSearch",
+      "Skill"
     ]
   },
   "hooks": {
@@ -70,7 +71,7 @@
   "editorMode": "vim",
   "preferredNotifChannel": "auto",
   "teammateMode": "tmux",
-  "agentPushNotifEnabled": false,
+  "agentPushNotifEnabled": true,
   "skipAutoPermissionPrompt": true,
   "voiceEnabled": false,
   "autoUpdates": true,
