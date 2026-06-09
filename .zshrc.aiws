@@ -39,7 +39,6 @@ alias vv="nvim"
 alias vg="nvim +G"
 alias ez='nvim ~/.zshrc'
 alias sz='source ~/.zshrc'
-alias dot='nvim ~/Dev/personal/dotfiles'
 alias ck='nvim ~/.sdai/cookies'
 alias tma='tmux -2 a'
 alias mkdir='mkdir -v'

@@ -143,9 +143,9 @@ collect_ont() {
     user_raw=$(ont_get "sta-user.asp")
 
     if echo "$device_raw" | grep -q 'login.asp'; then
-        add_issue "${RED}.3 (ONT): login failed${RST}"
+        add_issue "${RED}.3 (Viettel): login failed${RST}"
         printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
-            ".3 (ONT)" "???" "—" "—" "—" "—" "login failed"
+            ".3 (Viettel)" "???" "—" "—" "—" "—" "login failed"
         return
     fi
 
@@ -159,10 +159,10 @@ collect_ont() {
     client_count=$(echo "$client_ips" | tr ',' '\n' | grep -c '192\.168\.' || echo "0")
 
     if [[ "$wan_status" != "up" ]]; then
-        add_issue "${RED}.3 (ONT): WAN is ${wan_status:-down}${RST}"
+        add_issue "${RED}.3 (Viettel): WAN is ${wan_status:-down}${RST}"
     fi
     if [[ "$pon_state" != "up" ]]; then
-        add_issue "${RED}.3 (ONT): PON link ${pon_state:-down}${RST}"
+        add_issue "${RED}.3 (Viettel): PON link ${pon_state:-down}${RST}"
     fi
 
     # Homogenize status with DrayTek output: Online when WAN is up, DOWN otherwise.
@@ -171,7 +171,7 @@ collect_ont() {
     [[ "$wan_status" != "up" ]] && display_status="DOWN"
 
     printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
-        ".3 (ONT)" "$display_status" "${wan_ip:-—}" "—" "$client_count" "—" "—"
+        ".3 (Viettel)" "$display_status" "${wan_ip:-—}" "—" "$client_count" "—" "—"
 }
 
 # --- DNS health check ---
@@ -388,12 +388,12 @@ start_dns_bg
 
 printf "%bcollecting...%b\r" "$DIM" "$RST"
 
-r1=$(collect_draytek "192.168.1.1" ".1 (2925)" "$R1_USER" "$R1_PASS" 2>/dev/null) \
-    || r1=$(printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" ".1 (2925)" "ERR" "—" "—" "—" "—" "telnet failed")
-r2=$(collect_draytek "192.168.1.2" ".2 (2927)" "$R2_USER" "$R2_PASS" 2>/dev/null) \
-    || r2=$(printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" ".2 (2927)" "ERR" "—" "—" "—" "—" "telnet failed")
+r1=$(collect_draytek "192.168.1.1" ".1 (FPT)" "$R1_USER" "$R1_PASS" 2>/dev/null) \
+    || r1=$(printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" ".1 (FPT)" "ERR" "—" "—" "—" "—" "telnet failed")
+r2=$(collect_draytek "192.168.1.2" ".2 (VNPT)" "$R2_USER" "$R2_PASS" 2>/dev/null) \
+    || r2=$(printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" ".2 (VNPT)" "ERR" "—" "—" "—" "—" "telnet failed")
 r3=$(collect_ont 2>/dev/null) \
-    || r3=$(printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" ".3 (ONT)" "ERR" "—" "—" "—" "—" "curl failed")
+    || r3=$(printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" ".3 (Viettel)" "ERR" "—" "—" "—" "—" "curl failed")
 
 printf "              \r"
 
