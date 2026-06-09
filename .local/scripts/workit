@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# Per-worktree network "coat": a rootless podman pod gives each git worktree its
+# own network namespace, so every worktree runs FE/BE/DB on the SAME default
+# ports (3000/8000/5432) without colliding. Nothing is published to the host;
+# you reach a service by entering the coat. Rootless, no sudo.
+#
+# Why a pod: a pod is a persistent netns shared by its containers. Rootful Docker
+# can't do this (its daemon publishes ports in the host netns regardless of the
+# caller). Rootless podman is daemonless, so the port lands wherever the pod is.
+#
+# Coat entry uses
+#   nsenter --target <infra-pid> --user --net --preserve-credentials
+# which keeps your real uid, so files written into the worktree stay yours.
+#
+# Requires: podman (rootless), nsenter.
+
+PROG="${0##*/}"
+
+RED="\033[0;31m"
+GREEN="\033[0;32m"
+YELLOW="\033[0;33m"
+CLEAR="\033[0m"
+
+# Postgres knobs, overridable from the environment.
+PG_IMAGE="${WORKIT_PG_IMAGE:-docker.io/library/postgres:16-alpine}"
+PG_PASSWORD="${WORKIT_PG_PASSWORD:-postgres}"
+
+function die {
+    printf '%b%s%b\n' "${RED}" "${1}" "${CLEAR}" >&2
+    exit 1
+}
+
+function warn {
+    printf '%b%s%b\n' "${YELLOW}" "${1}" "${CLEAR}" >&2
+}
+
+function ok {
+    printf '%b%s%b\n' "${GREEN}" "${1}" "${CLEAR}"
+}
+
+function usage {
+    cat <<EOF
+${PROG} — per-worktree network "coat" via a rootless podman pod.
+
+Each git worktree gets its own network namespace, so every worktree can run
+FE/BE/DB on the SAME default ports (3000/8000/5432) without colliding. Nothing
+is published to the host; enter the coat to reach a service. Rootless, no sudo.
+
+  ${PROG} up               create the coat (pod) for the current worktree
+  ${PROG} run -- <cmd>     run <cmd> inside the coat (as you; writes stay yours)
+  ${PROG} db               start postgres in the coat (localhost:5432, isolated)
+  ${PROG} status           show the coat and what's in it
+  ${PROG} down [--purge]   remove the coat (--purge also drops the db volume)
+EOF
+    exit "${1:-0}"
+}
+
+# Stable, podman-safe coat name for the current worktree. Derived from the branch
+# (worktrees each have a distinct branch); falls back to the worktree directory
+# name when detached. Pure bash, no external commands beyond git.
+function coat_name {
+    local raw top
+    raw=$(git branch --show-current 2>/dev/null)
+    if [[ -z "${raw}" ]]; then
+        top=$(git rev-parse --show-toplevel 2>/dev/null)
+        [[ -n "${top}" ]] || die "not inside a git repository"
+        raw="${top##*/}"
+    fi
+    local name="${raw,,}"         # lowercase
+    name="${name//[^a-z0-9_-]/-}" # disallowed chars -> dash
+    while [[ "${name}" == *--* ]]; do name="${name//--/-}"; done
+    name="${name#-}"
+    name="${name%-}"
+    [[ -n "${name}" ]] || die "could not derive a coat name from '${raw}'"
+    printf 'workit-%s' "${name}"
+}
+
+# PID of the pod's infra container — the process whose namespaces are the coat.
+# Only valid while the pod is running, hence the up-and-running check.
+function infra_pid {
+    local infra pid
+    infra=$(podman pod inspect "${1}" --format '{{.InfraContainerID}}' 2>/dev/null) ||
+        die "coat ${1} has no infra container"
+    pid=$(podman inspect "${infra}" --format '{{.State.Pid}}' 2>/dev/null) ||
+        die "cannot read infra pid for ${1}"
+    [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || die "coat ${1} is not running — run: ${PROG} up"
+    printf '%s' "${pid}"
+}
+
+function require_coat {
+    podman pod exists "${1}" 2>/dev/null || die "no coat for ${1} — run: ${PROG} up"
+}
+
+function cmd_up {
+    local pod
+    pod=$(coat_name) || exit 1
+    if ! podman pod exists "${pod}" 2>/dev/null; then
+        podman pod create --name "${pod}" >/dev/null || die "failed to create coat ${pod}"
+    fi
+    # Start the pod so its infra container runs and holds the netns — without
+    # this the coat has no enterable namespace.
+    podman pod start "${pod}" >/dev/null || die "failed to start coat ${pod}"
+    ok "coat ${pod} up — enter with: ${PROG} run -- <cmd>"
+}
+
+function cmd_run {
+    [[ "${1:-}" == "--" ]] && shift
+    [[ "$#" -gt 0 ]] || die "usage: ${PROG} run -- <cmd> [args...]"
+    local pod pid
+    pod=$(coat_name) || exit 1
+    require_coat "${pod}"
+    pid=$(infra_pid "${pod}") || exit 1
+    # --preserve-credentials keeps your real uid, so files written into the
+    # worktree stay owned by you (not a remapped subuid).
+    exec nsenter --target "${pid}" --user --net --preserve-credentials -- "$@"
+}
+
+function cmd_db {
+    local pod
+    pod=$(coat_name) || exit 1
+    require_coat "${pod}"
+    local name="${pod}-db" vol="${pod}-pgdata"
+    if podman container exists "${name}" 2>/dev/null; then
+        warn "db ${name} already exists"
+        return 0
+    fi
+    podman run -d --pod "${pod}" --name "${name}" \
+        -e POSTGRES_PASSWORD="${PG_PASSWORD}" \
+        -v "${vol}:/var/lib/postgresql/data" \
+        "${PG_IMAGE}" >/dev/null || die "failed to start postgres in ${pod}"
+    ok "postgres up in ${pod} — reach it inside the coat at localhost:5432"
+    printf '  e.g. %s run -- psql -h localhost -U postgres\n' "${PROG}"
+}
+
+function cmd_status {
+    local pod
+    pod=$(coat_name) || exit 1
+    if ! podman pod exists "${pod}" 2>/dev/null; then
+        echo "coat ${pod}: not up"
+        return 0
+    fi
+    local pid
+    pid=$(infra_pid "${pod}") || exit 1
+    echo "coat ${pod} (infra pid ${pid})"
+    podman ps --pod --filter "pod=${pod}" \
+        --format '  {{.Names}}  {{.Image}}  {{.Status}}' 2>/dev/null
+}
+
+function cmd_down {
+    local pod purge=
+    [[ "${1:-}" == "--purge" ]] && purge=1
+    pod=$(coat_name) || exit 1
+    if ! podman pod exists "${pod}" 2>/dev/null; then
+        warn "no coat for ${pod}"
+        return 0
+    fi
+    podman pod rm --force "${pod}" >/dev/null || die "failed to remove coat ${pod}"
+    if [[ -n "${purge}" ]]; then
+        if podman volume rm "${pod}-pgdata" >/dev/null 2>&1; then
+            ok "coat ${pod} removed (db volume purged)"
+        else
+            ok "coat ${pod} removed (no db volume to purge)"
+        fi
+    else
+        ok "coat ${pod} removed (db volume ${pod}-pgdata kept)"
+    fi
+}
+
+command -v podman >/dev/null 2>&1 || die "podman is required but not found"
+command -v nsenter >/dev/null 2>&1 || die "nsenter is required but not found"
+
+case "${1:-}" in
+up)
+    shift
+    cmd_up "$@"
+    ;;
+run)
+    shift
+    cmd_run "$@"
+    ;;
+db)
+    shift
+    cmd_db "$@"
+    ;;
+status | ps)
+    shift
+    cmd_status "$@"
+    ;;
+down)
+    shift
+    cmd_down "$@"
+    ;;
+help | -h | --help) usage 0 ;;
+"") usage 1 ;;
+*) die "unknown command: ${1} (try: ${PROG} help)" ;;
+esac
