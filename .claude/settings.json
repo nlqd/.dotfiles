@@ -24,7 +24,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "notify-netcat '✻ Claude Code' \"$(cat | jq -r '.message')\""
+            "command": "p=\"$(cat)\"; m=\"$(printf \"%s\" \"$p\" | jq -r \".message // \\\"Claude needs your attention\\\"\")\"; d=\"$(printf \"%s\" \"$p\" | jq -r \".cwd // empty\")\"; n=\"${d##*/}\"; t=\"✻ ${n:-Claude Code}\"; [ -n \"$TMUX\" ] && [ -n \"$TMUX_PANE\" ] && l=\"$(tmux display-message -p -t \"$TMUX_PANE\" \"#S:#I\" 2>/dev/null)\"; [ -n \"$l\" ] && t=\"$t · $l\"; notify-netcat \"$t\" \"$m\""
           }
         ]
       }
