@@ -88,21 +88,32 @@ vim.pack.add({ gh 'tpope/vim-sleuth' })
 vim.pack.add({ gh 'iamcco/markdown-preview.nvim' })
 vim.pack.add({ gh 'MeanderingProgrammer/render-markdown.nvim' })
 require('render-markdown').setup({ heading = { backgrounds = {} } })
+-- https://github.com/MeanderingProgrammer/render-markdown.nvim/pull/617
+-- pipe_table = { max_table_width = 0.5 },
 local function render_markdown_ansi()
+    local light = vim.o.background ~= 'dark'
+    local tone = light and 'Dark' or 'Light'
+    local function hue(name) return 'Nvim' .. tone .. name end
+    local quote = light and 'NvimDarkGrey4' or 'NvimLightGrey4'
+    local faint = light and 'NvimLightGrey4' or 'NvimDarkGrey4'
+    local panel = light and 'NvimLightGrey1' or 'NvimDarkGrey2'
     local hl = {
-        RenderMarkdownH1 = { ctermfg = 1, fg = '#c0392b' },
-        RenderMarkdownH2 = { ctermfg = 4, fg = '#2563eb' },
-        RenderMarkdownH3 = { ctermfg = 2, fg = '#2e7d32' },
-        RenderMarkdownH4 = { ctermfg = 5, fg = '#9333ea' },
-        RenderMarkdownH5 = { ctermfg = 6, fg = '#0e7490' },
-        RenderMarkdownH6 = { ctermfg = 3, fg = '#b45309' },
-        RenderMarkdownCode = { ctermbg = 7, bg = '#eeeeee' },
-        RenderMarkdownBullet = { ctermfg = 3, fg = '#b45309' },
-        RenderMarkdownQuote = { ctermfg = 8, fg = '#6b7280' },
-        RenderMarkdownDash = { ctermfg = 8, fg = '#9ca3af' },
-        RenderMarkdownLink = { ctermfg = 4, fg = '#2563eb', underline = true },
-        RenderMarkdownUnchecked = { ctermfg = 8, fg = '#9ca3af' },
-        RenderMarkdownChecked = { ctermfg = 2, fg = '#16a34a' },
+        RenderMarkdownH1 = { ctermfg = 1, fg = hue('Red') },
+        RenderMarkdownH2 = { ctermfg = 4, fg = hue('Blue') },
+        RenderMarkdownH3 = { ctermfg = 2, fg = hue('Green') },
+        RenderMarkdownH4 = { ctermfg = 5, fg = hue('Magenta') },
+        RenderMarkdownH5 = { ctermfg = 6, fg = hue('Cyan') },
+        RenderMarkdownH6 = { ctermfg = 3, fg = hue('Yellow') },
+        RenderMarkdownCode = { ctermbg = light and 7 or 8, bg = panel },
+        RenderMarkdownBullet = { ctermfg = 3, fg = hue('Yellow') },
+        RenderMarkdownQuote = { ctermfg = 8, fg = quote },
+        RenderMarkdownDash = { ctermfg = 8, fg = faint },
+        RenderMarkdownLink = { ctermfg = 4, fg = hue('Blue'), underline = true },
+        RenderMarkdownWikiLink = { ctermfg = 4, fg = hue('Blue'), underline = true },
+        ['@markup.link.label.markdown_inline'] = { ctermfg = 4, fg = hue('Blue') },
+        ['@markup.link.url'] = { ctermfg = 4, fg = hue('Blue') },
+        RenderMarkdownUnchecked = { ctermfg = 8, fg = faint },
+        RenderMarkdownChecked = { ctermfg = 2, fg = hue('Green') },
     }
     for group, val in pairs(hl) do
         vim.api.nvim_set_hl(0, group, val)
@@ -110,6 +121,10 @@ local function render_markdown_ansi()
 end
 vim.api.nvim_create_autocmd('ColorScheme', {
     pattern = '*',
+    callback = render_markdown_ansi,
+})
+vim.api.nvim_create_autocmd('OptionSet', {
+    pattern = 'background',
     callback = render_markdown_ansi,
 })
 render_markdown_ansi()
