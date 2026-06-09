@@ -24,16 +24,24 @@ manifest_read() {
   [ -f "$MANIFEST" ] && cat "$MANIFEST" || echo "[]"
 }
 
+# Atomically write stdin to the manifest. Resolves symlinks so a stowed
+# manifest stays a symlink instead of being replaced with a regular file by mv.
+manifest_write() {
+  local target
+  target=$(readlink -f "$MANIFEST" 2>/dev/null || echo "$MANIFEST")
+  local tmp="${target}.tmp"
+  cat >"$tmp" && mv "$tmp" "$target"
+}
+
 manifest_upsert() {
   local repo="$1" asset="$2" version="$3" links_json="$4"
-  local tmp="$MANIFEST.tmp"
   manifest_read | jq \
     --arg repo "$repo" \
     --arg asset "$asset" \
     --arg version "$version" \
     --argjson links "$links_json" \
     '[.[] | select(.repo != $repo)] + [{repo: $repo, asset: $asset, version: $version, links: $links}] | sort_by(.repo)' \
-    >"$tmp" && mv "$tmp" "$MANIFEST"
+    | manifest_write
 }
 
 fuzzy_match_asset() {
@@ -124,6 +132,17 @@ manifest_needs_sudo() {
     [ -z "$dst" ] && continue
     [ -w "$(dirname "$dst")" ] || return 0
   done < <(echo "$manifest" | jq -r '.[].links | values[]')
+  return 1
+}
+
+# True if any dst in the given links JSON object is in a non-writable dir.
+links_need_sudo() {
+  local links_json="$1"
+  local dst
+  while IFS= read -r dst; do
+    [ -z "$dst" ] && continue
+    [ -w "$(dirname "$dst")" ] || return 0
+  done < <(echo "$links_json" | jq -r 'values[]')
   return 1
 }
 
@@ -354,27 +373,78 @@ restore_all() {
 
   [ -z "$quiet" ] && echo "Restoring $total tools from manifest..." && echo ""
 
-  if manifest_needs_sudo "$manifest"; then
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  # Phase 1: parallel version check. Writes "current"|"outdated"|"fail" to check.$i
+  local i=0
+  while [ "$i" -lt "$total" ]; do
+    {
+      read -r repo links_json < <(echo "$manifest" | jq -r ".[$i] | [.repo, (.links | tojson)] | @tsv")
+      remote_ver=$(curl -sf "$API/$repo/releases/latest" | jq -r '.tag_name' 2>/dev/null)
+      if [ -z "$remote_ver" ] || [ "$remote_ver" = "null" ]; then
+        echo "fail" >"$tmpdir/check.$i"
+      else
+        dir=$(get_dir "$repo")
+        local_ver=$(cat "$dir/.version" 2>/dev/null)
+        if [ "$local_ver" = "$remote_ver" ] && all_links_valid "$links_json"; then
+          echo "current" >"$tmpdir/check.$i"
+        else
+          echo "outdated" >"$tmpdir/check.$i"
+        fi
+      fi
+    } &
+    i=$((i + 1))
+  done
+  wait
+
+  # Sudo only if some OUTDATED tool's links point to a non-writable dir.
+  local outdated_needs_sudo=false
+  i=0
+  while [ "$i" -lt "$total" ]; do
+    if [ "$(cat "$tmpdir/check.$i" 2>/dev/null)" = "outdated" ]; then
+      local links_json
+      links_json=$(echo "$manifest" | jq -c ".[$i].links")
+      if links_need_sudo "$links_json"; then
+        outdated_needs_sudo=true
+        break
+      fi
+    fi
+    i=$((i + 1))
+  done
+
+  if $outdated_needs_sudo; then
     [ -z "$quiet" ] && echo "Some tools symlink to system dirs; caching sudo credentials..."
     sudo -v || {
       echo "sudo required but unavailable" >&2
+      rm -rf "$tmpdir"
       return 1
     }
   fi
 
-  local tmpdir
-  tmpdir=$(mktemp -d)
+  # Phase 2: spawn restore_single only for outdated; synthesize logs for the rest.
   local pids=()
-  local i=0
+  local failed=0
+  i=0
   while [ "$i" -lt "$total" ]; do
     read -r repo asset links_json < <(echo "$manifest" | jq -r ".[$i] | [.repo, .asset, (.links | tojson)] | @tsv")
-    restore_single "$repo" "$asset" "$links_json" "[$((i + 1))/$total]" "$tmpdir/$i" "$quiet" \
-      >"$tmpdir/$i.log" 2>&1 &
-    pids+=($!)
+    case "$(cat "$tmpdir/check.$i" 2>/dev/null)" in
+    current)
+      [ -z "$quiet" ] && echo "[$((i + 1))/$total] $repo ... ok (up to date)" >"$tmpdir/$i.log"
+      ;;
+    fail)
+      echo "[$((i + 1))/$total] $repo ... FAIL (no releases)" >"$tmpdir/$i.log"
+      failed=$((failed + 1))
+      ;;
+    outdated)
+      restore_single "$repo" "$asset" "$links_json" "[$((i + 1))/$total]" "$tmpdir/$i" "$quiet" \
+        >"$tmpdir/$i.log" 2>&1 &
+      pids+=($!)
+      ;;
+    esac
     i=$((i + 1))
   done
 
-  local failed=0
   for pid in "${pids[@]}"; do
     wait "$pid" || failed=$((failed + 1))
   done
@@ -464,8 +534,7 @@ remove_repo() {
   dir=$(get_dir "$repo")
   rm -rf "$dir"
 
-  local tmp="$MANIFEST.tmp"
-  echo "$manifest" | jq --arg repo "$repo" '[.[] | select(.repo != $repo)] | sort_by(.repo)' >"$tmp" && mv "$tmp" "$MANIFEST"
+  echo "$manifest" | jq --arg repo "$repo" '[.[] | select(.repo != $repo)] | sort_by(.repo)' | manifest_write
 
   echo "Removed $repo"
 }

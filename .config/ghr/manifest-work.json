@@ -1,16 +1,16 @@
 [
   {
     "repo": "Alexsjones/llmfit",
-    "asset": "llmfit-v0.9.22-aarch64-apple-darwin.tar.gz",
-    "version": "v0.9.22",
+    "asset": "llmfit-v0.9.30-aarch64-apple-darwin.tar.gz",
+    "version": "v0.9.30",
     "links": {
       "llmfit-v0.8.4-x86_64-unknown-linux-gnu/llmfit": "/home/dungngo/.local/bin/llmfit"
     }
   },
   {
     "repo": "CircleCI-Public/circleci-cli",
-    "asset": "circleci-cli_0.1.36202_linux_amd64.tar.gz",
-    "version": "v0.1.36202",
+    "asset": "circleci-cli_0.1.38646_checksums.txt",
+    "version": "v0.1.38646",
     "links": {
       "circleci-cli_0.1.36202_linux_amd64/circleci": "/home/dungngo/.local/bin/circleci"
     }
@@ -40,11 +40,19 @@
     }
   },
   {
-    "repo": "bugzmanov/bookokrat",
-    "asset": "bookokrat-v0.3.10-aarch64-apple-darwin.tar.gz",
-    "version": "v0.3.10",
+    "repo": "derailed/k9s",
+    "asset": "k9s_Linux_amd64.tar.gz",
+    "version": "v0.51.0",
     "links": {
-      "bookokrat": "/home/dungngo/.local/bin/bookokrat"
+      "k9s": "/home/dungngo/.local/bin/k9s"
+    }
+  },
+  {
+    "repo": "hetznercloud/cli",
+    "asset": "hcloud-linux-amd64.tar.gz",
+    "version": "v1.65.0",
+    "links": {
+      "hcloud": "/home/dungngo/.local/bin/hcloud"
     }
   },
   {
@@ -58,7 +66,7 @@
   {
     "repo": "rustonbsd/iroh-ssh",
     "asset": "iroh-ssh.linux",
-    "version": "0.2.10",
+    "version": "0.2.12",
     "links": {
       "iroh-ssh.linux": "/home/dungngo/.local/bin/iroh-ssh"
     }
@@ -66,7 +74,7 @@
   {
     "repo": "tomasz-tomczyk/crit",
     "asset": "crit-linux-amd64",
-    "version": "v0.12.0",
+    "version": "v0.16.1",
     "links": {
       "crit-linux-amd64": "/home/dungngo/.local/bin/crit"
     }
