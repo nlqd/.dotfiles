@@ -21,18 +21,15 @@ found that matches the given name. If the branch doesn't exist, it will be
 created from [base branch] (defaults to HEAD).
 
 Will copy over some untracked files to the new worktree. By default, this includes
-.env, .envrc, .env.local, .tool-versions, and mise.toml files.
+.env, .envrc, .env.local, .tool-versions, mise.toml, and .claude files.
 
-To customize the list of untracked files to copy for a particular repository:
-    git config --add worktree.untrackedfiles ".env"
-    git config --add worktree.untrackedfiles "mise.toml"
+To copy additional untracked files for a particular repository:
+    git config --add worktree.untrackedfiles "secrets.json"
 
 To set a global configuration for all repositories:
-    git config --global --add worktree.untrackedfiles ".env"
-    git config --global --add worktree.untrackedfiles "mise.toml"
+    git config --global --add worktree.untrackedfiles "secrets.json"
 
-If you have any custom configuration set, it will override the defaults
-completely, so add all files you want copied.
+Custom patterns are merged with the defaults.
 EOF
     kill -INT $$
 }
@@ -63,26 +60,59 @@ function warn {
 # copy-on-write, but did not find any good references, so I'm falling back on
 # "try and see if it fails"
 function cp_cow {
-    if ! /bin/cp -Rc "$1" "$2" 2>/dev/null; then
-        if ! /bin/cp -R --reflink "$1" "$2" 2>/dev/null; then
-            if ! /bin/cp -R "$1" "$2"; then
+    local src="$1"
+    # if both source and destination are directories (e.g. a partially
+    # tracked .claude), copy the contents so they merge instead of nesting
+    # src inside dst
+    if [ -d "$src" ] && [ -d "$2" ]; then
+        src="$src/."
+    fi
+    if ! /bin/cp -Rc "$src" "$2" 2>/dev/null; then
+        if ! /bin/cp -R --reflink "$src" "$2" 2>/dev/null; then
+            if ! /bin/cp -R "$src" "$2"; then
                 warn "Unable to copy file $1 to $2 - folder may not exist"
             fi
         fi
     fi
 }
 
-# Get the list of untracked files to copy from git config. If no config is
-# found, return the default list
+# Symlink a directory into the worktree instead of copying it, so edits made
+# in the worktree flow back to the main checkout.
+#
+# When the directory is fully untracked it isn't checked out, so we link the
+# whole thing: writes inside it land in the real directory and survive, even
+# the temp-file+rename that tools like Claude Code use to persist files.
+#
+# When some of its files are tracked, git checks out a real directory and we
+# can't replace it with a symlink without hiding the tracked files. We fall
+# back to linking each untracked file. Those per-file links are read-through,
+# but a temp-file+rename write replaces the link with a plain file, so edits
+# stop flowing back after the first such write. Warn so the mode is visible.
+function ln_back {
+    if [ ! -e "$2" ]; then
+        ln -s "$git_root/$1" "$2"
+        return
+    fi
+    warn "$1 is partially tracked: linking untracked files individually."
+    warn "  edits flow back until a tool rewrites the file, then the link breaks."
+    local f rel
+    while IFS= read -r f; do
+        rel="${f#"$1"/}"
+        mkdir -p "$(dirname "$2/$rel")"
+        ln -s "$git_root/$f" "$2/$rel"
+    done < <(git ls-files --others -- "$1")
+}
+
+# Get the list of untracked files to copy: the default list, plus any
+# patterns from git config
 function get_untracked_files_pattern {
     # Default file patterns
-    local default_patterns="\.env|\.envrc|\.env.local|\.mise.toml|\.tool-versions|mise.toml"
+    local default_patterns="\.env|\.envrc|\.env.local|\.mise.toml|\.tool-versions|mise.toml|\.claude"
 
-    # Check if we have custom patterns in git config
-    if git config --get-all worktree.untrackedfiles > /dev/null 2>&1; then
-        local custom_patterns=""
-        custom_patterns=$(git config --get-all worktree.untrackedfiles | tr '\n' '|' | sed 's/|$//')
-        echo "^($custom_patterns)$"
+    local custom_patterns
+    custom_patterns=$(git config --get-all worktree.untrackedfiles 2>/dev/null | tr '\n' '|' | sed 's/|$//')
+    if [ -n "$custom_patterns" ]; then
+        echo "^($default_patterns|$custom_patterns)$"
     else
         echo "^($default_patterns)$"
     fi
@@ -195,7 +225,15 @@ function _worktree {
     # shellcheck disable=SC2207
     files_to_copy=( $(fd -u "$untracked_file_re" -E node_modules) )
     for f in "${files_to_copy[@]}"; do
-        cp_cow "$f" ../"$dirname"/"$f"
+        # fd appends a trailing slash to directories; strip it so the
+        # basename match and destination path are clean
+        f="${f%/}"
+        case "${f##*/}" in
+            # .claude is linked, not copied: edits in the worktree flow
+            # back to the main checkout
+            .claude) ln_back "$f" "../$dirname/$f" ;;
+            *) cp_cow "$f" "../$dirname/$f" ;;
+        esac
     done
 
     # return the shell to normal splitting mode
