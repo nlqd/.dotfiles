@@ -73,6 +73,16 @@
   mrai (tap-hold-opposite-hand-release $hold-time m (layer-while-held raise) (timeout hold))
 )
 
+;; quick layer-and-mod
+(defalias
+  rl-met  (multi lmet (layer-while-held raise))
+  rl-alt  (multi lalt (layer-while-held raise))
+  rl-sft  (multi lsft (layer-while-held raise))
+  rl-rsft (multi rsft (layer-while-held raise))
+  rl-ralt (multi ralt (layer-while-held raise))
+  rl-rmet (multi rmet (layer-while-held raise))
+)
+
 (defchordsv2
   ;;   Lateral combos
   ;; right hand
@@ -107,6 +117,17 @@
   ;;   Other non-traditional combos
   ;; two rings = caps word
   (w o) (caps-word 2000) $chord-timeout first-release (raise lower)
+
+  ;; modifier + raise (instant, replaces the two-hold sequence)
+  (a v) @rl-met  $chord-timeout all-released (raise lower)
+  (s v) @rl-alt  $chord-timeout all-released (raise lower)
+  (d v) @rl-sft  $chord-timeout all-released (raise lower)
+  (; m) @rl-rmet $chord-timeout all-released (raise lower)
+  (l m) @rl-ralt $chord-timeout all-released (raise lower)
+  (k m) @rl-rsft $chord-timeout all-released (raise lower)
+
+  ;; d+/ = ? without waiting on the d hold
+  (d /) S-/ $chord-timeout first-release (raise lower)
 )
 
 ;; vim:ft=lisp:ts=2:sts:cuc
