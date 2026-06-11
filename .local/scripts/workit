@@ -12,7 +12,7 @@
 #   nsenter --target <infra-pid> --user --net --preserve-credentials
 # which keeps your real uid, so files written into the worktree stay yours.
 #
-# Requires: podman (rootless), nsenter.
+# Requires: podman (rootless), nsenter, bash 4+ (Linux only — see `workit help`).
 
 PROG="${0##*/}"
 
@@ -40,17 +40,23 @@ function ok {
 
 function usage {
     cat <<EOF
-${PROG} — per-worktree network "coat" via a rootless podman pod.
+${PROG} [-C <dir>] <command> — per-worktree network "coat" via a rootless podman pod.
 
 Each git worktree gets its own network namespace, so every worktree can run
 FE/BE/DB on the SAME default ports (3000/8000/5432) without colliding. Nothing
 is published to the host; enter the coat to reach a service. Rootless, no sudo.
 
-  ${PROG} up               create the coat (pod) for the current worktree
+  ${PROG} up               create + start the coat for the current worktree
+  ${PROG} enter            open a shell inside the coat
   ${PROG} run -- <cmd>     run <cmd> inside the coat (as you; writes stay yours)
+  ${PROG} pid              print the coat's infra PID (build your own nsenter)
   ${PROG} db               start postgres in the coat (localhost:5432, isolated)
   ${PROG} status           show the coat and what's in it
+  ${PROG} ls               list all coats; flag orphans whose worktree is gone
+  ${PROG} gc [-n]          remove orphaned coats (-n / --dry-run: just list)
   ${PROG} down [--purge]   remove the coat (--purge also drops the db volume)
+
+  -C <dir>                 act on the worktree at <dir> instead of the cwd
 EOF
     exit "${1:-0}"
 }
@@ -92,15 +98,36 @@ function require_coat {
 }
 
 function cmd_up {
-    local pod
+    local pod top branch
     pod=$(coat_name) || exit 1
-    if ! podman pod exists "${pod}" 2>/dev/null; then
-        podman pod create --name "${pod}" >/dev/null || die "failed to create coat ${pod}"
+    top=$(git rev-parse --show-toplevel 2>/dev/null) || die "not inside a git repository"
+    branch=$(git branch --show-current 2>/dev/null)
+    [[ -n "${branch}" ]] || branch="(detached)"
+    if podman pod exists "${pod}" 2>/dev/null; then
+        # Same name from a different repo => a real collision. Labels let us
+        # detect it and refuse, rather than silently reuse the wrong coat.
+        local owner
+        owner=$(podman pod inspect "${pod}" --format '{{index .Labels "workit.worktree"}}' 2>/dev/null)
+        [[ -z "${owner}" || "${owner}" == "${top}" ]] ||
+            die "coat ${pod} already belongs to another worktree (${owner}); down it first or use distinct branch names"
+    else
+        podman pod create --name "${pod}" \
+            --label workit.worktree="${top}" \
+            --label workit.branch="${branch}" >/dev/null ||
+            die "failed to create coat ${pod}"
     fi
     # Start the pod so its infra container runs and holds the netns — without
     # this the coat has no enterable namespace.
     podman pod start "${pod}" >/dev/null || die "failed to start coat ${pod}"
-    ok "coat ${pod} up — enter with: ${PROG} run -- <cmd>"
+    ok "coat ${pod} up — enter with: ${PROG} enter"
+}
+
+function cmd_enter {
+    local pod pid
+    pod=$(coat_name) || exit 1
+    require_coat "${pod}"
+    pid=$(infra_pid "${pod}") || exit 1
+    exec nsenter --target "${pid}" --user --net --preserve-credentials -- "${SHELL:-/bin/bash}"
 }
 
 function cmd_run {
@@ -113,6 +140,14 @@ function cmd_run {
     # --preserve-credentials keeps your real uid, so files written into the
     # worktree stay owned by you (not a remapped subuid).
     exec nsenter --target "${pid}" --user --net --preserve-credentials -- "$@"
+}
+
+function cmd_pid {
+    local pod pid
+    pod=$(coat_name) || exit 1
+    require_coat "${pod}"
+    pid=$(infra_pid "${pod}") || exit 1
+    printf '%s\n' "${pid}"
 }
 
 function cmd_db {
@@ -146,6 +181,53 @@ function cmd_status {
         --format '  {{.Names}}  {{.Image}}  {{.Status}}' 2>/dev/null
 }
 
+function cmd_ls {
+    local lines
+    mapfile -t lines < <(podman pod ps --filter name=workit- --format '{{.Name}}|{{.Status}}' 2>/dev/null || true)
+    if [[ ${#lines[@]} -eq 0 ]]; then
+        echo "no coats"
+        return 0
+    fi
+    printf '%-30s %-12s %-9s %s\n' COAT STATUS STATE WORKTREE
+    local line name status wt state
+    for line in "${lines[@]}"; do
+        name="${line%%|*}"
+        status="${line#*|}"
+        wt=$(podman pod inspect "${name}" --format '{{index .Labels "workit.worktree"}}' 2>/dev/null)
+        if [[ -z "${wt}" ]]; then
+            state="unlabeled"
+            wt="?"
+        elif [[ -d "${wt}" ]]; then
+            state="live"
+        else
+            state="ORPHAN"
+        fi
+        printf '%-30s %-12s %-9s %s\n' "${name}" "${status}" "${state}" "${wt}"
+    done
+}
+
+function cmd_gc {
+    local dry=
+    [[ "${1:-}" == "-n" || "${1:-}" == "--dry-run" ]] && dry=1
+    local names name wt n=0
+    mapfile -t names < <(podman pod ps --filter name=workit- --format '{{.Name}}' 2>/dev/null || true)
+    for name in "${names[@]}"; do
+        wt=$(podman pod inspect "${name}" --format '{{index .Labels "workit.worktree"}}' 2>/dev/null)
+        # Only reap coats we can prove are orphaned: labeled with a path that's
+        # gone. Unlabeled coats are left alone (we can't know their worktree).
+        [[ -n "${wt}" && ! -d "${wt}" ]] || continue
+        n=$((n + 1))
+        if [[ -n "${dry}" ]]; then
+            echo "would remove ${name} (worktree gone: ${wt})"
+        else
+            podman pod rm --force --time 2 "${name}" >/dev/null 2>&1
+            podman volume rm "${name}-pgdata" >/dev/null 2>&1
+            ok "removed orphan ${name} (worktree gone: ${wt})"
+        fi
+    done
+    [[ ${n} -gt 0 ]] || echo "no orphaned coats"
+}
+
 function cmd_down {
     local pod purge=
     [[ "${1:-}" == "--purge" ]] && purge=1
@@ -154,7 +236,9 @@ function cmd_down {
         warn "no coat for ${pod}"
         return 0
     fi
-    podman pod rm --force "${pod}" >/dev/null || die "failed to remove coat ${pod}"
+    # --time 2: don't wait the default 10s for postgres to shut down cleanly,
+    # it's a throwaway dev db.
+    podman pod rm --force --time 2 "${pod}" >/dev/null || die "failed to remove coat ${pod}"
     if [[ -n "${purge}" ]]; then
         if podman volume rm "${pod}-pgdata" >/dev/null 2>&1; then
             ok "coat ${pod} removed (db volume purged)"
@@ -169,22 +253,46 @@ function cmd_down {
 command -v podman >/dev/null 2>&1 || die "podman is required but not found"
 command -v nsenter >/dev/null 2>&1 || die "nsenter is required but not found"
 
+# Git-style -C: operate as if run from <dir>, so tooling can target any
+# worktree's coat from anywhere.
+if [[ "${1:-}" == "-C" ]]; then
+    [[ -n "${2:-}" ]] || die "-C requires a directory argument"
+    cd "${2}" || die "cannot cd to ${2}"
+    shift 2
+fi
+
 case "${1:-}" in
 up)
     shift
     cmd_up "$@"
     ;;
+enter)
+    shift
+    cmd_enter "$@"
+    ;;
 run)
     shift
     cmd_run "$@"
+    ;;
+pid)
+    shift
+    cmd_pid "$@"
     ;;
 db)
     shift
     cmd_db "$@"
     ;;
-status | ps)
+status)
     shift
     cmd_status "$@"
+    ;;
+ls)
+    shift
+    cmd_ls "$@"
+    ;;
+gc)
+    shift
+    cmd_gc "$@"
     ;;
 down)
     shift
