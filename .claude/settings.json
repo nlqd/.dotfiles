@@ -30,6 +30,10 @@
       }
     ]
   },
+  "statusLine": {
+    "type": "command",
+    "command": "bash /home/dungngo/.claude/statusline-command.sh"
+  },
   "enabledPlugins": {
     "pyright-lsp@claude-plugins-official": true,
     "typescript-lsp@claude-plugins-official": true,
@@ -45,7 +49,8 @@
     "remember@claude-plugins-official": true,
     "rust@east-agile": true,
     "learning-opportunities@learning-opportunities": true,
-    "frontend-design@claude-plugins-official": true
+    "frontend-design@claude-plugins-official": true,
+    "ast-grep@ast-grep-marketplace": true
   },
   "extraKnownMarketplaces": {
     "crit": {
@@ -59,17 +64,26 @@
         "source": "github",
         "repo": "thtea/sas_mcp"
       }
+    },
+    "ast-grep-marketplace": {
+      "source": {
+        "source": "github",
+        "repo": "ast-grep/agent-skill"
+      }
     }
   },
   "alwaysThinkingEnabled": true,
   "effortLevel": "xhigh",
   "tui": "fullscreen",
+  "prefersReducedMotion": true,
   "autoDreamEnabled": true,
   "skipDangerousModePermissionPrompt": true,
   "skipWorkflowUsageWarning": true,
   "theme": "custom:nvim-light",
   "editorMode": "vim",
   "preferredNotifChannel": "auto",
+  "switchModelsOnFlag": false,
+  "autoScrollEnabled": true,
   "teammateMode": "tmux",
   "agentPushNotifEnabled": true,
   "skipAutoPermissionPrompt": true,

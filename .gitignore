@@ -9,6 +9,7 @@
 
 .claude/**
 !.claude/CLAUDE.md
+!.claude/statusline-command.sh
 !.claude/agents/
 !.claude/agents/**
 !.claude/commands/
@@ -16,6 +17,8 @@
 !.claude/settings.json
 !.claude/themes/
 !.claude/themes/**
+!.claude/skills/
+!.claude/skills/**
 .config/btop
 .config/emacs/**
 !.config/emacs/init.el

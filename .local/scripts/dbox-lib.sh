@@ -107,9 +107,9 @@ dbox_home() {
     dbox_add --bind "$sbox" "$HOME"
 }
 
-# Resolve symlinks under $PWD and ~/.claude whose targets live outside both, then
-# bind each unique target so the link resolves inside. git_mode = ro|rw for the
-# worktree common dir + gitconfig.
+# Resolve symlinks under $PWD, ~/.claude and ~/.local whose targets live outside,
+# then bind each unique target so the link resolves inside. git_mode = ro|rw for
+# the worktree common dir + gitconfig.
 #
 # Walking whole trees for symlinks is the launch bottleneck: a research repo holds
 # tens of thousands of internal dataset links, and ~/.claude is ~15G (plugin npm
@@ -121,6 +121,10 @@ dbox_home() {
 #   - $PWD tracked symlinks: read straight from the git index (mode 120000).
 #   - $PWD shallow links (depth <= 2): catches hand-made top-level links git can't
 #     see, e.g. a worktree's `.claude` -> the main worktree's central config.
+#   - ~/.local (depth 1): top-level dir-symlinks like `scripts` -> ~/dotfiles, so
+#     the user's helper scripts (e.g. `ea`) resolve and run inside the box. The
+#     wrappers ro-bind ~/.local whole, which carries that symlink in but not its
+#     target; binding the target here is what makes it non-dangling.
 # Deep *gitignored* links (dataset/build trees) are skipped on purpose; their
 # targets are internal or belong under --share. Non-git dirs fall back to a walk.
 dbox_resolve_links() {
@@ -137,15 +141,17 @@ dbox_resolve_links() {
         dbox_add "$bind" "$HOME/.gitconfig" "$HOME/.gitconfig"
     fi
 
-    local pwd_norm="${PWD%/}" claude_norm="${HOME%/}/.claude" target
+    local pwd_norm="${PWD%/}" claude_norm="${HOME%/}/.claude" local_norm="${HOME%/}/.local" target
     while IFS= read -r -d '' target; do
         [[ "$target" == "$pwd_norm"/* ]] && continue
         [[ "$target" == "$claude_norm"/* ]] && continue
+        [[ "$target" == "$local_norm"/* ]] && continue
         [ -z "${seen[$target]:-}" ] || continue
         dbox_add --ro-bind "$target" "$target"; seen[$target]=1
     done < <(
         {
             find "$claude_norm" -maxdepth 2 -type l -print0 2>/dev/null
+            find "$local_norm" -maxdepth 1 -type l -print0 2>/dev/null
             if git -C "$pwd_norm" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
                 git -C "$pwd_norm" ls-files -s -z 2>/dev/null \
                     | gawk -v RS='\0' -v ORS='\0' -v p="$pwd_norm/" \

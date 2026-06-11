@@ -1,3 +1,8 @@
+---
+name: pr-comments-replies
+description: Use this when user wants to respond to PR comments. Use `gh` under the hood
+---
+
 ## RESPONDING TO PR COMMENTS
 
 When asked to reply to PR comments on your behalf:
