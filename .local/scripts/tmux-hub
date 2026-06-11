@@ -1,0 +1,454 @@
+#!/usr/bin/env bash
+# tmux-hub — keep a "claude-hub" session that mirrors every window running an
+# agent (claude/dclaude/sdai/aider, configurable). Stateless reconciler:
+# compute the desired hub membership, diff against what is linked, apply.
+#
+#   tmux-hub reconcile      full scan; link/unlink so the hub matches reality
+#   tmux-hub link-current   fast path: link the calling pane's window now
+#   tmux-hub help           print the hub keybindings (used by the landing window)
+#
+# Detection walks each pane's process tree from #{pane_pid} and matches
+# /proc/PID/cmdline, because #{pane_current_command} shows `node`, not `claude`.
+# See docs/tmux-claude-hub-design.md.
+
+set -uo pipefail
+
+HUB=${TMUX_HUB_SESSION:-claude-hub}
+
+# Predicates are plain tokens matched against a command line. Override the
+# defaults with one token per line in $XDG_CONFIG_HOME/tmux-hub/predicates.
+default_predicates() { printf '%s\n' claude dclaude sdai aider; }
+
+load_predicates() {
+  local cfg="${XDG_CONFIG_HOME:-${HOME}/.config}/tmux-hub/predicates" line
+  PREDICATES=()
+  if [[ -r ${cfg} ]]; then
+    while IFS= read -r line; do
+      line=${line%%#*}; line=${line//[[:space:]]/}
+      [[ -n ${line} ]] && PREDICATES+=("${line}")
+    done <"${cfg}"
+  fi
+  [[ ${#PREDICATES[@]} -gt 0 ]] || mapfile -t PREDICATES < <(default_predicates || true)
+}
+
+# tmh_match <cmdline>: 0 if any predicate appears as a whole token. A boundary
+# is start/end, whitespace or `/`; a trailing `.` or `/` is allowed (so
+# `claude`, `/x/claude`, `.../claude/cli.js` match, `claude-notes.md` does not).
+tmh_match() {
+  [[ -n ${1:-} ]] || return 1
+  [[ -n ${PREDICATES+x} ]] || load_predicates
+  local alt; alt=$(IFS='|'; echo "${PREDICATES[*]}")
+  [[ $1 =~ (^|[[:space:]/])(${alt})([[:space:]/.]|$) ]]
+}
+
+# tmh_label <dir>: basename, plus @branch when dir is a git work tree.
+tmh_label() {
+  local dir=$1 base branch
+  base=$(basename "${dir}")
+  branch=$(git -C "${dir}" symbolic-ref --quiet --short HEAD 2>/dev/null) ||
+    branch=$(git -C "${dir}" rev-parse --short HEAD 2>/dev/null) || branch=""
+  if [[ -n ${branch} ]]; then printf '%s@%s\n' "${base}" "${branch}"; else printf '%s\n' "${base}"; fi
+}
+
+# --- process tree -----------------------------------------------------------
+
+# tmh_build_proc_map: one /proc pass -> PROC_KIDS (ppid -> child pids). Built
+# once per run, not rescanned for every pane (that was ~3s with many panes).
+declare -gA PROC_KIDS
+tmh_build_proc_map() {
+  PROC_KIDS=()
+  local d pid line ppid
+  for d in /proc/[0-9]*; do
+    pid=${d#/proc/}
+    { read -r line <"${d}/stat"; } 2>/dev/null || continue
+    line=${line##*) }                 # strip "pid (comm) ", comm may hold spaces/parens
+    read -r _ ppid _ <<<"${line}"       # remainder is "state ppid ..."
+    [[ -n ${ppid:-} ]] && PROC_KIDS[${ppid}]+=" ${pid}"
+  done
+}
+
+# tmh_pids_under <root-pid>: print root and every descendant pid (uses PROC_KIDS,
+# building it once on first use).
+tmh_pids_under() {
+  [[ -n ${PROC_KIDS[*]+x} ]] || tmh_build_proc_map   # +x test is set -u safe when empty
+  local -a queue=("$1"); local cur
+  while ((${#queue[@]})); do
+    cur=${queue[0]}; queue=("${queue[@]:1}")
+    printf '%s\n' "${cur}"
+    if [[ -n ${PROC_KIDS[${cur}]:-} ]]; then
+      # shellcheck disable=SC2206
+      queue+=( ${PROC_KIDS[${cur}]} )
+    fi
+  done
+}
+
+# tmh_pane_matches <pane_pid>: 0 if the pane's process tree runs a predicate.
+tmh_pane_matches() {
+  local pid cmd
+  while read -r pid; do
+    cmd=$(tr '\0' ' ' <"/proc/${pid}/cmdline" 2>/dev/null)
+    [[ -n ${cmd} ]] && tmh_match "${cmd}" && return 0
+  done < <(tmh_pids_under "$1" || true)
+  return 1
+}
+
+# --- tmux helpers -----------------------------------------------------------
+
+# one lock per tmux server, so concurrent triggers do not race on shared state.
+# default non-blocking (caller skips if held); pass "wait" to block up to 5s.
+tmh_lock() {
+  local sock dir
+  sock=$(tmux display-message -p '#{socket_path}' 2>/dev/null)
+  dir=${XDG_RUNTIME_DIR:-/tmp}
+  exec {TMH_LOCK_FD}>"${dir}/tmux-hub.$(basename "${sock:-default}").lock" || return 1
+  if [[ ${1:-} == wait ]]; then flock -w 5 "${TMH_LOCK_FD}"; else flock -n "${TMH_LOCK_FD}"; fi
+}
+
+tmh_hub_exists() { tmux has-session -t "=${HUB}" 2>/dev/null; }
+
+tmh_ensure_hub() {
+  tmh_hub_exists && return 0
+  tmux new-session -d -s "${HUB}" -n hub "tmux-hub help; exec ${SHELL:-/bin/sh}" 2>/dev/null
+  tmux set -t "=${HUB}" @is_hub 1
+  tmux set -t "=${HUB}" window-status-format \
+    '#I #{@hub_home}/#{@hub_label}#{?pane_in_mode, [peek],}'
+  tmux set -t "=${HUB}" window-status-current-format \
+    '#I #{@hub_home}/#{@hub_label}#{?pane_in_mode, [peek],}'
+  tmux set -w -t "=${HUB}:" @hub_landing 1     # never unlink the landing window
+}
+
+# lowest free index at or above base-index in the hub
+tmh_free_index() {
+  local base used i
+  base=$(tmux show -gv base-index 2>/dev/null); base=${base:-0}
+  used=$(tmux list-windows -t "=${HUB}" -F '#{window_index}' 2>/dev/null)
+  for ((i = base; ; i++)); do
+    grep -qx "${i}" <<<"${used}" || { echo "${i}"; return; }
+  done
+}
+
+# window ids currently linked into the hub, excluding the landing window
+tmh_current() {
+  tmux list-windows -t "=${HUB}" -F '#{?@hub_landing,,#{window_id}}' 2>/dev/null | grep .
+}
+
+# emit "window_id<TAB>home_session<TAB>label" for every matching window
+tmh_desired() {
+  local wid paneid ppid sess path gv label
+  while read -r wid paneid ppid sess; do      # session last: it may contain spaces
+    [[ ${sess} == "${HUB}" ]] && continue
+    tmh_pane_matches "${ppid}" || continue
+    gv=$(tmux show -wv -t "${wid}" @gather_view 2>/dev/null)
+    [[ -n ${gv} ]] && continue                # skip gather views
+    path=$(tmux display-message -p -t "${paneid}" '#{pane_current_path}' 2>/dev/null)
+    label=$(tmh_label "${path}")
+    printf '%s\t%s\t%s\n' "${wid}" "${sess}" "${label}"
+  done < <(tmux list-panes -a -F '#{window_id} #{pane_id} #{pane_pid} #{session_name}' || true)
+}
+
+# tmh_reorder: renumber the hub so agent windows are grouped by home session then
+# home index, contiguous after the landing. tmux has no declarative window sort,
+# so compute the order and move windows into place (a temp range avoids index
+# collisions). Only the hub's own indexes change; home sessions are untouched.
+tmh_reorder() {
+  local base sess idx wid home r=0
+  base=$(tmux show -gv base-index 2>/dev/null); base=${base:-0}
+  declare -A widx srank
+  while IFS=$'\t' read -r sess idx wid; do widx["${wid}|${sess}"]=${idx}; done \
+    < <(tmux list-windows -a -F '#{session_name}'$'\t''#{window_index}'$'\t''#{window_id}' || true)
+  while read -r sess; do srank[${sess}]=${r}; r=$((r + 1)); done < <(tmux list-sessions -F '#{session_name}' || true)
+
+  local landing; landing=$(tmux list-windows -t "=${HUB}" -F '#{?@hub_landing,#{window_id},}' | grep . | head -1)
+  local -a sorted
+  mapfile -t sorted < <(
+    tmux list-windows -t "=${HUB}" -F '#{?@hub_landing,,#{window_id}'$'\t''#{@hub_home}}' | grep . \
+      | while IFS=$'\t' read -r wid home; do
+          printf '%05d\t%05d\t%s\n' "${srank[${home}]:-99999}" "${widx["${wid}|${home}"]:-99999}" "${wid}"
+        done | sort | cut -f3 || true
+  )
+  # shellcheck disable=SC2206
+  local -a desired=( ${landing:+"${landing}"} "${sorted[@]}" )
+  local -a current
+  mapfile -t current < <(tmux list-windows -t "=${HUB}" -F '#{window_id}' || true)
+  [[ "${desired[*]}" == "${current[*]}" ]] && return 0   # already in order
+
+  # Move sources are named by current hub index (=$HUB:from), never by bare
+  # window-id: a window linked to both the hub and its home session would let
+  # tmux pick the home-session link and unlink it from home (data loss).
+  local tmp=$((base + 1000)) i=${base} k=0 from
+  local -a tmps=()
+  for wid in "${desired[@]}"; do
+    from=${widx["${wid}|${HUB}"]}
+    [[ -n ${from} ]] && tmux move-window -d -s "=${HUB}:${from}" -t "=${HUB}:${tmp}" 2>/dev/null
+    tmps[k]=${tmp}; tmp=$((tmp + 1)); k=$((k + 1))
+  done
+  k=0
+  for wid in "${desired[@]}"; do
+    tmux move-window -d -s "=${HUB}:${tmps[k]}" -t "=${HUB}:${i}" 2>/dev/null
+    i=$((i + 1)); k=$((k + 1))
+  done
+}
+
+# --- commands ---------------------------------------------------------------
+
+cmd_reconcile() {
+  [[ -n ${TMUX:-} ]] || return 0
+  tmh_ensure_hub                   # BEFORE the lock: new-session spawns the hub's
+                                   # landing shell, which must not inherit the lock
+                                   # fd (it would then pin the lock for its lifetime)
+  tmh_lock || return 0             # another reconcile is in flight; it converges
+  load_predicates
+  tmh_build_proc_map               # one /proc snapshot, reused for every pane
+
+  declare -A want_home=() want_label=()
+  local wid home label idx
+  while IFS=$'\t' read -r wid home label; do
+    [[ -n ${wid} ]] || continue
+    want_home[${wid}]=${home}; want_label[${wid}]=${label}
+  done < <(tmh_desired || true)
+
+  declare -A have=()
+  while read -r wid; do [[ -n ${wid} ]] && have[${wid}]=1; done < <(tmh_current || true)
+
+  # link the missing, (re)label everything desired
+  for wid in "${!want_home[@]}"; do
+    if [[ -z ${have[${wid}]:-} ]]; then
+      idx=$(tmh_free_index)
+      tmux link-window -s "${wid}" -t "=${HUB}:${idx}" -d 2>/dev/null || continue
+    fi
+    tmux set -w -t "${wid}" @hub_home "${want_home[${wid}]}"
+    tmux set -w -t "${wid}" @hub_label "${want_label[${wid}]}"
+  done
+
+  # unlink the gone; plain unlink keeps the agent alive via its home link
+  for wid in "${!have[@]}"; do
+    [[ -n ${want_home[${wid}]:-} ]] && continue
+    idx=$(tmux list-windows -t "=${HUB}" -F '#{window_index} #{window_id}' 2>/dev/null |
+      awk -v w="${wid}" '$2==w{print $1; exit}')
+    [[ -n ${idx} ]] && tmux unlink-window -t "=${HUB}:${idx}" 2>/dev/null
+  done
+
+  tmh_reorder    # group hub windows by home session+index (no-ops if already sorted)
+  return 0
+}
+
+cmd_link_current() {
+  [[ -n ${TMUX:-} ]] || return 0
+  local wid path
+  wid=$(tmux display-message -p '#{window_id}' 2>/dev/null) || return 0
+  tmh_lock || return 0
+  tmh_ensure_hub
+  local idx
+  if ! tmh_current | grep -qx "${wid}"; then
+    idx=$(tmh_free_index)
+    tmux link-window -s "${wid}" -t "=${HUB}:${idx}" -d 2>/dev/null || return 0
+  fi
+  path=$(tmux display-message -p '#{pane_current_path}' 2>/dev/null)
+  local sess label
+  sess=$(tmux display-message -p '#{session_name}')
+  label=$(tmh_label "${path}")
+  tmux set -w -t "${wid}" @hub_home "${sess}"
+  tmux set -w -t "${wid}" @hub_label "${label}"
+}
+
+cmd_help() {
+  cat <<'EOF'
+ claude-hub — live view of every window running an agent
+
+   prefix G   enter the hub, or (in the hub) jump to THIS window's home session
+   prefix L   leave (back to where you entered from)
+   prefix g   in a project session: tile/untile its agents into one window
+   prefix [   peek in copy-mode (look without typing into the live agent)
+
+ Windows here are the real, live windows: typing goes to the real agent.
+ To actually kill an agent, do it from its home session.
+EOF
+}
+
+cmd_ensure() {
+  [[ -n ${TMUX:-} ]] || return 0
+  tmh_ensure_hub
+}
+
+# cmd_home: from a hub window, switch the client to that window's real home
+# session; on the landing window (no home) fall back to the last session.
+cmd_home() {
+  [[ -n ${TMUX:-} ]] || return 0
+  local home win
+  win=$(tmux display-message -p '#{window_id}' 2>/dev/null)
+  home=$(tmux display-message -p '#{@hub_home}' 2>/dev/null)
+  if [[ -n ${home} ]]; then
+    tmux switch-client -t "${home}"
+    tmux select-window -t "${win}"     # land on THIS window, not the session's active one
+  else
+    tmux switch-client -l
+  fi
+}
+
+# --- gather / scatter: tile a session's agent panes into one window ----------
+
+# tmh_gather_view <session>: echo the gather view window id, if the session has one
+tmh_gather_view() {
+  tmux list-windows -t "$1" -F '#{?@gather_view,#{window_id},}' 2>/dev/null | grep .
+}
+
+# tmh_apply_layout <window> <layout>: select-layout assigns panes to cells by
+# current pane order, not by the ids in the string, so first reorder the window's
+# panes to the saved id-order, then snap the geometry back.
+tmh_apply_layout() {
+  local win=$1 layout=$2 i
+  local -a want cur
+  mapfile -t want < <(grep -oE '[0-9]+x[0-9]+,[0-9]+,[0-9]+,[0-9]+' <<<"${layout}" | awk -F, '{print "%"$NF}' || true)
+  for ((i = 0; i < ${#want[@]}; i++)); do
+    mapfile -t cur < <(tmux list-panes -t "${win}" -F '#{pane_id}' 2>/dev/null || true)
+    [[ ${cur[i]:-} == "${want[i]}" ]] && continue
+    tmux swap-pane -s "${cur[i]}" -t "${want[i]}" 2>/dev/null
+  done
+  tmux select-layout -t "${win}" "${layout}" 2>/dev/null
+}
+
+# cmd_gather <session>: toggle. Pull every agent pane in the session into one
+# tiled view window; run again to send each back to exactly where it was.
+cmd_gather() {
+  [[ -n ${TMUX:-} ]] || return 0
+  local s=${1:-$(tmux display-message -p '#{client_session}' 2>/dev/null)}
+  if [[ ${s} == "${HUB}" ]]; then
+    tmux display-message "tmux-hub: gather runs in a project session, not the hub"
+    return 0
+  fi
+  local existing; existing=$(tmh_gather_view "${s}")
+  [[ -n ${existing} ]] && { cmd_scatter "${s}"; return; }
+
+  tmh_lock wait || { tmux display-message "tmux-hub: busy, try again"; return 0; }
+  tmh_build_proc_map
+
+  local fmt pane_id pane_pid w_id w_idx w_name w_layout p_title
+  fmt='#{pane_id}'$'\t''#{pane_pid}'$'\t''#{window_id}'$'\t''#{window_index}'$'\t''#{window_name}'$'\t''#{window_layout}'$'\t''#{pane_title}'
+  local -a panes=()
+  declare -A win_total=() win_agents=() pane_win=()
+  while IFS=$'\t' read -r pane_id pane_pid w_id w_idx w_name w_layout p_title; do
+    win_total[${w_id}]=$(( ${win_total[${w_id}]:-0} + 1 ))
+    tmh_pane_matches "${pane_pid}" || continue
+    win_agents[${w_id}]=$(( ${win_agents[${w_id}]:-0} + 1 ))
+    # stash restore info on the pane itself; pane options survive break/join
+    tmux set -p -t "${pane_id}" @gather_win    "${w_id}"
+    tmux set -p -t "${pane_id}" @gather_idx    "${w_idx}"
+    tmux set -p -t "${pane_id}" @gather_name   "${w_name}"
+    tmux set -p -t "${pane_id}" @gather_layout "${w_layout}"
+    tmux set -p -t "${pane_id}" @gather_title  "${p_title}"
+    pane_win[${pane_id}]=${w_id}
+    panes+=("${pane_id}")
+  done < <(tmux list-panes -s -t "${s}" -F "${fmt}" || true)
+
+  if [[ ${#panes[@]} -eq 0 ]]; then
+    tmux display-message "tmux-hub: no agents in this session to gather"
+    return 0
+  fi
+
+  # Decide survive-vs-recreate now, while ids are valid: a source window survives
+  # iff it keeps a non-agent pane. @gather_keep holds the window to rejoin into
+  # (empty = recreate), so scatter never probes a (possibly reused) window id.
+  local pw
+  for pane_id in "${panes[@]}"; do
+    pw=${pane_win[${pane_id}]}
+    if (( ${win_total[${pw}]:-0} > ${win_agents[${pw}]:-0} )); then
+      tmux set -p -t "${pane_id}" @gather_keep "${pw}"
+    else
+      tmux set -p -t "${pane_id}" @gather_keep ""
+    fi
+  done
+
+  # build the view as a FRESH window (a break-pane of the first pane would reuse
+  # that pane's window id and fool scatter's "is the home window alive" check),
+  # join every agent pane in, then drop the throwaway holder pane.
+  local view holder i
+  view=$(tmux new-window -d -t "${s}" -n gathered -P -F '#{window_id}')
+  holder=$(tmux list-panes -t "${view}" -F '#{pane_id}')
+  for ((i = 0; i < ${#panes[@]}; i++)); do
+    tmux join-pane -d -s "${panes[i]}" -t "${view}"
+  done
+  tmux kill-pane -t "${holder}"
+  tmux set -w -t "${view}" @gather_view 1
+  tmux select-layout -t "${view}" tiled
+  tmux select-window -t "${view}"
+
+  flock -u "${TMH_LOCK_FD}" 2>/dev/null
+  cmd_reconcile                    # sync, in-process: no race with hub hooks
+}
+
+# cmd_scatter <session>: send a gathered session's panes back to their windows,
+# restoring each window's index, name, layout (size+position) and pane title.
+cmd_scatter() {
+  [[ -n ${TMUX:-} ]] || return 0
+  local s=${1:-$(tmux display-message -p '#{client_session}' 2>/dev/null)}
+  [[ ${s} == "${HUB}" ]] && return 0
+  local view; view=$(tmh_gather_view "${s}")
+  [[ -n ${view} ]] || { tmux display-message "tmux-hub: nothing gathered here"; return 0; }
+
+  tmh_lock wait || { tmux display-message "tmux-hub: busy, try again"; return 0; }
+
+  declare -A win_layout win_idx win_name win_keep win_panes
+  local fmt pane_id g_win g_idx g_name g_layout g_title g_keep
+  fmt='#{pane_id}'$'\t''#{@gather_win}'$'\t''#{@gather_idx}'$'\t''#{@gather_name}'$'\t''#{@gather_layout}'$'\t''#{@gather_title}'$'\t''#{@gather_keep}'
+  while IFS=$'\t' read -r pane_id g_win g_idx g_name g_layout g_title g_keep; do
+    [[ -n ${pane_id} ]] || continue
+    win_layout[${g_win}]=${g_layout}; win_idx[${g_win}]=${g_idx}; win_name[${g_win}]=${g_name}; win_keep[${g_win}]=${g_keep}
+    win_panes[${g_win}]+=" ${pane_id}"
+    tmux select-pane -t "${pane_id}" -T "${g_title}" 2>/dev/null
+  done < <(tmux list-panes -t "${view}" -F "${fmt}" || true)
+
+  # Keep the view alive with a throwaway holder pane during the restore: without
+  # it, break-pane of the view's LAST agent pane reuses the view's window id, and
+  # the cleanup would then kill a just-restored agent. Also clear the marker, in
+  # case no holder can be made and the view gets repurposed.
+  tmux set -w -t "${view}" -u @gather_view 2>/dev/null
+  local holder; holder=$(tmux split-window -d -t "${view}" -P -F '#{pane_id}' 2>/dev/null)
+
+  local w p o keep new
+  for w in "${!win_panes[@]}"; do
+    # shellcheck disable=SC2206
+    local -a grp=( ${win_panes[${w}]} )
+    keep=${win_keep[${w}]}
+    if [[ -n ${keep} ]]; then
+      # source window survived: join the agent panes back into it
+      for p in "${grp[@]}"; do tmux join-pane -d -s "${p}" -t "${keep}" 2>/dev/null; done
+      tmh_apply_layout "${keep}" "${win_layout[${w}]}"
+    else
+      # source window was emptied: recreate it (break-pane never strands a pane)
+      # then move to the original index. -P returns the new window id.
+      new=$(tmux break-pane -d -s "${grp[0]}" -n "${win_name[${w}]}" -P -F '#{window_id}')
+      for p in "${grp[@]:1}"; do tmux join-pane -d -s "${p}" -t "${new}" 2>/dev/null; done
+      tmh_apply_layout "${new}" "${win_layout[${w}]}"
+      tmux move-window -s "${new}" -t "${s}:${win_idx[${w}]}" 2>/dev/null
+    fi
+    for p in "${grp[@]}"; do
+      for o in @gather_win @gather_idx @gather_name @gather_layout @gather_title @gather_keep; do
+        tmux set -p -t "${p}" -u "${o}" 2>/dev/null
+      done
+    done
+  done
+
+  # kill the throwaway holder PANE (never the view by id); when it is the view's
+  # last pane this tears the view down, without ever touching a restored agent.
+  [[ -n ${holder:-} ]] && tmux kill-pane -t "${holder}" 2>/dev/null
+  flock -u "${TMH_LOCK_FD}" 2>/dev/null
+  cmd_reconcile                    # sync, in-process: no race with hub hooks
+}
+
+tmh_main() {
+  case "${1:-reconcile}" in
+    reconcile)    cmd_reconcile ;;
+    link-current) cmd_link_current ;;
+    ensure)       cmd_ensure ;;
+    home)         cmd_home ;;
+    gather)       cmd_gather "${2:-}" ;;
+    scatter)      cmd_scatter "${2:-}" ;;
+    help)         cmd_help ;;
+    *) echo "usage: tmux-hub [reconcile|link-current|ensure|home|gather|scatter|help]" >&2; return 2 ;;
+  esac
+}
+
+# run main only when executed, not when sourced for unit tests
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  tmh_main "$@"
+fi
