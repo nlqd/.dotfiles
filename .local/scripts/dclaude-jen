@@ -1,8 +1,9 @@
 #!/usr/bin/bash
 # allow-list profile: vibe-hard-mode for a project where the agent is
 # trusted to push to GitHub. gh and git are exposed (and GH_TOKEN injected);
-# rsync/terraform/docker stay blocked. Adds R toolchain and binds the parent dir
-# so sibling git worktrees are reachable.
+# rsync/terraform stay blocked. The docker CLI is allowed but pointed at the
+# rootless podman socket (DOCKER_HOST), so containers run as me, never host root.
+# Adds R toolchain and binds the parent dir so sibling git worktrees are reachable.
 set -euo pipefail
 
 DBOX_PROFILE=dclaude-jen
@@ -11,9 +12,26 @@ dbox_parse "$@"
 
 exec {claude_json}<"$HOME/.claude.json"
 
+# Push auth. Drop a GitHub fine-grained PAT scoped to the jenner repos at
+# ~/.config/dclaude-jen/gh-token and the agent is limited to those repos, with the
+# full-account gh token NOT exposed (hosts.yml unbound). No such file => fall back
+# to the full gh token: push as me, any repo.
+gh_cfg=(--ro-bind-try "$HOME/.config/gh" "$HOME/.config/gh")
+if [ -r "$HOME/.config/dclaude-jen/gh-token" ]; then
+    GH_PUSH_TOKEN=$(cat "$HOME/.config/dclaude-jen/gh-token"); gh_cfg=()
+else
+    GH_PUSH_TOKEN=$(gh auth token)
+fi
+
+# Rootless podman socket bridge: the docker CLI in the box talks to my host
+# rootless podman (enable once: `systemctl --user enable --now podman.socket`).
+# Bind-try keeps it harmless if the socket is down; the root dockerd socket is
+# never bound, so containers run as me, never host root.
+pod_sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock"
+
 dbox_namespaces
 dbox_system
-dbox_block rsync terraform docker
+dbox_block rsync terraform
 
 dbox_home
 dbox_add \
@@ -24,13 +42,23 @@ dbox_add \
     --ro-bind-try "$HOME/Downloads" "$HOME/Downloads" \
     --ro-bind-try "$HOME/.asdf" "$HOME/.asdf" \
     --ro-bind-try "$HOME/.tool-versions" "$HOME/.tool-versions" \
-    --ro-bind-try "$HOME/.config/gh" "$HOME/.config/gh" \
+    --ro-bind-try "$HOME/.gitconfig" "$HOME/.gitconfig" \
+    "${gh_cfg[@]}" \
+    --ro-bind-try "$HOME/.config/eatracker" "$HOME/.config/eatracker" \
     --ro-bind-try "$HOME/.circleci" "$HOME/.circleci" \
+    --bind-try "$pod_sock" "$pod_sock" \
     --bind "$HOME/.cargo" "$HOME/.cargo" \
     --bind "$HOME/.claude" "$HOME/.claude" \
     --bind "$HOME/.cache" "$HOME/.cache" \
     --file "$claude_json" "$HOME/.claude.json" \
-    --setenv GH_TOKEN "$(gh auth token)"
+    --setenv GH_TOKEN "$GH_PUSH_TOKEN" \
+    --setenv GIT_CONFIG_COUNT 2 \
+    --setenv GIT_CONFIG_KEY_0 "credential.https://github.com.helper" \
+    --setenv GIT_CONFIG_VALUE_0 "!gh auth git-credential" \
+    --setenv GIT_CONFIG_KEY_1 "url.https://github.com/.insteadOf" \
+    --setenv GIT_CONFIG_VALUE_1 "git@github.com:" \
+    --setenv DOCKER_HOST "unix://$pod_sock" \
+    --setenv CONTAINER_HOST "unix://$pod_sock"
 
 # System R toolchain.
 dbox_add \

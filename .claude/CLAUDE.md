@@ -150,5 +150,7 @@ PR descriptions should read smoothly to a human reviewer. Three rules:
    - Skill(humanizer) -- use it when talking to me as well, not just in writing
 - Must use these following skills when the task is engineering
    - Skill(fast-code-search)
-- Should use these skills:
+- Should use these following skills when the task is engineering
+   - Skill(ast-grep) -- more automation, less hand-editing code
+- Should use these skills when the task is research or validation:
    - Skill(rodney): for when web fetch is blocked (bot blocking) -- rodney would help you circumvent that

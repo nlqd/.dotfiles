@@ -8,7 +8,9 @@
 # for docs. Routing and pretty rendering live on top, hand-written.
 #
 # Config: ~/.config/eatracker/config.json
-#   { "api_key": "ea_user_...", "projects": [ { "local_path": "/repo", "pid": N, "name": "..." } ] }
+#   { "api_key": "ea_user_...", "member_id": N,
+#     "projects": [ { "local_path": "/repo", "pid": N, "name": "..." } ] }
+#   member_id is the default owner for `ea stories owner add`.
 #
 # Unhandled from the spec (deliberate, for a personal tool):
 #   - Idempotency-Key on writes: the API honours it for safe replay (and 409s on
@@ -206,8 +208,16 @@ dispatch() {
   local pid; pid=$(project_id)
   [[ -n ${1:-} ]] || { cmd_help; return; }
   local entity="$1"; shift
+
+  # Curated entities/actions that live outside the generated EA_API manifest, so
+  # `ea api gen` never clobbers them. The tracker serves these but its OpenAPI
+  # spec omits them, so they cannot be routed by the manifest grep.
+  [[ $entity == labels ]] && { cmd_labels "$pid" "$@"; return; }
+
   [[ -n ${1:-} ]] || { entity_help "$entity"; return; }
   local action="$1"; shift
+
+  [[ $entity == stories && $action == owner ]] && { cmd_owner "$pid" "$@"; return; }
 
   local a
   for a in "$@"; do [[ $a == --help || $a == -h || $a == help ]] && { op_help "$entity" "$action"; return; }; done
@@ -217,13 +227,14 @@ dispatch() {
   local rest="${route#*] }" method path
   method="${rest%% *}"; path="${rest#* }"
 
-  local -a pos=() kv=(); local want_all=""
+  local -a pos=() kv=(); local want_all="" want_json=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --all) want_all=1; shift ;;
-      --*)   [[ $# -ge 2 ]] || { echo "Flag $1 needs a value" >&2; return 1; }
-             kv+=("${1#--}=$2"); shift 2 ;;
-      *)     pos+=("$1"); shift ;;
+      --all)  want_all=1; shift ;;
+      --json) want_json=1; shift ;;
+      --*)    [[ $# -ge 2 ]] || { echo "Flag $1 needs a value" >&2; return 1; }
+              kv+=("${1#--}=$2"); shift 2 ;;
+      *)      pos+=("$1"); shift ;;
     esac
   done
 
@@ -254,7 +265,10 @@ dispatch() {
   else
     resp=$(api "$method" "$path" "$(build_body "${kv[@]}")") || return 1
   fi
-  echo "$resp" | render "$entity" "$action"
+  # --json: skip the pretty renderer and emit the raw API response (the very
+  # thing render() would have consumed), so it pipes cleanly into jq.
+  if [[ -n $want_json ]]; then echo "$resp" | jq .
+  else echo "$resp" | render "$entity" "$action"; fi
 }
 
 # ---- help (greps the manifest comments) ----
@@ -274,10 +288,14 @@ ea - East Agile Tracker CLI
 Grammar:  ea [-p PID] ENTITY ACTION [path-args] [--field value ...]
 Help:     ea ENTITY            list its actions
           ea ENTITY ACTION --help   show path/query/body fields
+Raw JSON: ea stories list|get ... --json   skip the renderer, emit raw JSON for jq
 
 Curated commands:
   dash            Overview: non-icebox stories grouped by state
   projects        List your projects
+  stories owner add|rm <ref> [--member <id>]    Add/remove a story owner
+  labels list                                   List project labels
+  labels recolor <id> --bg <hex> --text <hex>   Recolor a label (color only)
   api gen         Regenerate the API manifest from the live OpenAPI spec
 
 API surface (generated):
@@ -306,6 +324,67 @@ cmd_dash() {
     echo "$block" | story_line | tab 7
     echo
   done
+}
+
+# Owners: POST/DELETE /projects/{pid}/stories/{sid}/owners[/{member_id}]. Absent
+# from the OpenAPI spec, so wired by hand. --member defaults to config .member_id.
+cmd_owner() {
+  local pid="$1"; shift
+  local sub="${1:-}"; [[ $# -gt 0 ]] && shift
+  local ref="" member=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --member) [[ $# -ge 2 ]] || { echo "--member needs a value" >&2; return 1; }
+                member="$2"; shift 2 ;;
+      *)        ref="$1"; shift ;;
+    esac
+  done
+  [[ $sub == add || $sub == rm || $sub == remove ]] \
+    || { echo "Usage: ea stories owner add|rm <ref> [--member <id>]" >&2; return 1; }
+  [[ -n $ref ]] || { echo "Missing story ref" >&2; return 1; }
+  [[ -n $member ]] || member=$(cfg .member_id)
+  [[ $member =~ ^[0-9]+$ ]] || { echo "Need a numeric member id (--member or config .member_id)" >&2; return 1; }
+  local sid; sid=$(resolve_story "$pid" "$ref")
+  [[ -n $sid ]] || { echo "Could not resolve story: $ref" >&2; return 1; }
+  if [[ $sub == add ]]; then
+    api POST "/projects/$pid/stories/$sid/owners" "{\"member_id\":$member}" >/dev/null \
+      && echo "Added member $member as owner of $ref"
+  else
+    api DELETE "/projects/$pid/stories/$sid/owners/$member" >/dev/null \
+      && echo "Removed member $member as owner of $ref"
+  fi
+}
+
+# Labels: GET/PUT /projects/{pid}/labels[/{id}], also absent from the spec.
+# recolor sends color fields ONLY: a label_name in the body trips the tracker's
+# auto-mode classifier, which reads it as a rename and denies the request.
+cmd_labels() {
+  local pid="$1"; shift
+  local sub="${1:-list}"; [[ $# -gt 0 ]] && shift
+  case "$sub" in
+    list)
+      api GET "/projects/$pid/labels" \
+        | jq -r '(.items? // .) | sort_by(.label_name)[]
+            | "[\(.label_id)]\t\(.label_name)\t\(.background_color_hex)\t\(.text_color_hex)\t\(.story_count)\(if .archived then "  (archived)" else "" end)"' \
+        | tab 2 ;;
+    recolor)
+      local id="" bg="" text=""
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --bg)   [[ $# -ge 2 ]] || { echo "--bg needs a hex value" >&2; return 1; }; bg="$2"; shift 2 ;;
+          --text) [[ $# -ge 2 ]] || { echo "--text needs a hex value" >&2; return 1; }; text="$2"; shift 2 ;;
+          *)      id="$1"; shift ;;
+        esac
+      done
+      [[ -n $id ]] || { echo "Usage: ea labels recolor <id> --bg <hex> [--text <hex>]" >&2; return 1; }
+      [[ -n $bg || -n $text ]] || { echo "Nothing to change: pass --bg and/or --text" >&2; return 1; }
+      local body; body=$(jq -nc --arg bg "$bg" --arg text "$text" '
+        {} + (if $bg   != "" then {background_color_hex:$bg} else {} end)
+           + (if $text != "" then {text_color_hex:$text}     else {} end)')
+      api PUT "/projects/$pid/labels/$id" "$body" \
+        | jq -r '"recolored [\(.label_id)] \(.label_name)  bg=\(.background_color_hex) text=\(.text_color_hex)"' ;;
+    *) echo "Usage: ea labels list | ea labels recolor <id> --bg <hex> --text <hex>" >&2; return 1 ;;
+  esac
 }
 
 # ---- codegen: rewrite the manifest block from the live spec ----
