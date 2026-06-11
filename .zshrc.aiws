@@ -49,6 +49,7 @@ alias oil='nvim -c "Oil"'
 alias pbcopy='xclip -sel c'
 alias pbpaste='xclip -sel c -o'
 alias nr='newsraft'
+alias cl='claude'
 alias cr='ENABLE_LSP_TOOL=true claude -r'
 alias claude='ENABLE_LSP_TOOL=true claude'
 
