@@ -159,3 +159,24 @@ eval "$(starship init zsh)"
 # cat ~/.cache/wal/sequences
 
 . "$HOME/.local/share/../bin/env"
+
+# claude-hub: link windows that launch an agent into the hub — docs/tmux-claude-hub-design.md
+if [[ -n $TMUX ]]; then
+  autoload -Uz add-zsh-hook
+  _tmux_hub_preexec() {
+    local line=${3:-${1:-}} word
+    word=${line%%[[:space:]]*}
+    if [[ ${word:t} == (claude|dclaude|sdai|aider) ]]; then
+      tmux-hub link-current 2>/dev/null
+      _tmux_hub_dirty=1
+    fi
+  }
+  _tmux_hub_precmd() {
+    if [[ -n ${_tmux_hub_dirty:-} ]]; then
+      tmux-hub reconcile &>/dev/null &!
+      unset _tmux_hub_dirty
+    fi
+  }
+  add-zsh-hook preexec _tmux_hub_preexec
+  add-zsh-hook precmd  _tmux_hub_precmd
+fi
