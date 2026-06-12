@@ -32,7 +32,7 @@
   },
   "statusLine": {
     "type": "command",
-    "command": "bash /home/dungngo/.claude/statusline-command.sh"
+    "command": "bash $HOME/.claude/statusline-command.sh"
   },
   "enabledPlugins": {
     "pyright-lsp@claude-plugins-official": true,
