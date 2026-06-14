@@ -66,6 +66,7 @@
 #cpu,
 #custom-keyboard-layout,
 #custom-brightness,
+#custom-denoise,
 #memory,
 #mode,
 #network,
@@ -180,6 +181,10 @@
     color: @background;
     background-color: @color2;
     padding: 0px 12px;
+}
+
+#custom-denoise {
+    color: @color2;
 }
 
 #temperature {

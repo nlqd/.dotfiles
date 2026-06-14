@@ -1,0 +1,14 @@
+# deepfilter-mic settings, sourced by the deepfilter-mic script on each toggle.
+# No restart needed: values are re-read every time you toggle.
+
+# Noise attenuation cap in dB. 100 = full reduction. Lower keeps more room tone:
+# 18-24 = medium, 6-12 = light.
+ATTENUATION_LIMIT_DB=100
+
+# Path to the LADSPA plugin (machine-local artifact installed by `setup`).
+# Leave commented to use the default under $XDG_DATA_HOME/deepfilter-mic/.
+# PLUGIN_PATH="$HOME/.local/share/deepfilter-mic/libdeep_filter_ladspa.so"
+
+# node.name of the mic to restore to if the one you toggled on has vanished
+# (e.g. a headset unplugged mid-call). Empty = pick the first hardware source.
+FALLBACK_MIC=""
