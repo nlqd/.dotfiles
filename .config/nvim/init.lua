@@ -129,6 +129,39 @@ vim.api.nvim_create_autocmd('OptionSet', {
 })
 render_markdown_ansi()
 
+-- sembr
+-- Semantic line breaks (one sentence per line). Use: visual-select lines, then :SemBr
+local function sembr(first, last)
+    local lines = vim.api.nvim_buf_get_lines(0, first - 1, last, false)
+    local function blank(l) return l:match('^%s*$') ~= nil end
+    local function marker(l)
+        return l:match('^%s*[-*+]%s') or l:match('^%s*%d+[.)]%s') or l:match('^%s*>%s')
+    end
+    local out, i = {}, 1
+    while i <= #lines do
+        if blank(lines[i]) then
+            out[#out + 1] = lines[i]
+            i = i + 1
+        else
+            local prefix = marker(lines[i]) or lines[i]:match('^%s*')
+            local block = { lines[i]:sub(#prefix + 1) }
+            i = i + 1
+            while i <= #lines and not blank(lines[i]) and not marker(lines[i]) do
+                block[#block + 1] = vim.trim(lines[i])
+                i = i + 1
+            end
+            local text = table.concat(block, ' '):gsub('%s+', ' '):gsub('^%s+', '')
+            text = text:gsub('([%.%!%?][%)%]"\'”’]*)%s+([%u%d%(%[“‘"\'])', '%1\n%2')
+            local cont = string.rep(' ', vim.fn.strdisplaywidth(prefix))
+            for j, ln in ipairs(vim.split(text, '\n', { plain = true })) do
+                out[#out + 1] = (j == 1 and prefix or cont) .. ln
+            end
+        end
+    end
+    vim.api.nvim_buf_set_lines(0, first - 1, last, false, out)
+end
+vim.api.nvim_create_user_command('SemBr', function(o) sembr(o.line1, o.line2) end, { range = true })
+
 -- git
 vim.api.nvim_create_user_command('Gdiff', function(opts)
     local branch = opts.args ~= '' and opts.args or 'main'
