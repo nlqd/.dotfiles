@@ -549,13 +549,18 @@ list_all() {
 
   # shellcheck disable=SC2016
   (
-    printf '%s\n' "$CACHE_DIR"/* | xargs -P8 -I{} bash -c '
+    printf '%s\n' "$CACHE_DIR"/* | xargs -P3 -I{} bash -c '
       dir="$1"
       symlink_map="$2"
       [ -f "$dir/.repo" ] || exit
       repo=$(cat "$dir/.repo")
       local_ver=$(cat "$dir/.version")
-      remote_ver=$(curl -sf "'"$API"'/$repo/releases/latest" | jq -r ".tag_name")
+      remote_ver=""
+      for attempt in 1 2 3; do
+        remote_ver=$(curl -sf "'"$API"'/$repo/releases/latest" | jq -r ".tag_name")
+        [ -n "$remote_ver" ] && [ "$remote_ver" != "null" ] && break
+        [ "$attempt" -lt 3 ] && sleep $((attempt * 2))
+      done
       [ -z "$remote_ver" ] || [ "$remote_ver" = "null" ] && remote_ver="?"
       symlink=$(echo "$symlink_map" | grep "^$repo	" | cut -f2)
       [ -z "$symlink" ] && symlink="-"
