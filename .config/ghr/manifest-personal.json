@@ -80,14 +80,6 @@
     }
   },
   {
-    "repo": "tmux/tmux-builds",
-    "asset": "tmux-3.6a-linux-x86_64.tar.gz",
-    "version": "v3.6a",
-    "links": {
-      "tmux": "/usr/local/bin/tmux"
-    }
-  },
-  {
     "repo": "tomasz-tomczyk/crit",
     "asset": "crit-linux-amd64",
     "version": "v0.16.2",
