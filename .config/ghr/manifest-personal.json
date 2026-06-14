@@ -80,6 +80,14 @@
     }
   },
   {
+    "repo": "tree-sitter/tree-sitter",
+    "asset": "tree-sitter-cli-linux-x64.zip",
+    "version": "v0.26.9",
+    "links": {
+      "tree-sitter": "/home/qd/.local/bin/tree-sitter"
+    }
+  },
+  {
     "repo": "yt-dlp/yt-dlp",
     "asset": "yt-dlp",
     "version": "2026.03.17",

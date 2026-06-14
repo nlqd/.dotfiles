@@ -257,6 +257,10 @@ install_repo() {
     ;;
   esac
 
+  # Archives don't always carry the +x bit (and unzip won't add it), so the
+  # picked binary can land non-executable. restore_single chmods; match it here.
+  chmod +x "$dir/$binary"
+
   local symlink_path
   symlink_path=$(prompt_symlink "$binary")
   if ! safe_ln "$dir/$binary" "$symlink_path"; then
