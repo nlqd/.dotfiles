@@ -21,6 +21,7 @@
         // "temperature",
         "backlight",
         "pulseaudio",
+        "custom/denoise",
         "pulseaudio#mic",
         "custom/wireguard",
     ],
@@ -163,6 +164,15 @@
         "format-source": "",
         "format-source-muted": "muted",
         "on-click": "pactl set-source-mute @DEFAULT_SOURCE@ toggle"
+    },
+
+    // Mic denoise indicator: shows a filter glyph only while denoise is on; click to turn off.
+    "custom/denoise": {
+        "exec": "deepfilter-mic status | grep -qx on && echo '{\"text\":\"\",\"tooltip\":\"Mic denoise on (click to turn off)\"}' || echo '{\"text\":\"\"}'",
+        "return-type": "json",
+        "interval": 3,
+        "signal": 8,
+        "on-click": "deepfilter-mic toggle"
     },
 
     "temperature": {

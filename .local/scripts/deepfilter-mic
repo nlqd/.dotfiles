@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# Toggle a DeepFilterNet noise-cancelling virtual microphone on PipeWire.
+#
+# Load-on-demand model. "on" reads whatever source is default right now, spawns
+# a filter-chain (held alive by a backgrounded pw-cli) that captures that mic
+# through the DeepFilterNet LADSPA plugin and exposes a virtual "DeepFilter Mic"
+# source, makes it the default, and moves any live recording streams onto it.
+# "off" kills that process (the kill IS the unload) and restores the mic.
+# Nothing persists across logout and there is no daemon left running.
+#
+# Binding to the current default each time is the "follow default" behaviour:
+# plug in a headset, toggle, and denoise tracks it. The 51 MB plugin is a
+# machine-local artifact under XDG_DATA_HOME (installed by `setup`, not stowed).
+# Live state lives under XDG_RUNTIME_DIR so it self-clears on logout and never
+# reports a stale "on" after a reboot. On a box without PipeWire we no-op, so
+# these dotfiles stay portable (cf. battery-charge-mode).
+
+set -euo pipefail
+
+XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
+CONFIG_FILE="$XDG_CONFIG_HOME/deepfilter-mic/config"
+
+# Defaults, overridable by $CONFIG_FILE.
+ATTENUATION_LIMIT_DB=100
+PLUGIN_PATH="$XDG_DATA_HOME/deepfilter-mic/libdeep_filter_ladspa.so"
+FALLBACK_MIC=""
+PLUGIN_URL="https://github.com/Rikorose/DeepFilterNet/releases/download/v0.5.6/libdeep_filter_ladspa-0.5.6-x86_64-unknown-linux-gnu.so"
+
+# shellcheck source=/dev/null
+[ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+
+STATE_DIR="$XDG_RUNTIME_DIR/deepfilter-mic"
+PID_FILE="$STATE_DIR/pid"
+MIC_FILE="$STATE_DIR/mic"          # node.name of the real mic to restore
+SOURCE_NAME="deepfilter_source"    # node.name of our virtual source
+
+log()    { logger --tag deepfilter-mic "$*"; }
+notify() { command -v notify-send >/dev/null && notify-send --app-name="DeepFilter Mic" "$@" || true; }
+die()    { echo "deepfilter-mic: $*" >&2; exit 1; }
+
+# Nudge the waybar custom/denoise module (signal 8) so the indicator updates
+# instantly however we were toggled. No-op where waybar isn't running.
+refresh_waybar() { command -v waybar >/dev/null && pkill -RTMIN+8 waybar 2>/dev/null || true; }
+
+have_pipewire() { command -v pw-cli >/dev/null && command -v pactl >/dev/null; }
+
+source_exists() { pactl list short sources 2>/dev/null | awk -v n="$1" '$2==n{f=1} END{exit !f}'; }
+
+default_source() { pactl get-default-source 2>/dev/null; }
+
+is_on() {
+    # On iff our process is alive and the virtual source is registered.
+    [ -f "$PID_FILE" ] || return 1
+    local pid; pid=$(cat "$PID_FILE" 2>/dev/null) || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    source_exists "$SOURCE_NAME"
+}
+
+move_recording_streams() {
+    local target="$1" id
+    pactl list short source-outputs 2>/dev/null | awk '{print $1}' | while read -r id; do
+        pactl move-source-output "$id" "$target" 2>/dev/null || true
+    done
+}
+
+cmd_on() {
+    is_on && { log "already on"; return 0; }
+    [ -f "$PLUGIN_PATH" ] || die "plugin missing: $PLUGIN_PATH (run: ${0##*/} setup)"
+
+    local mic; mic=$(default_source)
+    [ -n "$mic" ] || die "no default source to capture"
+    [ "$mic" = "$SOURCE_NAME" ] && { log "default is already deepfilter"; return 0; }
+
+    mkdir -p "$STATE_DIR"
+    printf '%s' "$mic" > "$MIC_FILE"
+
+    # Host the filter-chain in a dedicated PipeWire instance (pipewire -c), not
+    # pw-cli. A pw-cli-loaded node is owned by the CLI client and has no backing
+    # device object, so WirePlumber/pavucontrol hide it from the input-device
+    # list; a daemon-hosted node is a proper, selectable source. We omit
+    # node.dont-reconnect so the source survives a mic blip (suspend, profile
+    # switch) and re-links when the mic returns, rather than self-destructing.
+    local conf="$STATE_DIR/filter-chain.conf"
+    cat > "$conf" <<EOF
+context.properties = { log.level = 0 }
+context.spa-libs = {
+    audio.convert.* = audioconvert/libspa-audioconvert
+    support.*       = support/libspa-support
+}
+context.modules = [
+    { name = libpipewire-module-rt   flags = [ ifexists nofail ] }
+    { name = libpipewire-module-protocol-native }
+    { name = libpipewire-module-client-node }
+    { name = libpipewire-module-adapter }
+    { name = libpipewire-module-filter-chain
+        flags = [ nofail ]
+        args = {
+            node.description = "DeepFilter Mic"
+            media.name       = "DeepFilter Mic"
+            filter.graph = { nodes = [ {
+                type = ladspa name = deepfilter plugin = "$PLUGIN_PATH"
+                label = deep_filter_mono
+                control = { "Attenuation Limit (dB)" = $ATTENUATION_LIMIT_DB } } ] }
+            audio.rate = 48000
+            audio.position = [ MONO ]
+            capture.props  = { node.name = "deepfilter_input" node.passive = true target.object = "$mic" }
+            playback.props = { node.name = "$SOURCE_NAME" node.description = "DeepFilter Mic" media.class = Audio/Source }
+        }
+    }
+]
+EOF
+
+    nohup pipewire -c "$conf" >/dev/null 2>&1 &
+    echo $! > "$PID_FILE"
+
+    local i
+    for i in $(seq 1 30); do
+        source_exists "$SOURCE_NAME" && break
+        sleep 0.1
+    done
+    is_on || { kill "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null || true; rm -f "$PID_FILE" "$MIC_FILE"; die "filter-chain failed to start"; }
+
+    pactl set-default-source "$SOURCE_NAME" 2>/dev/null || true
+    move_recording_streams "$SOURCE_NAME"
+    log "on (capturing $mic)"
+    notify "Noise cancelling on"
+    refresh_waybar
+}
+
+cmd_off() {
+    local mic="$FALLBACK_MIC"
+    [ -f "$MIC_FILE" ] && mic=$(cat "$MIC_FILE")
+    # If the saved mic is gone, pick the first real hardware source.
+    if [ -z "$mic" ] || ! source_exists "$mic"; then
+        mic=$(pactl list short sources 2>/dev/null | awk '{print $2}' \
+              | grep -v "^$SOURCE_NAME$" | grep -v '\.monitor$' | head -1)
+    fi
+
+    if [ -n "$mic" ]; then
+        pactl set-default-source "$mic" 2>/dev/null || true
+        move_recording_streams "$mic"
+    fi
+
+    if [ -f "$PID_FILE" ]; then
+        local pid; pid=$(cat "$PID_FILE" 2>/dev/null || true)
+        [ -n "${pid:-}" ] && kill "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PID_FILE" "$MIC_FILE"
+    log "off (restored ${mic:-unknown})"
+    notify "Noise cancelling off"
+    refresh_waybar
+}
+
+build_from_source() {
+    command -v cargo >/dev/null || die "cargo not found; cannot build"
+    command -v git   >/dev/null || die "git not found; cannot build"
+    local src="${XDG_CACHE_HOME:-$HOME/.cache}/deepfilter-mic/src"
+    echo "Cloning DeepFilterNet v0.5.6 (shallow) -> $src"
+    rm -rf "$src"; mkdir -p "$src"
+    git clone --depth 1 --branch v0.5.6 https://github.com/Rikorose/DeepFilterNet "$src"
+    ( cd "$src" && cargo build --release -p deep-filter-ladspa )
+    cp "$src/target/release/libdeep_filter_ladspa.so" "$PLUGIN_PATH"
+    echo "Built and installed -> $PLUGIN_PATH"
+}
+
+print_integration_hints() {
+    cat <<EOF
+
+Done. Drive it from a terminal, keybind, or menu:
+
+  deepfilter-mic toggle      # flip on/off
+  deepfilter-mic status      # prints: on | off
+
+Sway keybind (~/.config/sway/config):
+  bindsym \$mod+Shift+n exec deepfilter-mic toggle
+
+It is on PATH, so a dmenu/launcher item running 'deepfilter-mic toggle' works as is.
+EOF
+}
+
+cmd_setup() {
+    have_pipewire || die "PipeWire (pw-cli/pactl) not found; nothing to set up here"
+    mkdir -p "$(dirname "$PLUGIN_PATH")"
+
+    if [ -f "$PLUGIN_PATH" ]; then
+        echo "Plugin present: $PLUGIN_PATH"
+    else
+        echo "DeepFilterNet LADSPA plugin not installed (~51 MB)."
+        read -rp "  [Y] download prebuilt  /  [b] build from source  /  [n] abort: " ans
+        case "${ans:-y}" in
+            y|Y|"") curl -fSL --progress-bar -o "$PLUGIN_PATH" "$PLUGIN_URL" ;;
+            b|B)    build_from_source ;;
+            *)      die "aborted" ;;
+        esac
+    fi
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "Writing default config -> $CONFIG_FILE"
+        mkdir -p "$(dirname "$CONFIG_FILE")"
+        cat > "$CONFIG_FILE" <<'EOF'
+# deepfilter-mic settings, sourced on each toggle.
+ATTENUATION_LIMIT_DB=100   # 100 = full; 18-24 medium; 6-12 light
+FALLBACK_MIC=""            # node.name to restore to if the active mic vanished
+EOF
+    fi
+
+    echo "Verifying with a quick on/off cycle..."
+    cmd_on
+    sleep 1
+    cmd_off
+    echo "Verified."
+    print_integration_hints
+}
+
+case "${1:-toggle}" in
+    on)     have_pipewire || { log "no pipewire; skipping"; exit 0; }; cmd_on ;;
+    off)    have_pipewire || { log "no pipewire; skipping"; exit 0; }; cmd_off ;;
+    toggle) have_pipewire || { log "no pipewire; skipping"; exit 0; }
+            if is_on; then cmd_off; else cmd_on; fi ;;
+    status) is_on && echo on || echo off ;;
+    setup)  cmd_setup ;;
+    *) echo "usage: ${0##*/} {toggle|on|off|status|setup}" >&2; exit 1 ;;
+esac
