@@ -10,6 +10,9 @@
 """
 Video Tutorial Processor CLI
 Processes videos by transcribing and speeding up silent gaps.
+
+to be incorperated in the future (if that future arrives):
+    https://github.com/dougcalobrisi/erm
 """
 
 import argparse
