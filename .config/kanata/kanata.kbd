@@ -86,23 +86,24 @@
 (defchordsv2
   ;;   Lateral combos
   ;; right hand
-  (o p) bspc $chord-timeout first-release (lower)
-  (l ;) ret  $chord-timeout first-release ()
+  (i o) bspc $chord-timeout first-release (lower)
+  (k l) ret  $chord-timeout first-release ()
+  (, .) del  $chord-timeout first-release (lower)
   (j k) -    $chord-timeout first-release (raise lower)
   (m ,) =    $chord-timeout first-release (raise lower)
   ;; left hand
-  (q w) esc  $chord-timeout first-release (lower)
-  (z x) tab  $chord-timeout first-release (lower)
-  (w e) S-2  $chord-timeout first-release (raise lower)
+  (w e) esc  $chord-timeout first-release (lower)
+  (x c) tab  $chord-timeout first-release (lower)
+  ;; (w e) S-2  $chord-timeout first-release (raise lower)
   (a s) S-4  $chord-timeout first-release (raise lower)
   (s d) S-5  $chord-timeout first-release (raise lower)
   (d f) S-6  $chord-timeout first-release (raise lower)
+  ;; (x c) S-8  $chord-timeout first-release (raise lower)
 
   ;;   Vertical combos
   ;; left hand
   (w s) S-1  $chord-timeout first-release (raise lower)
   (x s) S-7  $chord-timeout first-release (raise lower)
-  (x c) S-8  $chord-timeout first-release (raise lower)
   ;; right hand
   (i k) S-9  $chord-timeout first-release (raise lower)
   (o l) S-0  $chord-timeout first-release (raise lower)
@@ -112,11 +113,10 @@
   (j m) S-]  $chord-timeout first-release (raise lower)
   (p ;) S-\  $chord-timeout first-release (raise lower)
   (; /) \    $chord-timeout first-release (raise lower)
-  (. /) del  $chord-timeout first-release (lower)
 
   ;;   Other non-traditional combos
-  ;; two rings = caps word
-  (w o) (caps-word 2000) $chord-timeout first-release (raise lower)
+  ;; two index = caps word
+  (r u) (caps-word 2000) $chord-timeout first-release (raise lower)
 
   ;; modifier + raise (instant, replaces the two-hold sequence)
   (a v) @rl-met  $chord-timeout all-released (raise lower)
