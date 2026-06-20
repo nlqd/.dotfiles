@@ -1,2 +1,3 @@
 .vault_pass
 vault.yml.plaintext
+pyinfra/secrets.py

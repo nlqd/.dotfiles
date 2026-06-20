@@ -1,0 +1,29 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["pyinfra"]
+# ///
+#
+# Usage:
+#   ./setup              — full deploy (all roles)
+#   ./setup nginx        — single role
+#   ./setup --dry-run    — pass-through to pyinfra
+
+import subprocess
+import sys
+from pathlib import Path
+
+here = Path(__file__).parent / "pyinfra"
+inventory = str(here / "inventory.py")
+
+ROLES = {"base", "fail2ban", "nginx", "mail", "docker"}
+
+args = sys.argv[1:]
+
+if args and args[0] in ROLES:
+    role = args.pop(0)
+    deploy = str(here / "tasks" / f"{role}.py")
+else:
+    deploy = str(here / "deploy.py")
+
+sys.exit(subprocess.run(["pyinfra", inventory, deploy, *args], cwd=here).returncode)
