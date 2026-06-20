@@ -233,6 +233,7 @@ cmd_reconcile() {
 }
 
 cmd_link_current() {
+  # tmux 3.7: -t {current}/{active} can replace some display-message id queries here
   [[ -n ${TMUX:-} ]] || return 0
   local wid path
   wid=$(tmux display-message -p '#{window_id}' 2>/dev/null) || return 0
@@ -286,6 +287,8 @@ cmd_home() {
 }
 
 # --- gather / scatter: tile a session's agent panes into one window ----------
+# tmux 3.7: floating panes (new-pane, bound to * by default) are orthogonal to gather/scatter:
+# surface a single agent above the tiled layout without touching the window list.
 
 # tmh_gather_view <session>: echo the gather view window id, if the session has one
 tmh_gather_view() {
@@ -436,6 +439,8 @@ cmd_scatter() {
 }
 
 tmh_main() {
+  # tmux 3.7: run-shell expands #{1} #{2} from extra args, so bind-key could pass
+  # the subcommand directly instead of needing one binding per invocation.
   case "${1:-reconcile}" in
     reconcile)    cmd_reconcile ;;
     link-current) cmd_link_current ;;
