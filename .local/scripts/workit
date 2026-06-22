@@ -25,6 +25,10 @@ CLEAR="\033[0m"
 PG_IMAGE="${WORKIT_PG_IMAGE:-docker.io/library/postgres:16-alpine}"
 PG_PASSWORD="${WORKIT_PG_PASSWORD:-postgres}"
 
+# Coat-name override used when the git-branch heuristic can't apply. Set by
+# --name, or WORKIT_NAME in the environment.
+COAT_OVERRIDE="${WORKIT_NAME:-}"
+
 function die {
     printf '%b%s%b\n' "${RED}" "${1}" "${CLEAR}" >&2
     exit 1
@@ -38,14 +42,20 @@ function ok {
     printf '%b%s%b\n' "${GREEN}" "${1}" "${CLEAR}"
 }
 
+# Progressive "what to run next" nudge printed after a state-changing command.
+function hint {
+    printf '  next: %s\n' "${1}"
+}
+
 function usage {
     cat <<EOF
-${PROG} [-C <dir>] <command> — per-worktree network "coat" via a rootless podman pod.
+${PROG} [-C <dir>] [--name <n>] <command> — per-worktree network "coat" via a rootless podman pod.
 
 Each git worktree gets its own network namespace, so every worktree can run
 FE/BE/DB on the SAME default ports (3000/8000/5432) without colliding. Nothing
 is published to the host; enter the coat to reach a service. Rootless, no sudo.
 
+  ${PROG}                  show the coat's state here and what to run next
   ${PROG} up               create + start the coat for the current worktree
   ${PROG} enter            open a shell inside the coat
   ${PROG} run -- <cmd>     run <cmd> inside the coat (as you; writes stay yours)
@@ -57,20 +67,28 @@ is published to the host; enter the coat to reach a service. Rootless, no sudo.
   ${PROG} down [--purge]   remove the coat (--purge also drops the db volume)
 
   -C <dir>                 act on the worktree at <dir> instead of the cwd
+  --name <n>               name the coat explicitly (when not in a git worktree)
 EOF
     exit "${1:-0}"
 }
 
-# Stable, podman-safe coat name for the current worktree. Derived from the branch
-# (worktrees each have a distinct branch); falls back to the worktree directory
-# name when detached. Pure bash, no external commands beyond git.
+# Stable, podman-safe coat name for the current worktree. Source, in order:
+# an explicit override (--name / WORKIT_NAME), the git branch, or the worktree
+# directory name when detached. If none apply (not in a git worktree and no
+# override), it can't operate, so it tells you to pass --name. Pure bash.
 function coat_name {
-    local raw top
-    raw=$(git branch --show-current 2>/dev/null)
-    if [[ -z "${raw}" ]]; then
-        top=$(git rev-parse --show-toplevel 2>/dev/null)
-        [[ -n "${top}" ]] || die "not inside a git repository"
-        raw="${top##*/}"
+    local raw
+    if [[ -n "${COAT_OVERRIDE}" ]]; then
+        raw="${COAT_OVERRIDE}"
+    else
+        raw=$(git branch --show-current 2>/dev/null)
+        if [[ -z "${raw}" ]]; then
+            local top
+            top=$(git rev-parse --show-toplevel 2>/dev/null)
+            [[ -n "${top}" ]] ||
+                die "can't infer a coat name here (not a git worktree). name one: ${PROG} --name <name> ..."
+            raw="${top##*/}"
+        fi
     fi
     local name="${raw,,}"         # lowercase
     name="${name//[^a-z0-9_-]/-}" # disallowed chars -> dash
@@ -97,19 +115,92 @@ function require_coat {
     podman pod exists "${1}" 2>/dev/null || die "no coat for ${1} — run: ${PROG} up"
 }
 
+# Best-effort name for the sandbox we may be running in, else empty. dbox bwrap
+# sandboxes set their UTS hostname to "bubblewrap"; containers leave a marker.
+function sandbox_hint {
+    local host=""
+    read -r host </proc/sys/kernel/hostname 2>/dev/null
+    [[ "${host}" == bubblewrap ]] && {
+        printf 'a bubblewrap (dbox) sandbox'
+        return
+    }
+    [[ -e /run/.containerenv ]] && {
+        printf 'a podman container'
+        return
+    }
+    [[ -e /.dockerenv ]] && printf 'a docker container'
+}
+
+# Coat entry is local nsenter, so the infra pid must live in THIS pid namespace.
+# It won't when podman is a remote client (CONTAINER_HOST set, e.g. a sandbox
+# talking to the host socket): the pod runs on the host and its pid isn't here,
+# which otherwise surfaces as a cryptic "nsenter: cannot open /proc/<pid>/ns/*".
+# The message has to be self-explaining: the caller may not know it's sandboxed.
+function assert_enterable {
+    local pid="${1}" pod="${2}" where
+    [[ -e "/proc/${pid}" ]] && return 0
+    where=$(sandbox_hint)
+    printf '%bcannot enter coat %s: its container runs elsewhere, not in this environment.%b\n' \
+        "${RED}" "${pod}" "${CLEAR}" >&2
+    if [[ -n "${where}" ]]; then
+        printf 'You are inside %s, so podman here is a remote client pointing at another host.\n' "${where}" >&2
+    fi
+    cat >&2 <<EOF
+Entering a coat uses local nsenter, which needs the pod's infra process
+(pid ${pid}) to live in THIS pid namespace. It does not: podman ran the pod on
+the daemon its socket points at, not here. Pointers:
+
+  CONTAINER_HOST = ${CONTAINER_HOST:-unset}
+  DOCKER_HOST    = ${DOCKER_HOST:-unset}
+
+Entering that pod's namespaces from here is impossible by design (it would be a
+sandbox escape). What works from HERE — talk to the container over the socket:
+  podman exec -it ${pod}-db psql -U postgres   # the coat's database
+  podman exec -it ${pod}-db <cmd>              # any command in the db container
+
+To truly enter the coat (${PROG} run / enter), run ${PROG} where podman is
+local — typically the host, not this sandbox.
+EOF
+    exit 1
+}
+
+# No-arg / progressive guidance: where you are and the next step to run.
+function cmd_suggest {
+    local pod
+    if ! pod=$(coat_name 2>/dev/null); then
+        printf '%s — per-worktree network coat.\n' "${PROG}"
+        printf "  can't infer a coat name here (not a git worktree).\n"
+        printf '  name one explicitly:  %s --name <name> up\n' "${PROG}"
+        printf '  full help:            %s help\n' "${PROG}"
+        return 0
+    fi
+    if command -v podman >/dev/null 2>&1 && podman pod exists "${pod}" 2>/dev/null; then
+        printf 'coat %s is up.\n' "${pod}"
+        printf '  work:     %s run -- <cmd>   |   %s enter   |   %s db\n' "${PROG}" "${PROG}" "${PROG}"
+        printf '  inspect:  %s status   |   %s ls\n' "${PROG}" "${PROG}"
+        printf '  teardown: %s down [--purge]\n' "${PROG}"
+    else
+        printf 'no coat yet for %s.\n' "${pod}"
+        printf '  set it up:  %s up      then: %s db, %s run -- <cmd>\n' "${PROG}" "${PROG}" "${PROG}"
+        printf '  all coats:  %s ls\n' "${PROG}"
+        printf '  full help:  %s help\n' "${PROG}"
+    fi
+}
+
 function cmd_up {
     local pod top branch
     pod=$(coat_name) || exit 1
-    top=$(git rev-parse --show-toplevel 2>/dev/null) || die "not inside a git repository"
-    branch=$(git branch --show-current 2>/dev/null)
+    # Worktree path/branch are best-effort: a --name coat may live outside a repo.
+    top=$(git rev-parse --show-toplevel 2>/dev/null) || top=""
+    branch=$(git branch --show-current 2>/dev/null) || branch=""
     [[ -n "${branch}" ]] || branch="(detached)"
     if podman pod exists "${pod}" 2>/dev/null; then
-        # Same name from a different repo => a real collision. Labels let us
+        # Same name from a different worktree => a real collision. Labels let us
         # detect it and refuse, rather than silently reuse the wrong coat.
         local owner
         owner=$(podman pod inspect "${pod}" --format '{{index .Labels "workit.worktree"}}' 2>/dev/null)
-        [[ -z "${owner}" || "${owner}" == "${top}" ]] ||
-            die "coat ${pod} already belongs to another worktree (${owner}); down it first or use distinct branch names"
+        [[ -z "${owner}" || -z "${top}" || "${owner}" == "${top}" ]] ||
+            die "coat ${pod} already belongs to another worktree (${owner}); down it first or use a distinct --name"
     else
         podman pod create --name "${pod}" \
             --label workit.worktree="${top}" \
@@ -119,7 +210,8 @@ function cmd_up {
     # Start the pod so its infra container runs and holds the netns — without
     # this the coat has no enterable namespace.
     podman pod start "${pod}" >/dev/null || die "failed to start coat ${pod}"
-    ok "coat ${pod} up — enter with: ${PROG} enter"
+    ok "coat ${pod} up"
+    hint "${PROG} db (postgres)  |  ${PROG} run -- <cmd>  |  ${PROG} enter"
 }
 
 function cmd_enter {
@@ -127,6 +219,7 @@ function cmd_enter {
     pod=$(coat_name) || exit 1
     require_coat "${pod}"
     pid=$(infra_pid "${pod}") || exit 1
+    assert_enterable "${pid}" "${pod}"
     exec nsenter --target "${pid}" --user --net --preserve-credentials -- "${SHELL:-/bin/bash}"
 }
 
@@ -137,6 +230,7 @@ function cmd_run {
     pod=$(coat_name) || exit 1
     require_coat "${pod}"
     pid=$(infra_pid "${pod}") || exit 1
+    assert_enterable "${pid}" "${pod}"
     # --preserve-credentials keeps your real uid, so files written into the
     # worktree stay owned by you (not a remapped subuid).
     exec nsenter --target "${pid}" --user --net --preserve-credentials -- "$@"
@@ -163,8 +257,8 @@ function cmd_db {
         -e POSTGRES_PASSWORD="${PG_PASSWORD}" \
         -v "${vol}:/var/lib/postgresql/data" \
         "${PG_IMAGE}" >/dev/null || die "failed to start postgres in ${pod}"
-    ok "postgres up in ${pod} — reach it inside the coat at localhost:5432"
-    printf '  e.g. %s run -- psql -h localhost -U postgres\n' "${PROG}"
+    ok "postgres up in ${pod} (localhost:5432 inside the coat)"
+    hint "${PROG} run -- psql -h localhost -U postgres  |  ${PROG} enter"
 }
 
 function cmd_status {
@@ -248,57 +342,42 @@ function cmd_down {
     else
         ok "coat ${pod} removed (db volume ${pod}-pgdata kept)"
     fi
+    hint "${PROG} up (recreate)  |  remove the worktree, then ${PROG} gc"
 }
 
-command -v podman >/dev/null 2>&1 || die "podman is required but not found"
-command -v nsenter >/dev/null 2>&1 || die "nsenter is required but not found"
+# Operational commands need the container + namespace tooling; help/no-arg don't.
+function need_tools {
+    command -v podman >/dev/null 2>&1 || die "podman is required but not found"
+    command -v nsenter >/dev/null 2>&1 || die "nsenter is required but not found"
+}
 
-# Git-style -C: operate as if run from <dir>, so tooling can target any
-# worktree's coat from anywhere.
-if [[ "${1:-}" == "-C" ]]; then
-    [[ -n "${2:-}" ]] || die "-C requires a directory argument"
-    cd "${2}" || die "cannot cd to ${2}"
-    shift 2
-fi
+# Leading global flags, any order, before the subcommand:
+#   -C <dir>       act as if run from <dir> (target a coat from anywhere)
+#   --name <name>  name the coat explicitly when branch heuristics can't apply
+while [[ $# -gt 0 ]]; do
+    case "${1}" in
+    -C)
+        [[ -n "${2:-}" ]] || die "-C requires a directory argument"
+        cd "${2}" || die "cannot cd to ${2}"
+        shift 2
+        ;;
+    --name)
+        [[ -n "${2:-}" ]] || die "--name requires a name argument"
+        COAT_OVERRIDE="${2}"
+        shift 2
+        ;;
+    *) break ;;
+    esac
+done
 
 case "${1:-}" in
-up)
-    shift
-    cmd_up "$@"
-    ;;
-enter)
-    shift
-    cmd_enter "$@"
-    ;;
-run)
-    shift
-    cmd_run "$@"
-    ;;
-pid)
-    shift
-    cmd_pid "$@"
-    ;;
-db)
-    shift
-    cmd_db "$@"
-    ;;
-status)
-    shift
-    cmd_status "$@"
-    ;;
-ls)
-    shift
-    cmd_ls "$@"
-    ;;
-gc)
-    shift
-    cmd_gc "$@"
-    ;;
-down)
-    shift
-    cmd_down "$@"
-    ;;
 help | -h | --help) usage 0 ;;
-"") usage 1 ;;
+"") cmd_suggest ;;
+up | enter | run | pid | db | status | ls | gc | down)
+    need_tools
+    sub="${1}"
+    shift
+    "cmd_${sub}" "$@"
+    ;;
 *) die "unknown command: ${1} (try: ${PROG} help)" ;;
 esac

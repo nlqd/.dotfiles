@@ -181,4 +181,5 @@ fi
 eval "$(gh completion --shell zsh)"
 complete -C '/usr/local/bin/aws_completer' aws
 eval "$(kubectl completion zsh)"
+eval "$(helm completion zsh)"
 eval "$(hcloud completion zsh)"
