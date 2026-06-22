@@ -126,12 +126,12 @@ resolve_story() {
 #:[stories list] GET /projects/{project_id}/stories
 #:[stories list] query: state label story_type cursor limit fields
 #:[stories create] POST /projects/{project_id}/stories
-#:[stories create] body: current_state description estimate icebox labels[] name* owners[] priority_id story_type
+#:[stories create] body: current_state description estimate icebox labels[] move_to name* owners[] priority_id story_type
 #:[stories bulk_transition] POST /projects/{project_id}/stories/bulk_transition
 #:[stories bulk_transition] body: reason story_ids[]* to*
 #:[stories get] GET /projects/{project_id}/stories/{story_id}
 #:[stories update] PUT /projects/{project_id}/stories/{story_id}
-#:[stories update] body: current_state description estimate force_state_change icebox iteration_id labels[] name position priority_id story_type
+#:[stories update] body: current_state description estimate force_state_change icebox labels[] move_to name position priority_id story_type
 #:[stories delete] DELETE /projects/{project_id}/stories/{story_id}
 #:[comments list] GET /projects/{project_id}/stories/{story_id}/comments
 #:[comments list] query: cursor limit
@@ -151,6 +151,12 @@ resolve_story() {
 #:[stories transition] POST /projects/{project_id}/stories/{story_id}/transitions
 #:[stories transition] body: reason to*
 # <<< EA_API
+# Hand-written entries for endpoints absent from the OpenAPI spec.
+# These survive `ea api gen` because they live outside the auto-gen markers.
+#:[links list] GET /projects/{project_id}/stories/{story_id}/links
+#:[links create] POST /projects/{project_id}/stories/{story_id}/links
+#:[links create] body: url*
+#:[links delete] DELETE /projects/{project_id}/stories/{story_id}/links/{link_id}
 
 # Build a JSON body from --key value pairs. Values coerce via JSON (numbers,
 # booleans, arrays, objects); anything that is not valid JSON stays a string.
@@ -195,10 +201,21 @@ events_tsv() {
 }
 render() {
   case "$1 $2" in
-    "stories list")  story_line | tab 7 ;;
-    "stories get")   render_story_detail ;;
-    "events list")   events_tsv | tab 4 ;;
-    *)               jq . ;;
+    "stories list")      story_line | tab 7 ;;
+    "stories get")       render_story_detail ;;
+    "stories transition")
+      local body; body=$(cat)
+      jq -r '"-> \(.current_state)  [\(.story_ref)]"' <<<"$body"
+      local st; st=$(jq -r '.current_state // empty' <<<"$body")
+      case "$st" in accepted|delivered|finished|rejected)
+        echo "  Tip: attach the PR with: ea links create <ref> --url <url>" ;;
+      esac ;;
+    "links list")
+      jq -r '(.items? // .) | .[]? | "[\(.id // .link_id)]\t\(.url)"' | tab 2 ;;
+    "links create")
+      jq -r '"linked [\(.id // .link_id)] \(.url)"' ;;
+    "events list")       events_tsv | tab 4 ;;
+    *)                   jq . ;;
   esac
 }
 
@@ -280,6 +297,7 @@ entity_help() {
   echo "ea $1 ACTION:"
   grep -oE "^#:\[$1 [a-z_]+\][[:space:]]+(GET|POST|PUT|DELETE)" "$SELF" \
     | sed -E "s/^#:\[$1 ([a-z_]+)\].*/  \1/" | sort -u || true
+  grep -E "^#@:\[$1 " "$SELF" | sed -E 's/^#@:\[[^]]+\] /  /' || true
 }
 cmd_help() {
   cat <<EOF
@@ -326,6 +344,8 @@ cmd_dash() {
   done
 }
 
+
+#@:[stories owner] owner add|rm <ref> [--member <id>]  Add/remove a story owner
 # Owners: POST/DELETE /projects/{pid}/stories/{sid}/owners[/{member_id}]. Absent
 # from the OpenAPI spec, so wired by hand. --member defaults to config .member_id.
 cmd_owner() {

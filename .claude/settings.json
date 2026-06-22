@@ -44,11 +44,9 @@
     "context7@claude-plugins-official": true,
     "crit@crit": true,
     "code-review@claude-plugins-official": true,
-    "learning-opportunities-auto@learning-opportunities": true,
     "security-guidance@claude-plugins-official": true,
     "remember@claude-plugins-official": true,
     "rust@east-agile": true,
-    "learning-opportunities@learning-opportunities": true,
     "frontend-design@claude-plugins-official": true,
     "ast-grep@ast-grep-marketplace": true
   },
