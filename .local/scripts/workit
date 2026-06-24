@@ -10,16 +10,30 @@
 #
 # Coat entry uses
 #   nsenter --target <infra-pid> --user --net --preserve-credentials
-# which keeps your real uid, so files written into the worktree stay yours.
+# Joining --user (the pod's rootless userns) is what keeps your real uid, so
+# files written into the worktree stay yours; --preserve-credentials additionally
+# keeps your gid and supplementary groups (nsenter would otherwise reset them).
 #
 # Requires: podman (rootless), nsenter, bash 4+ (Linux only — see `workit help`).
 
 PROG="${0##*/}"
 
-RED="\033[0;31m"
-GREEN="\033[0;32m"
-YELLOW="\033[0;33m"
-CLEAR="\033[0m"
+# bash 4+ is assumed throughout (${var,,}, mapfile, read -d ''). Fail clean.
+if [[ -z "${BASH_VERSINFO:-}" || "${BASH_VERSINFO[0]}" -lt 4 ]]; then
+    echo "${0##*/} requires bash 4+ (found ${BASH_VERSION:-unknown})" >&2
+    exit 1
+fi
+
+# Color only when stdout is a terminal (and NO_COLOR isn't set), so piped/captured
+# output stays clean.
+if [[ -n "${NO_COLOR:-}" || ! -t 1 ]]; then
+    RED="" GREEN="" YELLOW="" CLEAR=""
+else
+    RED="\033[0;31m"
+    GREEN="\033[0;32m"
+    YELLOW="\033[0;33m"
+    CLEAR="\033[0m"
+fi
 
 # Postgres knobs, overridable from the environment.
 PG_IMAGE="${WORKIT_PG_IMAGE:-docker.io/library/postgres:16-alpine}"
@@ -61,13 +75,21 @@ is published to the host; enter the coat to reach a service. Rootless, no sudo.
   ${PROG} run -- <cmd>     run <cmd> inside the coat (as you; writes stay yours)
   ${PROG} pid              print the coat's infra PID (build your own nsenter)
   ${PROG} db               start postgres in the coat (localhost:5432, isolated)
+  ${PROG} compose [up|down] run/stop this repo's compose.yaml in the coat (up: -f <file>)
   ${PROG} status           show the coat and what's in it
   ${PROG} ls               list all coats; flag orphans whose worktree is gone
   ${PROG} gc [-n]          remove orphaned coats (-n / --dry-run: just list)
-  ${PROG} down [--purge]   remove the coat (--purge also drops the db volume)
+  ${PROG} down [--purge]   remove the coat (--purge also drops its data volumes)
 
   -C <dir>                 act on the worktree at <dir> instead of the cwd
   --name <n>               name the coat explicitly (when not in a git worktree)
+
+What runs where:
+  Bring services up with podman (${PROG} db / ${PROG} compose) — these attach to
+  the coat, so inside it they answer on default ports. Do NOT use docker or
+  'docker compose': the rootful docker daemon owns the HOST network and publishes
+  there, not in the coat, so an in-coat process (cargo, psql, ...) won't see it.
+  Run your own code in the coat with '${PROG} run -- <cmd>' or '${PROG} enter'.
 EOF
     exit "${1:-0}"
 }
@@ -115,6 +137,23 @@ function require_coat {
     podman pod exists "${1}" 2>/dev/null || die "no coat for ${1} — run: ${PROG} up"
 }
 
+# True if the named container exists AND is running. An exited container still
+# "exists", so `podman container exists` alone would treat a crashed service as up.
+function container_running {
+    local s
+    s=$(podman container inspect "${1}" --format '{{.State.Running}}' 2>/dev/null) || return 1
+    [[ "${s}" == true ]]
+}
+
+# Reject stray args. Usually a global flag (--name/-C) placed AFTER the command,
+# which the leading parser never saw and would otherwise silently ignore, leaving
+# you operating on the wrong coat.
+function no_args {
+    local cmd="${1}"
+    shift
+    [[ $# -eq 0 ]] || die "${PROG} ${cmd} takes no arguments; put global flags (--name/-C) before the command"
+}
+
 # Best-effort name for the sandbox we may be running in, else empty. dbox bwrap
 # sandboxes set their UTS hostname to "bubblewrap"; containers leave a marker.
 function sandbox_hint {
@@ -154,9 +193,9 @@ the daemon its socket points at, not here. Pointers:
   DOCKER_HOST    = ${DOCKER_HOST:-unset}
 
 Entering that pod's namespaces from here is impossible by design (it would be a
-sandbox escape). What works from HERE — talk to the container over the socket:
-  podman exec -it ${pod}-db psql -U postgres   # the coat's database
-  podman exec -it ${pod}-db <cmd>              # any command in the db container
+sandbox escape). What works from HERE — talk to the containers over the socket:
+  podman ps --pod --filter pod=${pod}      # the coat's containers
+  podman exec -it <container> <cmd>         # run a command in one of them
 
 To truly enter the coat (${PROG} run / enter), run ${PROG} where podman is
 local — typically the host, not this sandbox.
@@ -174,22 +213,37 @@ function cmd_suggest {
         printf '  full help:            %s help\n' "${PROG}"
         return 0
     fi
-    if command -v podman >/dev/null 2>&1 && podman pod exists "${pod}" 2>/dev/null; then
+    if ! command -v podman >/dev/null 2>&1; then
+        printf '%s needs rootless podman, which is not installed. Install it first.\n' "${PROG}"
+        return 0
+    fi
+    # A compose file means "infra" is this repo's stack; steer to compose and warn
+    # off docker. Otherwise the generic single postgres is the natural infra step.
+    local cfile infra
+    if cfile=$(compose_file 2>/dev/null); then
+        infra="${PROG} compose up   (runs ${cfile} in the coat, NOT docker compose)"
+    else
+        infra="${PROG} db   (postgres inside the coat)"
+    fi
+    if podman pod exists "${pod}" 2>/dev/null; then
         printf 'coat %s is up.\n' "${pod}"
-        printf '  work:     %s run -- <cmd>   |   %s enter   |   %s db\n' "${PROG}" "${PROG}" "${PROG}"
+        printf '  infra:    %s\n' "${infra}"
+        printf '  work:     %s run -- <cmd>   |   %s enter\n' "${PROG}" "${PROG}"
         printf '  inspect:  %s status   |   %s ls\n' "${PROG}" "${PROG}"
         printf '  teardown: %s down [--purge]\n' "${PROG}"
     else
         printf 'no coat yet for %s.\n' "${pod}"
-        printf '  set it up:  %s up      then: %s db, %s run -- <cmd>\n' "${PROG}" "${PROG}" "${PROG}"
-        printf '  all coats:  %s ls\n' "${PROG}"
-        printf '  full help:  %s help\n' "${PROG}"
+        printf '  set it up:  %s up\n' "${PROG}"
+        printf '  then:       %s\n' "${infra}"
+        printf '  all coats:  %s ls   |   full help: %s help\n' "${PROG}" "${PROG}"
     fi
 }
 
-function cmd_up {
-    local pod top branch
-    pod=$(coat_name) || exit 1
+# Create + start the coat (pod) for ${1} if it isn't already, collision-guarded.
+# No output — callers that want a message print their own. Shared by `up` and
+# `compose up` so the latter is a one-shot (no separate `up` needed first).
+function ensure_coat {
+    local pod="${1}" top branch owner
     # Worktree path/branch are best-effort: a --name coat may live outside a repo.
     top=$(git rev-parse --show-toplevel 2>/dev/null) || top=""
     branch=$(git branch --show-current 2>/dev/null) || branch=""
@@ -197,24 +251,35 @@ function cmd_up {
     if podman pod exists "${pod}" 2>/dev/null; then
         # Same name from a different worktree => a real collision. Labels let us
         # detect it and refuse, rather than silently reuse the wrong coat.
-        local owner
         owner=$(podman pod inspect "${pod}" --format '{{index .Labels "workit.worktree"}}' 2>/dev/null)
         [[ -z "${owner}" || -z "${top}" || "${owner}" == "${top}" ]] ||
             die "coat ${pod} already belongs to another worktree (${owner}); down it first or use a distinct --name"
     else
+        # `pod create` is atomic. If a concurrent invocation wins the race the
+        # name is taken but the coat is fine, so only fail if it's still absent.
         podman pod create --name "${pod}" \
             --label workit.worktree="${top}" \
-            --label workit.branch="${branch}" >/dev/null ||
+            --label workit.branch="${branch}" >/dev/null 2>&1 ||
+            podman pod exists "${pod}" 2>/dev/null ||
             die "failed to create coat ${pod}"
     fi
     # Start the pod so its infra container runs and holds the netns — without
     # this the coat has no enterable namespace.
     podman pod start "${pod}" >/dev/null || die "failed to start coat ${pod}"
+}
+
+function cmd_up {
+    no_args up "$@"
+    local pod
+    pod=$(coat_name) || exit 1
+    ensure_coat "${pod}"
     ok "coat ${pod} up"
-    hint "${PROG} db (postgres)  |  ${PROG} run -- <cmd>  |  ${PROG} enter"
+    hint "${PROG} db (postgres)  |  ${PROG} compose up  |  ${PROG} run -- <cmd>  |  ${PROG} enter"
 }
 
 function cmd_enter {
+    no_args enter "$@"
+    command -v nsenter >/dev/null 2>&1 || die "nsenter is required to enter a coat but was not found"
     local pod pid
     pod=$(coat_name) || exit 1
     require_coat "${pod}"
@@ -224,19 +289,27 @@ function cmd_enter {
 }
 
 function cmd_run {
-    [[ "${1:-}" == "--" ]] && shift
+    # A leading -- separates the command; without it, a leading flag is a global
+    # flag placed too late (-- lets you run a command that itself starts with -).
+    if [[ "${1:-}" == "--" ]]; then
+        shift
+    elif [[ "${1:-}" == -* ]]; then
+        die "put global flags (--name/-C) before 'run', and use -- before the command: ${PROG} run -- <cmd>"
+    fi
     [[ "$#" -gt 0 ]] || die "usage: ${PROG} run -- <cmd> [args...]"
+    command -v nsenter >/dev/null 2>&1 || die "nsenter is required to enter a coat but was not found"
     local pod pid
     pod=$(coat_name) || exit 1
     require_coat "${pod}"
     pid=$(infra_pid "${pod}") || exit 1
     assert_enterable "${pid}" "${pod}"
-    # --preserve-credentials keeps your real uid, so files written into the
-    # worktree stay owned by you (not a remapped subuid).
+    # --user joins the coat's rootless userns so writes into the worktree keep
+    # your uid; --preserve-credentials keeps gid + supplementary groups too.
     exec nsenter --target "${pid}" --user --net --preserve-credentials -- "$@"
 }
 
 function cmd_pid {
+    no_args pid "$@"
     local pod pid
     pod=$(coat_name) || exit 1
     require_coat "${pod}"
@@ -245,23 +318,360 @@ function cmd_pid {
 }
 
 function cmd_db {
+    no_args db "$@"
     local pod
     pod=$(coat_name) || exit 1
     require_coat "${pod}"
     local name="${pod}-db" vol="${pod}-pgdata"
-    if podman container exists "${name}" 2>/dev/null; then
-        warn "db ${name} already exists"
+    if container_running "${name}"; then
+        warn "db ${name} already running"
         return 0
     fi
-    podman run -d --pod "${pod}" --name "${name}" \
+    # A crashed db still "exists"; recreate it rather than leave a corpse.
+    podman container exists "${name}" 2>/dev/null && podman rm --force "${name}" >/dev/null 2>&1
+    ensure_volume "${pod}" "${vol}"
+    if ! podman run -d --pod "${pod}" --name "${name}" \
         -e POSTGRES_PASSWORD="${PG_PASSWORD}" \
         -v "${vol}:/var/lib/postgresql/data" \
-        "${PG_IMAGE}" >/dev/null || die "failed to start postgres in ${pod}"
+        "${PG_IMAGE}" >/dev/null 2>&1; then
+        # Lost a concurrent race? If it's running now, that's fine.
+        container_running "${name}" && {
+            warn "db ${name} already up (concurrent)"
+            return 0
+        }
+        die "failed to start postgres in ${pod}"
+    fi
     ok "postgres up in ${pod} (localhost:5432 inside the coat)"
     hint "${PROG} run -- psql -h localhost -U postgres  |  ${PROG} enter"
 }
 
+# First compose file in the cwd, or non-zero if none.
+function compose_file {
+    local f
+    for f in compose.yaml compose.yml docker-compose.yaml docker-compose.yml; do
+        if [[ -f "${f}" ]]; then
+            printf '%s' "${f}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Translate a compose file into per-service `podman run` plans. mode=names lists
+# service names; mode=plan emits, per service: a "NAME=<container>" line, then the
+# podman argv one-per-line, then a blank line. Ports/networks/depends_on are
+# intentionally dropped: inside the coat each service binds its own container port
+# on default, and the pod is the network. Named volumes are coat-prefixed so data
+# is per-worktree; bind mounts resolve relative to the compose file.
+function _compose_translate {
+    python3 - "${1}" "${2}" "${3}" <<'PY'
+import os, re, sys, yaml, shlex
+
+pod, path, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+base = os.path.dirname(os.path.abspath(path))
+
+# docker-compose-style interpolation, applied to the whole file from the invoking
+# environment so a value like ${DB_PASSWORD:-dev} resolves instead of reaching
+# podman as the literal string. Supports $VAR, ${VAR}, ${VAR:-default},
+# ${VAR-default}, ${VAR:?err}, ${VAR:+alt}, nested defaults, and $$ -> literal $.
+# A malformed ${...} is an error; a literal $ must be written $$.
+def resolve(expr):
+    m = re.match(r"^([A-Za-z_]\w*)(:?[-?+])?(.*)$", expr, re.S)
+    if not m:
+        sys.exit("workit compose: invalid interpolation ${%s} (write a literal $ as $$)" % expr)
+    var, op, arg = m.group(1), m.group(2), m.group(3)
+    if not op and arg:  # e.g. ${A B} / ${A.B}: a name with trailing junk, not a default
+        sys.exit("workit compose: invalid interpolation ${%s} (write a literal $ as $$)" % expr)
+    val = os.environ.get(var)
+    if not op:
+        if val is None:
+            sys.stderr.write("workit compose: warning: $%s is unset, using empty string\n" % var)
+        return val or ""
+    has = val not in (None, "") if op.startswith(":") else val is not None
+    ch = op[-1]
+    if ch == "-":
+        return val if has else expand(arg)
+    if ch == "+":
+        return expand(arg) if has else ""
+    if not has:  # ":?" / "?" -> required
+        sys.exit("workit compose: %s" % (expand(arg) or var + " is required but unset"))
+    return val
+
+
+def expand(s):
+    if "$" not in s:
+        return s
+    out, i, n = [], 0, len(s)
+    while i < n:
+        c = s[i]
+        if c != "$":
+            out.append(c)
+            i += 1
+        elif i + 1 < n and s[i + 1] == "$":
+            out.append("$")  # $$ -> literal $
+            i += 2
+        elif i + 1 < n and s[i + 1] == "{":
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if s[j] == "{":
+                    depth += 1
+                elif s[j] == "}":
+                    depth -= 1
+                    if not depth:
+                        break
+                j += 1
+            if depth:
+                sys.exit("workit compose: unterminated ${...} in %r" % s)
+            out.append(resolve(s[i + 2:j]))  # inner may itself nest; resolve recurses
+            i = j + 1
+        elif i + 1 < n and (s[i + 1].isalpha() or s[i + 1] == "_"):
+            j = i + 1
+            while j < n and (s[j].isalnum() or s[j] == "_"):
+                j += 1
+            out.append(resolve(s[i + 1:j]))
+            i = j
+        else:  # a lone $ not starting a reference: keep it literal
+            out.append("$")
+            i += 1
+    return "".join(out)
+
+
+def interpolate(x):
+    if isinstance(x, str):
+        return expand(x)
+    if isinstance(x, list):
+        return [interpolate(i) for i in x]
+    if isinstance(x, dict):
+        return {k: interpolate(v) for k, v in x.items()}
+    return x
+
+
+def qualify(image):
+    # Compose authors write Docker Hub short names ("postgres", "axllent/mailpit")
+    # and rely on docker's implicit docker.io. Rootless podman won't assume a
+    # registry, so make it explicit instead of depending on registries.conf.
+    head = image.split("/", 1)[0]
+    if "/" not in image:
+        return "docker.io/library/" + image
+    if "." in head or ":" in head or head == "localhost":
+        return image
+    return "docker.io/" + image
+
+
+def resolve_bind(src):
+    return os.path.abspath(os.path.join(base, os.path.expanduser(src)))
+
+
+def named_volume(svc, src):
+    # A named (non-bind) volume becomes a per-coat volume. After interpolation an
+    # empty or slash-bearing source is malformed (docker would reject it too).
+    if not src:
+        sys.exit("workit compose: %s has a volume with an empty source" % svc)
+    if "/" in src:
+        sys.exit("workit compose: %s named-volume source %r must not contain a slash" % (svc, src))
+    return "%s-%s" % (pod, src)
+
+
+with open(path) as fh:
+    doc = interpolate(yaml.safe_load(fh) or {})
+services = doc.get("services") or {}
+
+for svc, spec in services.items():
+    spec = spec or {}
+    # Informational warnings print once (plan mode); the names pre-flight stays
+    # quiet but still runs the hard-error checks below, so a bad volume source
+    # fails validation BEFORE any container is created (no partial bring-up).
+    warn = mode != "names"
+    # Profiled services are off by default in compose, so skip them (matches a
+    # plain `docker compose up` with no --profile).
+    if spec.get("profiles"):
+        if warn:
+            sys.stderr.write("workit compose: skipping %s (assigned to profiles; not started)\n" % svc)
+        continue
+    image = spec.get("image")
+    if not image:
+        if warn:
+            sys.stderr.write("workit compose: skipping %s (no image; build-only unsupported)\n" % svc)
+        continue
+    if warn and spec.get("extends"):
+        sys.stderr.write("workit compose: warning: %s uses 'extends', which is not resolved (inherited config dropped)\n" % svc)
+    if warn and spec.get("env_file"):
+        sys.stderr.write("workit compose: %s has env_file, which is not loaded (inline environment only)\n" % svc)
+
+    # Build the plan in BOTH modes so the names pre-flight fires the same hard
+    # errors (bad volume source, bad interpolation) up front. workit.compose
+    # labels the container so `compose down` can find it by label later.
+    argv = ["run", "-d", "--pod", pod, "--name", "%s-%s" % (pod, svc), "--label", "workit.compose=1"]
+
+    env = spec.get("environment")
+    if isinstance(env, dict):
+        pairs = [(str(k), "" if v is None else str(v)) for k, v in env.items()]
+    elif isinstance(env, list):
+        pairs = []
+        for e in env:
+            k, eq, v = str(e).partition("=")
+            pairs.append((k, v if eq else os.environ.get(k, "")))
+    else:
+        pairs = []
+    for k, v in pairs:
+        argv += ["-e", "%s=%s" % (k, v)]
+
+    named = []  # per-coat named volumes, emitted so the shell can label them
+    for vol in spec.get("volumes") or []:
+        if isinstance(vol, dict):
+            tgt = vol.get("target", "")
+            if vol.get("type") == "bind":
+                src = resolve_bind(vol.get("source", ""))
+            else:
+                src = named_volume(svc, vol.get("source", ""))
+                named.append(src)
+            v = "%s:%s" % (src, tgt) if tgt else src
+            if vol.get("read_only"):
+                v += ":ro"
+            argv += ["-v", v]
+            continue
+        raw, _, rest = str(vol).partition(":")
+        if raw.startswith(("/", ".", "~")):
+            src = resolve_bind(raw)
+        else:
+            src = named_volume(svc, raw)
+            named.append(src)
+        argv += ["-v", "%s:%s" % (src, rest) if rest else src]
+
+    argv.append(qualify(image))
+    cmd = spec.get("command")
+    if isinstance(cmd, str):
+        argv += shlex.split(cmd)
+    elif isinstance(cmd, list):
+        argv += [str(c) for c in cmd]
+
+    if mode == "names":  # validation done; the plan stream is plan mode only
+        print(svc)
+        continue
+
+    # NUL-framed record: name, arg-count, the args, then volume-count and the
+    # named volumes. A NUL can't occur inside a podman argument, so values with
+    # embedded newlines or empty strings can't desync the stream. The volume list
+    # is explicit (not re-derived from argv) so a `-v` inside command: can't be
+    # mistaken for a mount.
+    sys.stdout.write("%s-%s\0%d\0" % (pod, svc, len(argv)))
+    for a in argv:
+        sys.stdout.write(a + "\0")
+    sys.stdout.write("%d\0" % len(named))
+    for vname in named:
+        sys.stdout.write(vname + "\0")
+PY
+}
+
+function compose_up {
+    local pod="${1}" file="${2}"
+    # Validate first (surfaces YAML / interpolation errors); the stream below runs
+    # inside the loop, where its exit status is masked.
+    _compose_translate "${pod}" "${file}" names >/dev/null ||
+        die "could not read services from ${file}"
+    # Records are NUL-framed: a name, an arg count, then that many args. A NUL
+    # can't appear in a podman arg, so empty or newline-bearing values can't
+    # desync the stream.
+    local name n vn i arg started=0
+    local -a argv vols
+    while IFS= read -r -d '' name; do
+        IFS= read -r -d '' n || die "compose plan truncated (no arg count for ${name})"
+        argv=()
+        for ((i = 0; i < n; i++)); do
+            IFS= read -r -d '' arg || die "compose plan truncated (args for ${name})"
+            argv+=("${arg}")
+        done
+        IFS= read -r -d '' vn || die "compose plan truncated (no volume count for ${name})"
+        vols=()
+        for ((i = 0; i < vn; i++)); do
+            IFS= read -r -d '' arg || die "compose plan truncated (volumes for ${name})"
+            vols+=("${arg}")
+        done
+        if container_running "${name}"; then
+            warn "service ${name} already up, skipping"
+            continue
+        fi
+        # A crashed service still "exists"; recreate it rather than skip a corpse.
+        podman container exists "${name}" 2>/dev/null && podman rm --force "${name}" >/dev/null 2>&1
+        # Tag this service's named volumes with the coat so --purge finds them later.
+        for arg in "${vols[@]}"; do
+            [[ -n "${arg}" ]] && ensure_volume "${pod}" "${arg}"
+        done
+        if ! podman "${argv[@]}" >/dev/null 2>&1; then
+            # Lost a concurrent race? If it's running now, that's fine.
+            container_running "${name}" && {
+                warn "service ${name} already up (concurrent), skipping"
+                continue
+            }
+            die "failed to start ${name}"
+        fi
+        ok "started ${name}"
+        started=$((started + 1))
+    done < <(_compose_translate "${pod}" "${file}" plan || true)
+    ok "compose up complete in ${pod} (${started} started)"
+    hint "${PROG} run -- <cmd>  |  ${PROG} enter   (services on default ports inside the coat)"
+}
+
+function compose_down {
+    local pod="${1}" cname n=0
+    if ! podman pod exists "${pod}" 2>/dev/null; then
+        warn "no coat for ${pod}"
+        return 0
+    fi
+    # Find compose-created containers by label, not by re-reading the file, so a
+    # renamed/removed service is still torn down and no compose file is needed.
+    while IFS= read -r cname; do
+        [[ -n "${cname}" ]] || continue
+        if podman rm --force "${cname}" >/dev/null 2>&1; then
+            ok "removed ${cname}"
+            n=$((n + 1))
+        fi
+    done < <(podman ps -a --filter "pod=${pod}" --filter "label=workit.compose=1" --format '{{.Names}}' 2>/dev/null || true)
+    [[ ${n} -gt 0 ]] || echo "no compose services to remove"
+}
+
+# Bring this worktree's compose.yaml up INSIDE the coat (pod-native, on default
+# ports), the rootless alternative to `docker compose up`, which would publish to
+# the host and never reach the coat.
+function cmd_compose {
+    local action="" file=""
+    while [[ $# -gt 0 ]]; do
+        case "${1}" in
+        up | down)
+            [[ -z "${action}" ]] || die "specify only one of up|down"
+            action="${1}"
+            shift
+            ;;
+        -f)
+            [[ -n "${2:-}" ]] || die "-f requires a file argument"
+            file="${2}"
+            shift 2
+            ;;
+        *) die "usage: ${PROG} compose [up|down] [-f <file>]" ;;
+        esac
+    done
+    [[ -n "${action}" ]] || action="up"
+    local pod
+    pod=$(coat_name) || exit 1
+    # down finds containers by label, so it needs neither python nor the file.
+    if [[ "${action}" == "down" ]]; then
+        compose_down "${pod}"
+        return
+    fi
+    command -v python3 >/dev/null 2>&1 || die "python3 is required for ${PROG} compose"
+    python3 -c 'import yaml' 2>/dev/null ||
+        die "PyYAML is required for ${PROG} compose: pip install pyyaml (or apt install python3-yaml)"
+    if [[ -z "${file}" ]]; then
+        file=$(compose_file) ||
+            die "no compose file here (compose.yaml/.yml, docker-compose.yaml/.yml); pass -f <file>"
+    fi
+    [[ -f "${file}" ]] || die "compose file not found: ${file}"
+    ensure_coat "${pod}"
+    compose_up "${pod}" "${file}"
+}
+
 function cmd_status {
+    no_args status "$@"
     local pod
     pod=$(coat_name) || exit 1
     if ! podman pod exists "${pod}" 2>/dev/null; then
@@ -271,11 +681,13 @@ function cmd_status {
     local pid
     pid=$(infra_pid "${pod}") || exit 1
     echo "coat ${pod} (infra pid ${pid})"
-    podman ps --pod --filter "pod=${pod}" \
+    # -a so a crashed/exited service shows (Exited ...) instead of looking healthy.
+    podman ps -a --pod --filter "pod=${pod}" \
         --format '  {{.Names}}  {{.Image}}  {{.Status}}' 2>/dev/null
 }
 
 function cmd_ls {
+    no_args ls "$@"
     local lines
     mapfile -t lines < <(podman pod ps --filter name=workit- --format '{{.Name}}|{{.Status}}' 2>/dev/null || true)
     if [[ ${#lines[@]} -eq 0 ]]; then
@@ -300,9 +712,64 @@ function cmd_ls {
     done
 }
 
+# Named volumes actually mounted by the coat's containers. This is the only safe
+# way to find a coat's volumes: matching by `<pod>-` name prefix would let coat
+# workit-foo delete workit-foo-bar's data (a real prefix), destroying another
+# worktree's database. Must run while the pod still exists (it reads the
+# containers' mounts, which `pod rm` would delete).
+function coat_volumes {
+    local pod="${1}" cid vol
+    local -a vols=()
+    while IFS= read -r cid; do
+        [[ -n "${cid}" ]] || continue
+        while IFS= read -r vol; do
+            # Only this coat's own volumes (the <pod>- prefix): never sweep an
+            # external/shared volume a user may have hand-attached to a container.
+            [[ "${vol}" == "${pod}-"* ]] && vols+=("${vol}")
+        done < <(podman inspect "${cid}" \
+            --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{"\n"}}{{end}}{{end}}' 2>/dev/null || true)
+    done < <(podman pod inspect "${pod}" \
+        --format '{{range .Containers}}{{.Id}}{{"\n"}}{{end}}' 2>/dev/null || true)
+    if [[ ${#vols[@]} -gt 0 ]]; then
+        printf '%s\n' "${vols[@]}" | sort -u
+    fi
+}
+
+# Create a named volume tagged with the owning coat, unless it already exists.
+# The label lets --purge find it by an EXACT coat value even after its container
+# is gone (e.g. `compose down` then `down --purge`), with no name-prefix bleed.
+function ensure_volume {
+    podman volume exists "${2}" 2>/dev/null ||
+        podman volume create --label "workit.coat=${1}" "${2}" >/dev/null 2>&1
+}
+
+# Volumes labeled as belonging to this coat. Exact-value label match, so coat
+# workit-foo never matches workit-foo-bar's volumes. Survives `pod rm` (the label
+# is on the volume, not a container), unlike coat_volumes.
+function labeled_volumes {
+    podman volume ls --filter "label=workit.coat=${1}" --format '{{.Name}}' 2>/dev/null || true
+}
+
+# Remove the given volumes by name (an explicit list, deduped by podman: a second
+# rm of the same name is a harmless no-op). No name matching, so it can't reach
+# another coat's data.
+function purge_volumes {
+    local vol
+    for vol in "$@"; do
+        [[ -n "${vol}" ]] && podman volume rm "${vol}" >/dev/null 2>&1
+    done
+}
+
 function cmd_gc {
     local dry=
-    [[ "${1:-}" == "-n" || "${1:-}" == "--dry-run" ]] && dry=1
+    case "${1:-}" in
+    -n | --dry-run)
+        dry=1
+        shift
+        ;;
+    *) ;;
+    esac
+    [[ $# -eq 0 ]] || die "usage: ${PROG} gc [-n | --dry-run]"
     local names name wt n=0
     mapfile -t names < <(podman pod ps --filter name=workit- --format '{{.Name}}' 2>/dev/null || true)
     for name in "${names[@]}"; do
@@ -310,45 +777,74 @@ function cmd_gc {
         # Only reap coats we can prove are orphaned: labeled with a path that's
         # gone. Unlabeled coats are left alone (we can't know their worktree).
         [[ -n "${wt}" && ! -d "${wt}" ]] || continue
-        n=$((n + 1))
         if [[ -n "${dry}" ]]; then
             echo "would remove ${name} (worktree gone: ${wt})"
-        else
-            podman pod rm --force --time 2 "${name}" >/dev/null 2>&1
-            podman volume rm "${name}-pgdata" >/dev/null 2>&1
-            ok "removed orphan ${name} (worktree gone: ${wt})"
+            n=$((n + 1))
+            continue
         fi
+        local -a mounted=() labeled=()
+        # Capture both volume sets BEFORE rm (after rm a same-name coat could be
+        # recreated and its live labeled volume caught by name and destroyed).
+        mapfile -t mounted < <(coat_volumes "${name}" || true)
+        mapfile -t labeled < <(labeled_volumes "${name}" || true)
+        # Re-check right before destroying: the worktree may have been recreated
+        # and the coat re-upped since the scan; if so, leave it alone.
+        [[ -d "${wt}" ]] && continue
+        podman pod rm --force --time 2 "${name}" >/dev/null 2>&1
+        purge_volumes "${mounted[@]}" "${labeled[@]}"
+        ok "removed orphan ${name} (worktree gone: ${wt})"
+        n=$((n + 1))
     done
     [[ ${n} -gt 0 ]] || echo "no orphaned coats"
 }
 
 function cmd_down {
     local pod purge=
-    [[ "${1:-}" == "--purge" ]] && purge=1
+    case "${1:-}" in
+    --purge)
+        purge=1
+        shift
+        ;;
+    *) ;;
+    esac
+    [[ $# -eq 0 ]] || die "usage: ${PROG} down [--purge]"
     pod=$(coat_name) || exit 1
     if ! podman pod exists "${pod}" 2>/dev/null; then
         warn "no coat for ${pod}"
         return 0
     fi
+    # Capture container-mounted volumes BEFORE rm (it deletes the containers we'd
+    # read mounts from); labeled volumes survive rm, so query those after. The
+    # union covers legacy unlabeled volumes and ones whose container is already
+    # gone (compose down, then purge).
+    local -a mounted=() labeled=()
+    if [[ -n "${purge}" ]]; then
+        # Capture BOTH sets before rm: after rm a same-name coat could be
+        # recreated and its fresh labeled volume would be caught by name.
+        mapfile -t mounted < <(coat_volumes "${pod}" || true)
+        mapfile -t labeled < <(labeled_volumes "${pod}" || true)
+    fi
     # --time 2: don't wait the default 10s for postgres to shut down cleanly,
     # it's a throwaway dev db.
     podman pod rm --force --time 2 "${pod}" >/dev/null || die "failed to remove coat ${pod}"
     if [[ -n "${purge}" ]]; then
-        if podman volume rm "${pod}-pgdata" >/dev/null 2>&1; then
-            ok "coat ${pod} removed (db volume purged)"
-        else
-            ok "coat ${pod} removed (no db volume to purge)"
-        fi
+        purge_volumes "${mounted[@]}" "${labeled[@]}"
+        ok "coat ${pod} removed (data volumes purged)"
     else
-        ok "coat ${pod} removed (db volume ${pod}-pgdata kept)"
+        ok "coat ${pod} removed (data volumes kept; --purge to drop them)"
     fi
     hint "${PROG} up (recreate)  |  remove the worktree, then ${PROG} gc"
 }
 
-# Operational commands need the container + namespace tooling; help/no-arg don't.
+# Operational commands need podman and a Linux host: the coat is Linux namespaces
+# entered via nsenter, so on macOS (podman in a VM) the coat is unreachable and
+# the tool should fail clean rather than half-work. nsenter is checked only where
+# it's used (enter/run), since ls/down/gc/etc don't need it.
 function need_tools {
+    local os
+    os=$(uname -s 2>/dev/null) || os=""
+    [[ "${os}" == Linux ]] || die "${PROG} is Linux-only (the coat is a Linux network namespace; found ${os:-unknown})"
     command -v podman >/dev/null 2>&1 || die "podman is required but not found"
-    command -v nsenter >/dev/null 2>&1 || die "nsenter is required but not found"
 }
 
 # Leading global flags, any order, before the subcommand:
@@ -373,7 +869,7 @@ done
 case "${1:-}" in
 help | -h | --help) usage 0 ;;
 "") cmd_suggest ;;
-up | enter | run | pid | db | status | ls | gc | down)
+up | enter | run | pid | db | compose | status | ls | gc | down)
     need_tools
     sub="${1}"
     shift
