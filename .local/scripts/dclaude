@@ -1,34 +1,48 @@
 #!/usr/bin/bash
-# Strict sandbox for claude: write-action / prod tools are shadowed so an
-# autonomous agent cannot grant itself a foothold. gh and git push are blocked
-# here (use dclaude-jen for the allow-listed push profile).
+
 set -euo pipefail
 
 DBOX_PROFILE=dclaude
 source "$HOME/.local/scripts/dbox-lib.sh"
+
+# Profile is a row in the tables below, keyed by how we were invoked:
+#   dclaude -> default,  dclaude-jen -> jen,  dclaude-rem -> rem
+# (jen and rem are symlinks to this file). Rows set only their delta from
+# default; an unset cell falls back to [default] via ${x[$p]-${x[default]}}.
+p=$(basename "$0"); p=${p#dclaude}; p=${p#-}; p=${p:-default}
+
+declare -A JSON CREDS GITMODE BLOCK FEAT
+
+JSON[default]=$HOME/.claude.json
+CREDS[default]=$HOME/.claude/.credentials.json
+GITMODE[default]=ro
+BLOCK[default]="gh rsync aws kubectl helm terraform docker heroku"
+FEAT[default]=
+
+# rem: separate identity under ~/.claude-rem, with git push (so gh stays unblocked)
+JSON[rem]=$HOME/.claude-rem/.claude.json
+CREDS[rem]=$HOME/.claude-rem/.credentials.json
+GITMODE[rem]=rw
+BLOCK[rem]="rsync aws kubectl helm terraform docker heroku"
+FEAT[rem]=git_push
+
+# jen: jenner-web, full toolchain, git push, podman, R
+GITMODE[jen]=rw
+BLOCK[jen]=
+FEAT[jen]="git_push podman bind_parent"
+
+read -ra block <<<"${BLOCK[$p]-${BLOCK[default]}}"
+read -ra feat  <<<"${FEAT[$p]-${FEAT[default]}}"
+
 dbox_parse "$@"
-
-exec {claude_json}<"$HOME/.claude.json"
-
 dbox_namespaces
 dbox_system
-dbox_block gh rsync aws kubectl helm terraform docker heroku
-
-dbox_home                                       # persistent home, before the dotfile binds
-dbox_add \
-    --ro-bind "$HOME/.bashrc" "$HOME/.bashrc" \
-    --ro-bind "$HOME/.profile" "$HOME/.profile" \
-    --ro-bind "$HOME/.local" "$HOME/.local" \
-    --ro-bind-try "$HOME/go/bin" "$HOME/go/bin" \
-    --ro-bind-try "$HOME/Downloads" "$HOME/Downloads" \
-    --ro-bind-try "$HOME/.asdf" "$HOME/.asdf" \
-    --ro-bind-try "$HOME/.tool-versions" "$HOME/.tool-versions" \
-    --bind "$HOME/.cargo" "$HOME/.cargo" \
-    --bind "$HOME/.claude" "$HOME/.claude" \
-    --bind "$HOME/.cache" "$HOME/.cache" \
-    --file "$claude_json" "$HOME/.claude.json"
-
-dbox_resolve_links ro
+dbox_block "${block[@]}"
+dbox_home
+dbox_dotfiles
+dbox_claude "${JSON[$p]-${JSON[default]}}" "${CREDS[$p]-${CREDS[default]}}"
+for f in "${feat[@]}"; do "dbox_feat_$f"; done
+dbox_resolve_links "${GITMODE[$p]-${GITMODE[default]}}"
 dbox_shared "${DBOX_SHARES[@]}"
 dbox_project "$DBOX_MODE"
 

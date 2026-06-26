@@ -42,6 +42,7 @@ dbox_system() {
         --ro-bind /lib64 /lib64 \
         --ro-bind /usr/bin /usr/bin \
         --ro-bind /usr/lib /usr/lib \
+        --ro-bind /usr/share/vim /usr/share/vim \
         --ro-bind-try /usr/libexec /usr/libexec \
         --ro-bind-try /usr/include /usr/include \
         --ro-bind-try /var/lib/dpkg /var/lib/dpkg \
@@ -60,7 +61,10 @@ dbox_system() {
         --ro-bind-try /etc/nsswitch.conf /etc/nsswitch.conf \
         --ro-bind-try /etc/hosts /etc/hosts \
         --ro-bind-try /etc/ssl/openssl.cnf /etc/ssl/openssl.cnf \
-        --ro-bind-try /usr/share/zoneinfo /usr/share/zoneinfo
+        --ro-bind-try /usr/share/zoneinfo /usr/share/zoneinfo \
+        --ro-bind-try /etc/R /etc/R \
+        --ro-bind-try /usr/share/R /usr/share/R
+        # /usr/lib/R already comes in with the wholesale /usr/lib bind above.
 }
 
 # Block a set of binaries from the sandbox PATH.
@@ -70,6 +74,7 @@ dbox_system() {
 #    them, since /bwrap-bin is first on PATH. The stub set is computed from
 #    `command -v`, so it stays in sync with what is actually reachable.
 dbox_block() {
+    [ $# -eq 0 ] && return 0          # nothing to block (e.g. the jen profile)
     local blocked=("$@") f name b skip args_file lbfd stubfd p
     declare -A is_blocked
     for b in "${blocked[@]}"; do is_blocked[$b]=1; done
@@ -105,6 +110,82 @@ dbox_home() {
     local sbox; sbox="$(dbox_state)/home"
     mkdir -p "$sbox"
     dbox_add --bind "$sbox" "$HOME"
+}
+
+# ---- Profile building blocks -------------------------------------------------
+# Composed by the wrappers after dbox_home. Each does one thing and appends in
+# call order, same contract as the core functions above.
+
+# Shared read-only dotfiles plus the writable cargo/cache trees. Layered on top
+# of the persistent home, so append after dbox_home.
+dbox_dotfiles() {
+    dbox_add \
+        --ro-bind "$HOME/.bashrc" "$HOME/.bashrc" \
+        --ro-bind "$HOME/.profile" "$HOME/.profile" \
+        --ro-bind "$HOME/.local" "$HOME/.local" \
+        --ro-bind-try "$HOME/go/bin" "$HOME/go/bin" \
+        --ro-bind-try "$HOME/Downloads" "$HOME/Downloads" \
+        --ro-bind-try "$HOME/.asdf" "$HOME/.asdf" \
+        --ro-bind-try "$HOME/.tool-versions" "$HOME/.tool-versions" \
+        --ro-bind-try "$HOME/.config/eatracker" "$HOME/.config/eatracker" \
+        --ro-bind-try "$HOME/.circleci" "$HOME/.circleci" \
+        --bind "$HOME/.cargo" "$HOME/.cargo" \
+        --bind "$HOME/.cache" "$HOME/.cache" \
+        --bind-try "$HOME/.R" "$HOME/.R"
+}
+
+# Claude config and credentials. Sources default to the standard layout; pass
+# alternates for a separate identity (the -rem profile's ~/.claude-rem). The
+# destinations inside the box are always the standard paths, so claude finds
+# them where it expects regardless of which host identity backs them.
+dbox_claude() {
+    local json_src="${1:-$HOME/.claude.json}"
+    local creds_src="${2:-$HOME/.claude/.credentials.json}"
+    local jfd cfd
+    exec {jfd}<"$json_src"
+    exec {cfd}<"$creds_src"
+    dbox_add \
+        --bind "$HOME/.claude" "$HOME/.claude" \
+        --file "$cfd" "$HOME/.claude/.credentials.json" \
+        --file "$jfd" "$HOME/.claude.json"
+}
+
+# Host git identity for pushing as the user: gitconfig, a gh credential helper,
+# and a GH_TOKEN. A PAT at ~/.config/dclaude-jen/gh-token wins when present,
+# else gh's own token. The github.com insteadOf rewrite lets git@ remotes push
+# over https. Pair with `dbox_resolve_links rw` so the gitconfig/common-dir
+# binds are writable.
+dbox_feat_git_push() {
+    local token gh_cfg
+    gh_cfg=(--ro-bind-try "$HOME/.config/gh" "$HOME/.config/gh")
+    if [ -r "$HOME/.config/dclaude-jen/gh-token" ]; then
+        token=$(cat "$HOME/.config/dclaude-jen/gh-token"); gh_cfg=()
+    else
+        token=$(gh auth token)
+    fi
+    dbox_add \
+        --ro-bind-try "$HOME/.gitconfig" "$HOME/.gitconfig" \
+        "${gh_cfg[@]}" \
+        --setenv GH_TOKEN "$token" \
+        --setenv GIT_CONFIG_COUNT 2 \
+        --setenv GIT_CONFIG_KEY_0 "credential.https://github.com.helper" \
+        --setenv GIT_CONFIG_VALUE_0 "!gh auth git-credential" \
+        --setenv GIT_CONFIG_KEY_1 "url.https://github.com/.insteadOf" \
+        --setenv GIT_CONFIG_VALUE_1 "git@github.com:"
+}
+
+# Rootless podman socket, presented as the docker/podman host.
+dbox_feat_podman() {
+    local sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock"
+    dbox_add \
+        --setenv DOCKER_HOST "unix://$sock" \
+        --setenv CONTAINER_HOST "unix://$sock" \
+        --bind-try "$sock" "$sock"
+}
+
+# Bind the parent of $PWD too, for sibling worktrees or a shared package root.
+dbox_feat_bind_parent() {
+    dbox_add --bind "$PWD/.." "$PWD/.."
 }
 
 # Resolve symlinks under $PWD, ~/.claude and ~/.local whose targets live outside,
