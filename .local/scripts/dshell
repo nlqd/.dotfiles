@@ -9,6 +9,7 @@ source "$HOME/.local/scripts/dbox-lib.sh"
 dbox_parse "$@"
 
 dbox_namespaces
+dbox_tmux
 dbox_add \
     --dev-bind-try /dev/nvidia0 /dev/nvidia0 \
     --dev-bind-try /dev/nvidiactl /dev/nvidiactl \
