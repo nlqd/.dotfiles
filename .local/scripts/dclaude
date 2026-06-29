@@ -23,10 +23,12 @@ FEAT[default]=
 JSON[rem]=$HOME/.claude-rem/.claude.json
 CREDS[rem]=$HOME/.claude-rem/.credentials.json
 GITMODE[rem]=rw
-BLOCK[rem]="rsync aws kubectl helm terraform docker heroku"
-FEAT[rem]=git_push
+BLOCK[rem]=
+FEAT[rem]="git_push podman bind_parent"
 
 # jen: jenner-web, full toolchain, git push, podman, R
+JSON[jen]=$HOME/.claude.json
+CREDS[jen]=$HOME/.claude/.credentials.json
 GITMODE[jen]=rw
 BLOCK[jen]=
 FEAT[jen]="git_push podman bind_parent"
@@ -40,6 +42,7 @@ dbox_system
 dbox_block "${block[@]}"
 dbox_home
 dbox_dotfiles
+dbox_tmux
 dbox_claude "${JSON[$p]-${JSON[default]}}" "${CREDS[$p]-${CREDS[default]}}"
 for f in "${feat[@]}"; do "dbox_feat_$f"; done
 dbox_resolve_links "${GITMODE[$p]-${GITMODE[default]}}"

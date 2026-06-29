@@ -25,11 +25,34 @@ dbox_namespaces() {
         --hostname bubblewrap --unshare-uts \
         --unshare-pid \
         --die-with-parent
-    # /tmp is a private tmpfs, but bind the host tmux socket dir back: an agent in
-    # one tmux window can then `tmux send-keys` to sibling windows on the same host
-    # server (how claude drives the GPU shells). Only this dir is shared; the rest
-    # of /tmp stays isolated. -try keeps it harmless when no tmux server is up.
+    # The claude-bus mailbox: bind the host bus root back into the private /tmp so
+    # an agent in one box can message an agent in another (file mailbox; see the
+    # claude-bus skill). Honors $CLAUDE_BUS_ROOT so box and host agree on the path.
+    # -try keeps it harmless until a host `claude-bus init` creates the dir; the
+    # grant is strictly weaker than the tmux send-keys bind in dbox_tmux.
+    local bus="${CLAUDE_BUS_ROOT:-/tmp/claude-bus}"
+    dbox_add --bind-try "$bus" "$bus"
+}
+
+# Bind the host tmux socket dir back into the private /tmp so a tmux client inside
+# the box talks to the host's tmux server. That shared server is what lets one
+# session `tmux send-keys` to any other session or window, including ones living
+# in a different box or on the host (how claude drives the GPU shells). Only this
+# dir is shared; the rest of /tmp stays isolated. Call after dbox_namespaces,
+# which tmpfs's /tmp. -try keeps it harmless when no tmux server is up.
+dbox_tmux() {
     dbox_add --bind-try "/tmp/tmux-$(id -u)" "/tmp/tmux-$(id -u)"
+    # Also expose the exact tmux binary the host server runs (the ghr build behind
+    # /usr/local/bin/tmux). The default profile re-binds it via dbox_block, but
+    # jen/rem don't mount /usr/local/bin and would fall back to the older apt
+    # /usr/bin/tmux -- a client/server version mismatch the server rejects with
+    # "server exited unexpectedly". Bind the resolved binary at /usr/local/bin/tmux
+    # (first on PATH) so every profile speaks the server's protocol. No-op if tmux
+    # isn't installed.
+    local bin
+    bin=$(command -v tmux 2>/dev/null) || return 0
+    bin=$(realpath "$bin" 2>/dev/null) || return 0
+    dbox_add --ro-bind-try "$bin" /usr/local/bin/tmux
 }
 
 # Read-only host system. -try on anything not guaranteed present so a missing
@@ -138,16 +161,36 @@ dbox_dotfiles() {
 # alternates for a separate identity (the -rem profile's ~/.claude-rem). The
 # destinations inside the box are always the standard paths, so claude finds
 # them where it expects regardless of which host identity backs them.
+#
+# Three identity files are overlaid per profile: the token (.credentials.json)
+# and two account-metadata copies, the top-level ~/.claude.json and the nested
+# ~/.claude/.claude.json (the statusline reads the latter's oauthAccount). The
+# nested one lives inside the shared rw ~/.claude, so without this overlay it
+# carries whichever identity last wrote it and bleeds across profiles. Both
+# metadata copies come from the same source; the token is never derived from it.
 dbox_claude() {
     local json_src="${1:-$HOME/.claude.json}"
     local creds_src="${2:-$HOME/.claude/.credentials.json}"
-    local jfd cfd
+    local jfd jfd2
+    [ -r "$json_src" ]  || { echo "dbox: missing claude config $json_src" >&2; exit 1; }
+    [ -r "$creds_src" ] || { echo "dbox: missing claude credentials $creds_src" >&2; exit 1; }
     exec {jfd}<"$json_src"
-    exec {cfd}<"$creds_src"
+    exec {jfd2}<"$json_src"
+    # The token (.credentials.json) is bound READ-ONLY, NOT via --file. `--file` runs
+    # creat(O_TRUNC) on the destination, and because ~/.claude is bound rw to the
+    # host that truncated the real ~/.claude/.credentials.json to 0 bytes on every
+    # launch (and for the -rem profile clobbered the dungngo creds with the rem
+    # identity). A read-only bind never writes the host file, so an in-box claude can
+    # neither empty nor clobber it. Safe because the tokens are long-lived (setup-
+    # token, no in-box refresh needed); a refreshable /login token would EROFS on
+    # expiry. The two account-metadata copies (see the header note) stay as --file:
+    # they are not secrets, and the nested ~/.claude/.claude.json must be writable
+    # for the statusline.
     dbox_add \
         --bind "$HOME/.claude" "$HOME/.claude" \
-        --file "$cfd" "$HOME/.claude/.credentials.json" \
-        --file "$jfd" "$HOME/.claude.json"
+        --ro-bind "$creds_src" "$HOME/.claude/.credentials.json" \
+        --file "$jfd" "$HOME/.claude.json" \
+        --file "$jfd2" "$HOME/.claude/.claude.json"
 }
 
 # Host git identity for pushing as the user: gitconfig, a gh credential helper,
