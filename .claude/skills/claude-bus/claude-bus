@@ -1,0 +1,643 @@
+#!/usr/bin/env bash
+# claude-bus: file-based mailbox for cross-Claude-session messaging.
+#
+# One inbox directory per session under $CLAUDE_BUS_ROOT (default /tmp/claude-bus).
+# SHORT messages only: send refuses bodies over $CLAUDE_BUS_MAX bytes (default 1024).
+# Pass anything large (files, long output) BY PATH via send-path, not inline.
+#
+# send      -> atomically drops a SHORT message into the peer's inbox (write tmp + mv).
+# send-path -> drops a pointer to a file (validates it exists); the body stays on disk.
+# wait      -> blocks on the inbox dir via entr(-d); exits when a new message lands.
+#              Run this with run_in_background so the harness re-invokes on arrival.
+# drain     -> prints and deletes all queued messages, oldest first.
+#
+# Model loop:  drain <me>  ->  wait <me> (background)  -> [re-invoked] -> repeat.
+#
+# `set -euo pipefail` lives in main(), not at file scope, so the file can be
+# sourced by tests without flipping shell options. The cmd_* functions guard
+# their own inputs and do not rely on -e for correctness.
+
+BUS_ROOT="${CLAUDE_BUS_ROOT:-/tmp/claude-bus}"
+BUS_MAX="${CLAUDE_BUS_MAX:-1024}"   # max message body in bytes; bigger -> pass by path
+
+inbox_dir() { printf '%s/inbox/%s' "$BUS_ROOT" "$1"; }
+pending_dir() { printf '%s/pending/%s' "$BUS_ROOT" "$1"; }
+meta_file() { printf '%s/meta/%s.json' "$BUS_ROOT" "$1"; }
+delegate_file() { printf '%s/delegate/%s' "$BUS_ROOT" "$1"; }
+# delegate_target <inbox> -- the name that drains <inbox>'s mail, or nothing.
+# Must return 0 even when undelegated: `dt="$(delegate_target ...)"` under set -e
+# would otherwise abort publish on every ordinary send.
+delegate_target() { local df; df="$(delegate_file "$1")"; [ -f "$df" ] && head -n1 "$df"; return 0; }
+log_dir() { printf '%s/log/%s' "$BUS_ROOT" "$1"; }
+watch_dir() { printf '%s/watch/%s' "$BUS_ROOT" "$1"; }
+watch_file() { printf '%s/watch/%s/%s.json' "$BUS_ROOT" "$1" "$2"; }
+# oldest_msg <name> -- basename of the oldest undrained *.msg in <name>'s inbox, or
+# nothing. Ids are ns-prefixed and equal-width, so lexicographic min == chronological.
+oldest_msg() {
+  local dir; dir="$(inbox_dir "$1")"
+  local f best=""
+  for f in "$dir"/*.msg; do
+    [ -e "$f" ] || continue
+    f="$(basename -- "$f")"
+    if [ -z "$best" ] || [[ "$f" < "$best" ]]; then best="$f"; fi
+  done
+  printf '%s' "$best"
+}
+
+# the caller's own cgroup path (CLAUDE_BUS_SELF_CGROUP overrides, for tests).
+self_cgroup() {
+  if [ -n "${CLAUDE_BUS_SELF_CGROUP:-}" ]; then printf '%s' "$CLAUDE_BUS_SELF_CGROUP"
+  else awk -F: '$1=="0"{print $3}' /proc/self/cgroup 2>/dev/null; fi
+}
+
+write_meta() {  # <name> <cgroup> <pid> <transcript>
+  local md; md="$(dirname "$(meta_file "$1")")"; mkdir -p "$md"
+  local tmp; tmp="$(meta_file "$1").tmp.$$"
+  jq -n --arg name "$1" --arg cgroup "$2" --arg pid "$3" --arg transcript "$4" \
+    '{name:$name, cgroup:$cgroup, pid:$pid, transcript:$transcript}' > "$tmp"
+  mv -- "$tmp" "$(meta_file "$1")"
+}
+
+# names are simple tokens, ids are digits/hyphens -- both block path traversal out
+# of the bus root. The *_ok predicates are non-fatal (for validating untrusted
+# envelope fields on drain); valid_* exit for CLI-arg validation.
+name_ok() { case "$1" in '' | *[!A-Za-z0-9_-]*) return 1 ;; esac; return 0; }
+id_ok()   { case "$1" in '' | *[!0-9-]*)        return 1 ;; esac; return 0; }
+valid_name() { name_ok "$1" || { printf 'claude-bus: invalid name: %s\n' "$1" >&2; exit 7; }; }
+valid_id()   { id_ok "$1"   || { printf 'claude-bus: invalid id: %s\n'   "$1" >&2; exit 7; }; }
+
+# id = nanosecond timestamp + random tiebreaker, so same-ns sends never collide.
+gen_id() { printf '%s-%s' "$(date +%s%N)" "$RANDOM$RANDOM"; }
+
+# refuse bodies over the cap (send, dispatch, reply all call this).
+check_size() {
+  local nbytes; nbytes="$(printf '%s' "$1" | wc -c)"
+  if (( nbytes > BUS_MAX )); then
+    printf 'refused: message is %d bytes (max %d). Use send-path.\n' "$nbytes" "$BUS_MAX" >&2
+    exit 3
+  fi
+}
+
+# progressive disclosure: one-line guidance to stderr so stdout stays parseable.
+tip() { printf 'next: %s\n' "$*" >&2; }
+
+# publish <peer> <from> <kind> <id> <ref> <body>  -- atomic JSON file-drop into
+# inbox. id is unique per message; ref is the task/expectation it correlates to (or "").
+publish() {
+  local peer="$1" from="$2" kind="$3" id="$4" ref="$5" body="$6"
+  valid_name "$peer"; valid_name "$from"
+  # Delegation: deliver into the delegate's inbox, but keep `to` as the original
+  # peer so senders and the envelope are unchanged and the delegate sees intent.
+  local deliver="$peer" dt
+  dt="$(delegate_target "$peer")"
+  [ -n "$dt" ] && name_ok "$dt" && deliver="$dt"
+  local dir; dir="$(inbox_dir "$deliver")"
+  mkdir -p "$dir"
+  local tmp="$dir/.tmp.${id}.$$"
+  local final="$dir/${id}.from-${from}.msg"
+  jq -n --arg from "$from" --arg to "$peer" --arg id "$id" --arg ref "$ref" \
+    --arg kind "$kind" --arg body "$body" \
+    '{from:$from, to:$to, ts:$id, id:$id, ref:$ref, kind:$kind, body:$body}' > "$tmp"
+  mv -- "$tmp" "$final"   # atomic publish: reader never sees a partial file
+}
+
+cmd_init() {
+  local me="${1:?usage: claude-bus init <me>}"
+  valid_name "$me"
+  local dir; dir="$(inbox_dir "$me")"
+  mkdir -p "$dir"
+  : > "$dir/.keep"
+  printf 'inbox ready: %s\n' "$dir"
+  # Self-register for liveness, but only when we sit in a dedicated scope/service
+  # cgroup. Registering the shared user slice would make the monitor read the
+  # session as immortal, so skip it there and say so.
+  local cg; cg="$(self_cgroup)"
+  case "$cg" in
+    *.scope | *.service)
+      write_meta "$me" "$cg" "" ""
+      tip "registered for liveness; background 'claude-bus wait $me', drain when it wakes" ;;
+    *)
+      tip "background 'claude-bus wait $me', drain when it wakes (no scope cgroup: not monitorable)" ;;
+  esac
+}
+
+# register <me> [--cgroup PATH] [--pid PID] [--transcript PATH] -- map a bus name
+# to the process tree the monitor probes. Called by the launch wrapper at spawn,
+# or self-invoked (auto-detects its own scope cgroup from /proc/self/cgroup).
+cmd_register() {
+  local me="${1:?usage: claude-bus register <me> [--cgroup P] [--pid N] [--transcript P]}"; shift
+  valid_name "$me"
+  local cgroup="" pid="" transcript=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --cgroup)     cgroup="$2"; shift 2 ;;
+      --pid)        pid="$2"; shift 2 ;;
+      --transcript) transcript="$2"; shift 2 ;;
+      *) printf 'register: unknown flag %s\n' "$1" >&2; exit 2 ;;
+    esac
+  done
+  [ -n "$cgroup" ] || cgroup="$(self_cgroup)"
+  write_meta "$me" "$cgroup" "$pid" "$transcript"
+  printf 'registered %s\n' "$me"
+  tip "a peer can now 'claude-bus dispatch $me <from> <task>' and the monitor can probe it"
+}
+
+# delegate <inbox> <to> -- mail addressed to <inbox> is delivered into <to>'s
+# inbox instead (transparent interception; senders are unchanged). Per-name, so
+# many coordinator/secretary pairs coexist with nothing hardcoded.
+cmd_delegate() {
+  local inbox="${1:?usage: claude-bus delegate <inbox> <to>}"
+  local to="${2:?usage: claude-bus delegate <inbox> <to>}"
+  valid_name "$inbox"; valid_name "$to"
+  local df; df="$(delegate_file "$inbox")"; mkdir -p "$(dirname "$df")"
+  printf '%s\n' "$to" > "$df"
+  printf 'delegated %s -> %s\n' "$inbox" "$to"
+  tip "mail to $inbox now lands in $to's inbox; already-running senders need no change"
+}
+
+cmd_undelegate() {
+  local inbox="${1:?usage: claude-bus undelegate <inbox>}"
+  valid_name "$inbox"
+  rm -f -- "$(delegate_file "$inbox")"
+  printf 'undelegated %s\n' "$inbox"
+}
+
+# watch <me> <target> -- have <me>'s monitor flag <target> when it stops draining
+# its inbox (rate-limited, hung, dead). Unlike dispatch's expectations, this needs
+# no reply and no probe: a persistent sink (a secretary, an oncall) holds no
+# expectation about itself, so its freeze is otherwise invisible.
+cmd_watch() {
+  local me="${1:?usage: claude-bus watch <me> <target>}"
+  local target="${2:?usage: claude-bus watch <me> <target>}"
+  valid_name "$me"; valid_name "$target"
+  local dmax="${3:-${CLAUDE_BUS_DRAIN_MAX:-2}}"
+  case "$dmax" in ''|*[!0-9]*) printf 'watch: drain_max must be a non-negative integer\n' >&2; exit 5;; esac
+  local wd; wd="$(watch_dir "$me")"; mkdir -p "$wd"
+  # Write atomically under the same lock unwatch and the tick take, so a torn or
+  # racing write can't leave an empty record (which would pin the monitor open).
+  local wf; wf="$(watch_file "$me" "$target")"
+  ( flock 9
+    jq -n --arg t "$target" --argjson d "$dmax" \
+      '{target:$t,drain_max:$d,last:"",ticks:0,alerted:"none"}' > "$wf.tmp.$$" \
+      && mv -- "$wf.tmp.$$" "$wf"
+  ) 9>"$wd/.lock" || { rm -f -- "$wf.tmp.$$"; printf 'watch: failed to write %s\n' "$wf" >&2; exit 1; }
+  printf 'watching %s for %s\n' "$target" "$me"
+  tip "background 'claude-bus monitor $me'; a 'stale' alert lands in $me's inbox if $target stops draining"
+}
+
+cmd_unwatch() {
+  local me="${1:?usage: claude-bus unwatch <me> <target>}"
+  local target="${2:?usage: claude-bus unwatch <me> <target>}"
+  valid_name "$me"; valid_name "$target"
+  # Remove under the same lock the tick's read-modify-write takes, or an in-flight
+  # tick could recreate the record we just deleted (as cmd_close does for pending).
+  local wd; wd="$(watch_dir "$me")"; mkdir -p "$wd"
+  ( flock 9; rm -f -- "$(watch_file "$me" "$target")"; ) 9>"$wd/.lock" || true
+  printf 'unwatched %s for %s\n' "$target" "$me"
+}
+
+# forward <me> <id> <to> [note] -- re-send a message <me> already drained to <to>
+# verbatim, with a provenance line and the forwarder's note, so an escalation is
+# the agent's exact words plus a classification, not a paraphrase. Looks the
+# original up in <me>'s drained-message log.
+cmd_forward() {
+  local me="${1:?usage: claude-bus forward <me> <id> <to> [note]}"; shift
+  local id="${1:?usage: claude-bus forward <me> <id> <to> [note]}"; shift
+  local to="${1:?usage: claude-bus forward <me> <id> <to> [note]}"; shift
+  valid_name "$me"; valid_id "$id"; valid_name "$to"
+  local note="$*"; check_size "$note"   # the composite may reach ~2x BUS_MAX by design
+  local src="" f
+  for f in "$(log_dir "$me")/$id".from-*.msg; do [ -e "$f" ] && { src="$f"; break; }; done
+  [ -n "$src" ] || { printf 'forward: no drained message %s in %s log\n' "$id" "$me" >&2; exit 6; }
+  local ofrom okind obody
+  ofrom="$(jq -r '.from' "$src")"; okind="$(jq -r '.kind' "$src")"; obody="$(jq -r '.body' "$src")"
+  local body; body="$(printf '%s\n--- forwarded from %s [%s %s] ---\n%s' "$note" "$ofrom" "$okind" "$id" "$obody")"
+  publish "$to" "$me" forward "$(gen_id)" "" "$body"
+  printf 'forwarded %s -> %s\n' "$id" "$to"
+  tip "$to sees it verbatim via 'claude-bus drain $to'"
+}
+
+cmd_send() {
+  local peer="${1:?usage: claude-bus send <peer> <from> <msg...>}"; shift
+  local from="${1:?usage: claude-bus send <peer> <from> <msg...>}"; shift
+  valid_name "$peer"; valid_name "$from"
+  local body="$*"; check_size "$body"
+  local id; id="$(gen_id)"
+  publish "$peer" "$from" msg "$id" "" "$body"
+  printf 'sent %s -> %s\n' "$id" "$peer"
+  tip "peer reads + auto-acks via 'claude-bus drain $peer'; their ack lands in '$from'"
+}
+
+# send-path <peer> <from> <path> [note...] -- send a pointer to a file, not its contents.
+cmd_send_path() {
+  local peer="${1:?usage: claude-bus send-path <peer> <from> <path> [note...]}"; shift
+  local from="${1:?usage: claude-bus send-path <peer> <from> <path> [note...]}"; shift
+  local path="${1:?usage: claude-bus send-path <peer> <from> <path> [note...]}"; shift
+  valid_name "$peer"; valid_name "$from"
+  local note="$*"; check_size "$note"
+  local abs
+  if ! abs="$(realpath -e -- "$path" 2>/dev/null)"; then
+    printf 'refused: path not found or unreadable: %s\n' "$path" >&2
+    exit 4
+  fi
+  local id; id="$(gen_id)"
+  publish "$peer" "$from" path "$id" "" "$(printf '[path] %s\nnote: %s' "$abs" "$note")"
+  printf 'sent %s -> %s\n' "$id" "$peer"
+  tip "peer reads it via 'claude-bus drain $peer'"
+}
+
+cmd_drain() {
+  local me="${1:?usage: claude-bus drain <me>}"
+  valid_name "$me"
+  local dir; dir="$(inbox_dir "$me")"
+  mkdir -p "$dir"
+  # Drained messages are archived (not deleted) into a per-mailbox log (latest at
+  # the canonical name, prior same-id versions as numbered backups), so `forward`
+  # can re-send the verbatim original and out-of-band messages stay visible.
+  # (Unbounded; GC is a follow-up.)
+  local ld; ld="$(log_dir "$me")"; mkdir -p "$ld"
+  # No `shopt -s nullglob` (it would leak into a sourcing caller); `had` is set
+  # only after the [ -e ] guard so an empty inbox still prints "(no messages)".
+  local f had=0 got=0 from kind id body to ref rseg adt adeliver
+  for f in "$dir"/*.msg; do
+    [ -e "$f" ] || continue
+    had=1
+    if ! jq empty "$f" 2>/dev/null; then
+      printf 'warn: quarantining malformed envelope %s\n' "$f" >&2
+      mv -- "$f" "$f.bad" 2>/dev/null || rm -f -- "$f"
+      continue
+    fi
+    from="$(jq -r '.from // ""' "$f")"; kind="$(jq -r '.kind // ""' "$f")"
+    id="$(jq -r '.id // ""' "$f")";     body="$(jq -r '.body // ""' "$f")"
+    to="$(jq -r '.to // ""' "$f")";     ref="$(jq -r '.ref // ""' "$f")"
+    # A well-formed envelope with a hostile/missing from/id/to must not reach
+    # publish/rm/resolve (valid_name would exit 7 and wedge). Quarantine like malformed.
+    if ! name_ok "$from" || ! id_ok "$id" || ! name_ok "$to"; then
+      printf 'warn: quarantining envelope with bad from/id %s\n' "$f" >&2
+      mv -- "$f" "$f.bad" 2>/dev/null || rm -f -- "$f"
+      continue
+    fi
+    rseg=""; [ -n "$ref" ] && rseg=" ref:$ref"
+    printf '===== %s [%s]%s from %s =====\n%s\n===== end =====\n' "$id" "$kind" "$rseg" "$from" "$body"
+    # Resolve against the envelope's 'to' (the orchestrator): equals $me directly,
+    # but is the real orchestrator when a delegate (secretary) drained this reply.
+    case "$kind" in
+      msg | path)
+        # Warn (but still ack) when the ack would loop back into my own inbox: this
+        # happens when the sender delegates here, so I'd be acking myself. Delivering
+        # anyway keeps any expectation the ack resolves intact.
+        adt="$(delegate_target "$from")"; adeliver="$from"
+        [ -n "$adt" ] && name_ok "$adt" && adeliver="$adt"
+        [ "$adeliver" = "$me" ] && printf 'note: auto-ack to %s loops back to %s (delegated here); delivering anyway\n' "$from" "$me" >&2
+        publish "$from" "$me" ack "$(gen_id)" "$id" ""; got=1 ;;
+      ack)        if id_ok "$ref"; then resolve_pending "$to" "$ref" acked; fi ;;
+      done)       if id_ok "$ref"; then resolve_pending "$to" "$ref" close; fi ;;
+      decision)   if id_ok "$ref"; then resolve_pending "$to" "$ref" awaiting; fi ;;
+      progress)   : ;;
+    esac
+    # Message ids are unique, so archive names don't normally collide; --backup is a
+    # defensive guard against any id reuse (a stray backup is .~N~, ignored by
+    # *.msg globs, so forward still matches the one canonical file).
+    mv --backup=numbered -- "$f" "$ld/$(basename -- "$f")"
+  done
+  [ "$had" -eq 0 ] && printf '(no messages)\n'
+  [ "$had" -eq 1 ] && tip "re-arm: background 'claude-bus wait $me' to catch the next"
+  [ "$got" -eq 1 ] && tip "to answer a task: 'claude-bus reply <orch> $me <id> done|decision <msg>'"
+  return 0
+}
+
+# --- liveness probe: out-of-process signal readers (the imperative shell) ---
+cg_base() { printf '%s%s' "${CLAUDE_BUS_SYSFS:-/sys/fs/cgroup}" "$1"; }
+
+# NOTE: cgroup.procs is a kernfs file, so `stat`/`[ -s ]` always report size 0.
+# Emptiness must be tested by reading content, not by file size.
+tree_alive() {  # <cgroup> -> exit 0 if the tree has any live process
+  [ -n "$1" ] || return 1
+  local b; b="$(cg_base "$1")"
+  [ -n "$(head -c1 "$b/cgroup.procs" 2>/dev/null)" ]
+}
+
+tree_net() {    # <cgroup> -> summed bytes_acked across the tree's tcp sockets
+  [ -n "$1" ] || { echo 0; return; }
+  local b; b="$(cg_base "$1")"
+  # Guard existence before the redirect: a `<` on a missing file (tree already
+  # dead) is a shell error the pipe's 2>/dev/null cannot suppress.
+  [ -e "$b/cgroup.procs" ] || { echo 0; return; }
+  local pids; pids="$(tr '\n' '|' < "$b/cgroup.procs" 2>/dev/null | sed 's/|$//')"
+  [ -n "$pids" ] || { echo 0; return; }
+  local sum
+  sum="$(ss -tinp 2>/dev/null | grep -E "pid=(${pids})," -A1 \
+    | grep -oE 'bytes_acked:[0-9]+' | awk -F: '{s+=$2} END{print s+0}')" || true
+  echo "${sum:-0}"
+}
+
+tree_oom() {    # <cgroup> -> cumulative oom_kill count (0 if unknown)
+  local b v; b="$(cg_base "$1")"
+  v="$(awk '/^oom_kill /{print $2}' "$b/memory.events" 2>/dev/null)" || true
+  echo "${v:-0}"
+}
+
+trans_mtime() { stat -c %Y "$1" 2>/dev/null || echo 0; }
+
+probe_snapshot() {  # <name> -> {alive,net,oom,mtime,known}
+  local name="$1" mf; valid_name "$name"; mf="$(meta_file "$name")"
+  if [ ! -f "$mf" ]; then echo '{"alive":0,"net":0,"oom":0,"mtime":0,"known":false}'; return; fi
+  local cg tr; cg="$(jq -r '.cgroup // ""' "$mf")"; tr="$(jq -r '.transcript // ""' "$mf")"
+  local alive=0; if tree_alive "$cg"; then alive=1; fi
+  jq -n --argjson alive "$alive" --argjson net "$(tree_net "$cg")" \
+    --argjson oom "$(tree_oom "$cg")" --argjson mtime "$(trans_mtime "$tr")" \
+    '{alive:$alive, net:$net, oom:$oom, mtime:$mtime, known:true}'
+}
+
+# classify <baseline-json> <current-json> -> working|retrying|idle|dead|oom|unknown.
+# Pure (the functional core). dead and oom take precedence; then transcript growth
+# is working, else network growth is retrying (talking but not producing, e.g. a
+# 429/529 backoff), else idle.
+classify() {
+  local b="$1" c="$2"
+  [ "$(jq -r '.known' <<<"$c")" = "false" ] && { echo unknown; return; }
+  { [ "$b" = "null" ] || [ -z "$b" ]; } && { echo unknown; return; }
+  [ "$(jq -r '.alive' <<<"$c")" = "0" ] && { echo dead; return; }
+  local bo co; bo="$(jq -r '.oom' <<<"$b")"; co="$(jq -r '.oom' <<<"$c")"
+  (( co > bo )) && { echo oom; return; }
+  local bn cn bm cm
+  bn="$(jq -r '.net' <<<"$b")"; cn="$(jq -r '.net' <<<"$c")"
+  bm="$(jq -r '.mtime' <<<"$b")"; cm="$(jq -r '.mtime' <<<"$c")"
+  if   (( cm > bm )); then echo working
+  elif (( cn > bn )); then echo retrying
+  else echo idle
+  fi
+}
+
+# dispatch <peer> <from> <msg...> -- send a tracked task, opening a pending entry.
+cmd_dispatch() {
+  local peer="${1:?usage: claude-bus dispatch <peer> <from> <msg...>}"; shift
+  local from="${1:?usage: claude-bus dispatch <peer> <from> <msg...>}"; shift
+  valid_name "$peer"; valid_name "$from"
+  local body="$*"; check_size "$body"
+  local id; id="$(gen_id)"
+  publish "$peer" "$from" msg "$id" "$id" "$body"
+  local pd; pd="$(pending_dir "$from")"; mkdir -p "$pd"
+  local base='null'
+  [ -f "$(meta_file "$peer")" ] && base="$(probe_snapshot "$peer")"
+  local tmp="$pd/.tmp.$id.$$"
+  jq -n --arg peer "$peer" --arg id "$id" --arg state sent --argjson baseline "$base" \
+    '{peer:$peer, id:$id, sent_ts:$id, state:$state, baseline:$baseline, flat:0, alerted:false, ticks:0}' > "$tmp"
+  mv -- "$tmp" "$pd/$id.json"
+  printf '%s\n' "$id"
+  tip "tracking as $id; 'claude-bus pending $from' to watch; worker acks then replies when done"
+}
+
+cmd_pending() {
+  local me="${1:?usage: claude-bus pending <me>}"
+  valid_name "$me"
+  local pd; pd="$(pending_dir "$me")"; mkdir -p "$pd"
+  local f had=0
+  for f in "$pd"/*.json; do
+    [ -e "$f" ] || continue
+    had=1; jq -r '"\(.id) \(.peer) \(.state)"' "$f"
+  done
+  [ "$had" -eq 0 ] && printf '(no open expectations)\n'
+  [ "$had" -eq 1 ] && tip "awaiting the worker(s); they ack on receipt and reply when done"
+  return 0
+}
+
+# resolve_pending <me> <id> <acked|awaiting|close>. The single-drainer invariant
+# (one drain at a time per inbox) is what lets this skip file locking.
+resolve_pending() {
+  local me="$1" id="$2" action="$3"
+  local pd; pd="$(pending_dir "$me")"; local pf="$pd/$id.json"
+  [ -f "$pf" ] || return 0
+  # Serialize with the monitor's read-modify-write (concurrent by design).
+  (
+    flock 9
+    [ -f "$pf" ] || exit 0
+    local tmp="$pf.tmp.$$"
+    case "$action" in
+      acked)    if jq '.state="acked"'         "$pf" > "$tmp" 2>/dev/null; then mv -- "$tmp" "$pf"; else rm -f -- "$tmp"; fi ;;
+      awaiting) if jq '.state="awaiting_orch"' "$pf" > "$tmp" 2>/dev/null; then mv -- "$tmp" "$pf"; else rm -f -- "$tmp"; fi ;;
+      close)    rm -f -- "$pf" ;;
+    esac
+  ) 9>"$pd/.lock" || true
+}
+
+# reply <orch> <from> <id> <kind> <msg...> -- worker sends progress/done/decision.
+cmd_reply() {
+  local peer="${1:?usage: claude-bus reply <orch> <from> <id> <kind> <msg...>}"; shift
+  local from="${1:?usage: claude-bus reply <orch> <from> <id> <kind> <msg...>}"; shift
+  local ref="${1:?usage: claude-bus reply <orch> <from> <id> <kind> <msg...>}"; shift
+  local kind="${1:?usage: claude-bus reply <orch> <from> <id> <kind> <msg...>}"; shift
+  valid_name "$peer"; valid_name "$from"; valid_id "$ref"
+  case "$kind" in progress | done | decision) ;; *) printf 'bad kind: %s\n' "$kind" >&2; exit 5 ;; esac
+  local body="$*"; check_size "$body"
+  # unique message id; the caller's id is the task correlation (ref).
+  publish "$peer" "$from" "$kind" "$(gen_id)" "$ref" "$body"
+  printf 'replied %s -> %s\n' "$ref" "$peer"
+  tip "orch sees it on 'claude-bus drain $peer'"
+}
+
+# close <me> <id> -- resolve an awaiting_orch expectation or GC a stale one.
+cmd_close() {
+  local me="${1:?usage: claude-bus close <me> <id>}"
+  valid_name "$me"
+  local id="${2:?usage: claude-bus close <me> <id>}"; valid_id "$id"
+  local pd; pd="$(pending_dir "$me")"; mkdir -p "$pd"
+  ( flock 9; rm -f -- "$pd/$id.json"; ) 9>"$pd/.lock" || true
+  tip "expectation $id closed"
+}
+
+# monitor_tick <orch> -- one pass over open expectations; send only unliveness to
+# the orchestrator's inbox, once per expectation. awaiting_orch is skipped (the
+# ball is with the orchestrator); a null baseline (unregistered peer) is skipped.
+cmd_monitor_tick() {
+  local orch="$1"; valid_name "$orch"
+  local pd; pd="$(pending_dir "$orch")"
+  local wd; wd="$(watch_dir "$orch")"
+  local flat_max="${CLAUDE_BUS_FLAT_MAX:-2}"
+  local ack_max="${CLAUDE_BUS_ACK_MAX:-2}"
+  # No `shopt -s nullglob`: it would leak into a caller that sources this file.
+  # Guard the literal-glob case explicitly instead.
+  local pf rec state baseline peer id flat ticks cur verdict unlive prev do_alert hasbl
+  for pf in "$pd"/*.json; do
+    [ -e "$pf" ] || continue
+    # One guarded read: a file drained away mid-tick is a skip, not a set -e death.
+    # Process liveness needs a baseline (registered peer); ack-timeliness (whether
+    # the worker READ the message) is the expectation's state and needs no probe.
+    rec="$(jq -r '[.state,.peer,.id,.flat,(.ticks // 0),(.baseline|tojson),(.alerted // "")] | @tsv' "$pf" 2>/dev/null)" || continue
+    IFS=$'\t' read -r state peer id flat ticks baseline prev <<<"$rec"
+    [ "$state" = "awaiting_orch" ] && continue
+    ticks=$((ticks + 1))
+    verdict=""
+    if [ "$baseline" != "null" ]; then
+      cur="$(probe_snapshot "$peer")" || continue
+      verdict="$(classify "$baseline" "$cur")"
+      case "$verdict" in
+        working | retrying) flat=0 ;;
+        idle)               flat=$((flat + 1)) ;;
+      esac
+    fi
+    # Priority: dead/oom (process gone) > unacked (never read) > stalled (idle).
+    unlive=""
+    case "$verdict" in
+      dead) unlive="dead" ;;
+      oom)  unlive="oom" ;;
+    esac
+    if [ -z "$unlive" ] && [ "$state" = "sent" ] && [ "$ticks" -ge "$ack_max" ]; then
+      unlive="unacked"
+    fi
+    if [ -z "$unlive" ] && [ "$verdict" = idle ] && [ "$flat" -ge "$flat_max" ]; then
+      unlive="stalled"
+    fi
+    # Alert once per expectation, but let a fatal verdict (dead/oom) escalate past
+    # a prior non-fatal alert (e.g. unacked then later OOM). `prev` (from the read
+    # above) is the alerted verdict; '.alerted // ""' maps false and absent to "".
+    do_alert=""
+    if [ -n "$unlive" ]; then
+      if [ -z "$prev" ]; then
+        do_alert=1
+      else
+        case "$unlive" in
+          dead | oom) case "$prev" in dead | oom) ;; *) do_alert=1 ;; esac ;;
+        esac
+      fi
+    fi
+    # Persist under a per-orchestrator lock, re-checking existence inside it, so a
+    # concurrent drain's rm or state-change is neither resurrected nor clobbered.
+    # The alert fires only if the expectation still exists (not just-closed); each
+    # alert is a distinct message (fresh id) with the expectation id in the body.
+    # Roll the baseline forward (when we probed) so 'idle' is a per-tick diff.
+    hasbl=""; [ "$baseline" != "null" ] && hasbl=1
+    (
+      flock 9
+      [ -e "$pf" ] || exit 0
+      [ -n "$do_alert" ] && publish "$orch" monitor alert "$(gen_id)" "$id" "$unlive $peer $id"
+      if jq --argjson f "$flat" --argjson t "$ticks" --arg v "$unlive" \
+        --argjson cur "${cur:-null}" --arg al "${do_alert:-}" --arg bl "${hasbl:-}" \
+        '.flat=$f | .ticks=$t
+         | (if $al=="1" then .alerted=$v else . end)
+         | (if $bl=="1" then .baseline=$cur else . end)' \
+        "$pf" > "$pf.w.$$" 2>/dev/null; then mv -- "$pf.w.$$" "$pf"; else rm -f -- "$pf.w.$$"; fi
+    ) 9>"$pd/.lock" || true
+  done
+  # A watched target holds no expectation, so its liveness lives here on two axes:
+  # dead (its registered process tree is gone: OOM, crash) outranks stale (its inbox
+  # stops draining: rate-limited, hung). Alert once per distinct condition; a fresh
+  # oldest message or a recovered-then-failed target re-arms. `alerted` is a token
+  # ("none"/"dead"/"stale:<id>"), not a bool, so the two axes share one dedup slot and
+  # it is never empty — only `last` can be, so it stays the final @tsv field (a middle
+  # empty would collapse under read's IFS-whitespace and shift the columns).
+  local wf wrec target dmax last wticks prevw oldest oid nlast nticks kav wknown walive token abody wdo
+  for wf in "$wd"/*.json; do
+    [ -e "$wf" ] || continue
+    wrec="$(jq -r '[.target,(.drain_max // 2),(.ticks // 0),(.alerted // "none"),(.last // "")] | @tsv' "$wf" 2>/dev/null)" || continue
+    IFS=$'\t' read -r target dmax wticks prevw last <<<"$wrec"
+    name_ok "$target" || continue
+    # roll the drain-staleness counter: same oldest persisting is the stall
+    oldest="$(oldest_msg "$target")"; oid="${oldest%%.from-*}"
+    if [ -z "$oldest" ]; then
+      nlast=""; nticks=0
+    elif [ "$oldest" = "$last" ]; then
+      nlast="$oldest"; nticks=$((wticks + 1))
+    else
+      nlast="$oldest"; nticks=1
+    fi
+    # dead beats stale: a registered target whose tree is gone can't drain anyway
+    kav="$(jq -r '[.known,.alive] | @tsv' <<<"$(probe_snapshot "$target")")" || kav=""
+    IFS=$'\t' read -r wknown walive <<<"$kav"
+    token="none"
+    if [ "$wknown" = true ] && [ "$walive" = 0 ]; then
+      token="dead"
+    elif [ -n "$oldest" ] && [ "$nticks" -ge "$dmax" ]; then
+      token="stale:$oid"
+    fi
+    wdo=""
+    if [ "$token" != none ] && [ "$token" != "$prevw" ]; then wdo=1; fi
+    case "$token" in
+      dead)    abody="dead $target" ;;
+      stale:*) abody="stale $target ${token#stale:}" ;;
+      *)       abody="" ;;
+    esac
+    (
+      flock 9
+      [ -e "$wf" ] || exit 0
+      [ -n "$wdo" ] && publish "$orch" monitor alert "$(gen_id)" "" "$abody"
+      if jq --arg l "$nlast" --argjson t "$nticks" --arg a "$token" \
+        '.last=$l | .ticks=$t | .alerted=$a' "$wf" > "$wf.w.$$" 2>/dev/null; then
+        mv -- "$wf.w.$$" "$wf"; else rm -f -- "$wf.w.$$"; fi
+    ) 9>"$wd/.lock" || true
+  done
+  return 0
+}
+
+# monitor <orch> -- background this. Ticks every CLAUDE_BUS_TICK seconds until no
+# open expectation remains, sending only unliveness into the orchestrator's inbox.
+cmd_monitor() {
+  local orch="$1"; valid_name "$orch"
+  local tick="${CLAUDE_BUS_TICK:-180}"
+  local pd; pd="$(pending_dir "$orch")"
+  local wd; wd="$(watch_dir "$orch")"
+  tip "monitoring $orch; unliveness will arrive in its inbox as kind 'alert'"
+  while :; do
+    cmd_monitor_tick "$orch"
+    local any=0 f
+    for f in "$pd"/*.json "$wd"/*.json; do [ -e "$f" ] && { any=1; break; }; done
+    (( any )) || break
+    sleep "$tick"
+  done
+}
+
+# have_mail <dir> -- exit 0 if the inbox has any .msg (nullglob-safe: no shopt).
+have_mail() { local f; for f in "$1"/*.msg; do [ -e "$f" ] && return 0; done; return 1; }
+
+cmd_wait() {
+  local me="${1:?usage: claude-bus wait <me>}"; valid_name "$me"
+  local dir; dir="$(inbox_dir "$me")"
+  mkdir -p "$dir"; : > "$dir/.keep"
+  local poll="${CLAUDE_BUS_POLL:-2}"
+  # Already have mail? return now instead of blocking (closes the re-arm race).
+  have_mail "$dir" && { printf 'mail waiting\n'; return 0; }
+  # Real push where a watcher is installed (entr blocks until a new file lands).
+  # Graceful poll fallback where it is not, so a sandbox without entr degrades to
+  # polling instead of exiting 127 -- the highest-volume drainer must not die here.
+  if command -v entr >/dev/null 2>&1; then
+    # entr -d exits 2 when a new file lands (its success signal); normalize to 0
+    # so a genuine wake is not reported as a failure by a harness watching rc.
+    local rc=0
+    printf '%s/.keep\n' "$dir" | entr -dnp /bin/true || rc=$?
+    [ "$rc" -eq 2 ] && rc=0
+    return "$rc"
+  fi
+  while :; do
+    have_mail "$dir" && return 0
+    sleep "$poll"
+  done
+}
+
+main() {
+  set -euo pipefail
+  command -v jq >/dev/null 2>&1 || { printf 'claude-bus: jq is required\n' >&2; exit 1; }
+  case "${1:-}" in
+    init)      shift; cmd_init      "$@";;
+    register)  shift; cmd_register  "$@";;
+    delegate)  shift; cmd_delegate  "$@";;
+    undelegate) shift; cmd_undelegate "$@";;
+    watch)     shift; cmd_watch     "$@";;
+    unwatch)   shift; cmd_unwatch   "$@";;
+    send)      shift; cmd_send      "$@";;
+    send-path) shift; cmd_send_path "$@";;
+    dispatch)  shift; cmd_dispatch  "$@";;
+    probe-snapshot) shift; probe_snapshot "$@";;
+    classify)  shift; classify       "$@";;
+    reply)     shift; cmd_reply     "$@";;
+    forward)   shift; cmd_forward   "$@";;
+    pending)   shift; cmd_pending   "$@";;
+    close)     shift; cmd_close     "$@";;
+    monitor-tick) shift; cmd_monitor_tick "$@";;
+    monitor)   shift; cmd_monitor   "$@";;
+    drain)     shift; cmd_drain     "$@";;
+    wait)      shift; cmd_wait      "$@";;
+    *) printf 'usage: claude-bus {init|register|delegate|undelegate|watch|unwatch|send|send-path|dispatch|reply|forward|pending|close|drain|wait|monitor}\n' >&2; exit 2;;
+  esac
+}
+
+[[ "${BASH_SOURCE[0]}" == "${0}" ]] && main "$@"
