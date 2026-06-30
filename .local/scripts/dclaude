@@ -43,6 +43,7 @@ dbox_block "${block[@]}"
 dbox_home
 dbox_dotfiles
 dbox_tmux
+dbox_localbin git-lfs
 dbox_claude "${JSON[$p]-${JSON[default]}}" "${CREDS[$p]-${CREDS[default]}}"
 for f in "${feat[@]}"; do "dbox_feat_$f"; done
 dbox_resolve_links "${GITMODE[$p]-${GITMODE[default]}}"

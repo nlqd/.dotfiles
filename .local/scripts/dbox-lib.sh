@@ -34,25 +34,32 @@ dbox_namespaces() {
     dbox_add --bind-try "$bus" "$bus"
 }
 
+# Whitelist individual host /usr/local/bin tools into the box by binding just
+# those binaries (resolved through any symlink). The default profile rebuilds
+# /usr/local/bin via dbox_block and re-exposes every non-blocked entry, but
+# jen/rem don't mount /usr/local/bin at all, so user-installed tools there go
+# missing. Bind each named tool explicitly rather than mounting the whole dir, to
+# keep the exposed surface an audited whitelist. Unknown names are skipped.
+dbox_localbin() {
+    local name bin
+    for name in "$@"; do
+        bin=$(command -v "$name" 2>/dev/null) || continue
+        bin=$(realpath "$bin" 2>/dev/null) || continue
+        dbox_add --ro-bind-try "$bin" "/usr/local/bin/$name"
+    done
+}
+
 # Bind the host tmux socket dir back into the private /tmp so a tmux client inside
 # the box talks to the host's tmux server. That shared server is what lets one
 # session `tmux send-keys` to any other session or window, including ones living
 # in a different box or on the host (how claude drives the GPU shells). Only this
 # dir is shared; the rest of /tmp stays isolated. Call after dbox_namespaces,
-# which tmpfs's /tmp. -try keeps it harmless when no tmux server is up.
+# which tmpfs's /tmp. -try keeps it harmless when no tmux server is up. The tmux
+# binary is whitelisted via dbox_localbin so jen/rem get the host's ghr build
+# rather than the older apt /usr/bin/tmux (a version mismatch the server rejects).
 dbox_tmux() {
     dbox_add --bind-try "/tmp/tmux-$(id -u)" "/tmp/tmux-$(id -u)"
-    # Also expose the exact tmux binary the host server runs (the ghr build behind
-    # /usr/local/bin/tmux). The default profile re-binds it via dbox_block, but
-    # jen/rem don't mount /usr/local/bin and would fall back to the older apt
-    # /usr/bin/tmux -- a client/server version mismatch the server rejects with
-    # "server exited unexpectedly". Bind the resolved binary at /usr/local/bin/tmux
-    # (first on PATH) so every profile speaks the server's protocol. No-op if tmux
-    # isn't installed.
-    local bin
-    bin=$(command -v tmux 2>/dev/null) || return 0
-    bin=$(realpath "$bin" 2>/dev/null) || return 0
-    dbox_add --ro-bind-try "$bin" /usr/local/bin/tmux
+    dbox_localbin tmux
 }
 
 # Read-only host system. -try on anything not guaranteed present so a missing
@@ -256,13 +263,21 @@ dbox_resolve_links() {
     [ "$git_mode" = rw ] && bind="--bind"
     declare -A seen
 
+    # ~/.gitconfig carries git identity AND filter configs like git-lfs
+    # (filter.lfs.*). Bind it read-only for ANY git work tree -- not just worktrees
+    # -- so the LFS smudge/clean filters are configured (otherwise checkouts leave
+    # pointer files) and the box never rewrites the user's global config.
+    if git -C "$PWD" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        dbox_add --ro-bind-try "$HOME/.gitconfig" "$HOME/.gitconfig"
+    fi
+    # Worktree (.git is a file): its common dir lives outside $PWD, so bind it too,
+    # honouring git_mode so jen/rem can commit/push.
     if [ -f "$PWD/.git" ]; then
         local common; common=$(git rev-parse --git-common-dir 2>/dev/null)
         if [ -n "$common" ]; then
             common=$(realpath "$common")
             dbox_add "$bind" "$common" "$common"; seen[$common]=1
         fi
-        dbox_add "$bind" "$HOME/.gitconfig" "$HOME/.gitconfig"
     fi
 
     local pwd_norm="${PWD%/}" claude_norm="${HOME%/}/.claude" local_norm="${HOME%/}/.local" target
