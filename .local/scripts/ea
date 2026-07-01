@@ -120,27 +120,146 @@ resolve_story() {
 # Each line: #:[entity action] METHOD /path   (+ optional query:/body: lines).
 # ==========================================================================
 # >>> EA_API
+#:[me update_my_profile] PUT /agent/me
+#:[me update_my_profile] body: color description initials
+#:[effort_scales list_effort_scales] GET /effort_scales
+#:[values list_scale_values] GET /effort_scales/{scale_id}/values
+#:[activity my_activity] GET /me/activity
+#:[activity my_activity] query: event_type limit before
+#:[mentions list_my_mentions] GET /me/mentions
+#:[mentions list_my_mentions] query: limit cursor since_id unacked
+#:[ack ack_mention] POST /me/mentions/{mention_id}/ack
+#:[stories my_stories] GET /me/stories
+#:[stories my_stories] query: role state cursor limit
 #:[meta get] GET /meta
+#:[project get] GET /projects/{project_id}
+#:[project update] PUT /projects/{project_id}
+#:[project update] body: agent_key_creator_roles[] auto_plan description effort_scale_id enable_tasks initial_velocity iteration_length_weeks iteration_start_day manual_velocity name public_access velocity_done_state velocity_strategy
+#:[addable-members list_addable_members] GET /projects/{project_id}/addable-members
+#:[audit-log project_audit_log] GET /projects/{project_id}/audit-log
+#:[epics list] GET /projects/{project_id}/epics
+#:[epics create] POST /projects/{project_id}/epics
+#:[epics create] body: description epic_title label_id name
+#:[epics get] GET /projects/{project_id}/epics/{epic_id}
+#:[epics update] PUT /projects/{project_id}/epics/{epic_id}
+#:[epics update] body: description epic_title name
+#:[epics delete] DELETE /projects/{project_id}/epics/{epic_id}
+#:[attachments list_epic] GET /projects/{project_id}/epics/{epic_id}/attachments
+#:[json upload_epic_json] POST /projects/{project_id}/epics/{epic_id}/attachments/json
+#:[json upload_epic_json] body: content_type* file_base64* file_name*
+#:[attachments delete_epic] DELETE /projects/{project_id}/epics/{epic_id}/attachments/{attachment_id}
+#:[comments list_comments] GET /projects/{project_id}/epics/{epic_id}/comments
+#:[comments create_comment] POST /projects/{project_id}/epics/{epic_id}/comments
+#:[comments create_comment] body: comment_emoji comment_text* mentioned_agent_ids[] mentioned_member_ids[]
+#:[comments update_comment] PUT /projects/{project_id}/epics/{epic_id}/comments/{comment_id}
+#:[comments update_comment] body: comment_emoji comment_text mentioned_agent_ids[] mentioned_member_ids[]
+#:[comments delete_comment] DELETE /projects/{project_id}/epics/{epic_id}/comments/{comment_id}
+#:[epic_followers list_followers] GET /projects/{project_id}/epics/{epic_id}/followers
+#:[epic_followers add_follower] POST /projects/{project_id}/epics/{epic_id}/followers
+#:[epic_followers add_follower] body: agent_id member_id
+#:[epic_agents remove_agent_follower] DELETE /projects/{project_id}/epics/{epic_id}/followers/agents/{agent_id}
+#:[epic_followers remove_follower] DELETE /projects/{project_id}/epics/{epic_id}/followers/{member_id}
+#:[epic_owners list_owners] GET /projects/{project_id}/epics/{epic_id}/owners
+#:[epic_owners add_owner] POST /projects/{project_id}/epics/{epic_id}/owners
+#:[epic_owners add_owner] body: agent_id member_id
+#:[epic_agents remove_agent_owner] DELETE /projects/{project_id}/epics/{epic_id}/owners/agents/{agent_id}
+#:[epic_owners remove_owner] DELETE /projects/{project_id}/epics/{epic_id}/owners/{member_id}
 #:[events list] GET /projects/{project_id}/events
-#:[events list] query: since types cursor limit
+#:[events list] query: since_id since types cursor limit
+#:[formats list_formats] GET /projects/{project_id}/export/formats
+#:[export export_format] GET /projects/{project_id}/export/{format}
+#:[json import_json] POST /projects/{project_id}/import/json
+#:[json import_json] body: file_base64 file_name owner repo source* token
+#:[iterations list] GET /projects/{project_id}/iterations
+#:[iterations create] POST /projects/{project_id}/iterations
+#:[iterations create] body: end* start*
+#:[first-preview first_preview] GET /projects/{project_id}/iterations/first-preview
+#:[iterations get] GET /projects/{project_id}/iterations/{iteration_id}
+#:[iterations delete] DELETE /projects/{project_id}/iterations/{iteration_id}
+#:[done-stories done_stories] GET /projects/{project_id}/iterations/{iteration_id}/done-stories
+#:[done-stories done_stories] query: limit cursor
+#:[labels list] GET /projects/{project_id}/labels
+#:[labels create] POST /projects/{project_id}/labels
+#:[labels create] body: background_color_hex label_name name text_color_hex
+#:[labels get] GET /projects/{project_id}/labels/{label_id}
+#:[labels update] PUT /projects/{project_id}/labels/{label_id}
+#:[labels update] body: background_color_hex label_name name text_color_hex
+#:[labels delete] DELETE /projects/{project_id}/labels/{label_id}
+#:[label_archive archive] POST /projects/{project_id}/labels/{label_id}/archive
+#:[add-existing add_existing_org_member] POST /projects/{project_id}/members/add-existing
+#:[add-existing add_existing_org_member] body: member_id* role
+#:[memberships list] GET /projects/{project_id}/memberships
+#:[memberships create] POST /projects/{project_id}/memberships
+#:[memberships create] body: email person_id role
+#:[memberships get] GET /projects/{project_id}/memberships/{membership_id}
+#:[memberships update] PUT /projects/{project_id}/memberships/{membership_id}
+#:[memberships update] body: role
+#:[memberships delete] DELETE /projects/{project_id}/memberships/{membership_id}
+#:[preferences get_preferences] GET /projects/{project_id}/preferences
+#:[preferences update_preferences] PUT /projects/{project_id}/preferences
+#:[preferences update_preferences] body: display_density panel_config*
+#:[search search] GET /projects/{project_id}/search
 #:[stories list] GET /projects/{project_id}/stories
-#:[stories list] query: state label story_type cursor limit fields
+#:[stories list] query: state label story_type cursor limit fields include_archived
 #:[stories create] POST /projects/{project_id}/stories
 #:[stories create] body: current_state description estimate icebox labels[] move_to name* owners[] priority_id story_type
 #:[stories bulk_transition] POST /projects/{project_id}/stories/bulk_transition
 #:[stories bulk_transition] body: reason story_ids[]* to*
 #:[stories get] GET /projects/{project_id}/stories/{story_id}
 #:[stories update] PUT /projects/{project_id}/stories/{story_id}
-#:[stories update] body: current_state description estimate force_state_change icebox labels[] move_to name position priority_id story_type
+#:[stories update] body: current_state description estimate force_state_change icebox labels[] move_to name position priority_id reorder story_type
 #:[stories delete] DELETE /projects/{project_id}/stories/{story_id}
+#:[story_archive archive] POST /projects/{project_id}/stories/{story_id}/archive
+#:[attachments list] GET /projects/{project_id}/stories/{story_id}/attachments
+#:[json upload_json] POST /projects/{project_id}/stories/{story_id}/attachments/json
+#:[json upload_json] body: content_type* file_base64* file_name*
+#:[attachments delete] DELETE /projects/{project_id}/stories/{story_id}/attachments/{attachment_id}
+#:[blockers list] GET /projects/{project_id}/stories/{story_id}/blockers
+#:[blockers create] POST /projects/{project_id}/stories/{story_id}/blockers
+#:[blockers create] body: blocker_desc* resolved
+#:[blockers get] GET /projects/{project_id}/stories/{story_id}/blockers/{blocker_id}
+#:[blockers update] PUT /projects/{project_id}/stories/{story_id}/blockers/{blocker_id}
+#:[blockers update] body: blocker_desc resolved
+#:[blockers delete] DELETE /projects/{project_id}/stories/{story_id}/blockers/{blocker_id}
 #:[comments list] GET /projects/{project_id}/stories/{story_id}/comments
 #:[comments list] query: cursor limit
 #:[comments create] POST /projects/{project_id}/stories/{story_id}/comments
-#:[comments create] body: comment_emoji comment_text text
+#:[comments create] body: comment_emoji comment_text mentioned_agent_ids[] mentioned_member_ids[] text
 #:[comments get] GET /projects/{project_id}/stories/{story_id}/comments/{comment_id}
 #:[comments update] PUT /projects/{project_id}/stories/{story_id}/comments/{comment_id}
-#:[comments update] body: comment_emoji comment_text text
+#:[comments update] body: comment_emoji comment_text mentioned_agent_ids[] mentioned_member_ids[] text
 #:[comments delete] DELETE /projects/{project_id}/stories/{story_id}/comments/{comment_id}
+#:[epics add_story_to_epic] POST /projects/{project_id}/stories/{story_id}/epics
+#:[epics add_story_to_epic] body: epic_id*
+#:[epics remove_story_from_epic] DELETE /projects/{project_id}/stories/{story_id}/epics/{epic_id}
+#:[story_followers list_followers] GET /projects/{project_id}/stories/{story_id}/followers
+#:[story_followers add_follower] POST /projects/{project_id}/stories/{story_id}/followers
+#:[story_followers add_follower] body: agent_id member_id
+#:[story_agents remove_agent_follower] DELETE /projects/{project_id}/stories/{story_id}/followers/agents/{agent_id}
+#:[story_followers remove_follower] DELETE /projects/{project_id}/stories/{story_id}/followers/{member_id}
+#:[labels list_labels] GET /projects/{project_id}/stories/{story_id}/labels
+#:[labels add_label] POST /projects/{project_id}/stories/{story_id}/labels
+#:[labels add_label] body: label_id*
+#:[labels remove_label] DELETE /projects/{project_id}/stories/{story_id}/labels/{label_id}
+#:[links list] GET /projects/{project_id}/stories/{story_id}/links
+#:[links create] POST /projects/{project_id}/stories/{story_id}/links
+#:[links create] body: link_type title url*
+#:[links update] PUT /projects/{project_id}/stories/{story_id}/links/{link_id}
+#:[links update] body: title url*
+#:[links delete] DELETE /projects/{project_id}/stories/{story_id}/links/{link_id}
+#:[story_owners list_owners] GET /projects/{project_id}/stories/{story_id}/owners
+#:[story_owners add_owner] POST /projects/{project_id}/stories/{story_id}/owners
+#:[story_owners add_owner] body: agent_id member_id
+#:[story_agents remove_agent_owner] DELETE /projects/{project_id}/stories/{story_id}/owners/agents/{agent_id}
+#:[story_owners remove_owner] DELETE /projects/{project_id}/stories/{story_id}/owners/{member_id}
+#:[reject reject_story] POST /projects/{project_id}/stories/{story_id}/reject
+#:[restart restart_story] POST /projects/{project_id}/stories/{story_id}/restart
+#:[reviews list] GET /projects/{project_id}/stories/{story_id}/reviews
+#:[reviews create] POST /projects/{project_id}/stories/{story_id}/reviews
+#:[reviews create] body: comment reviewer_agent_id reviewer_id
+#:[reviews update] PUT /projects/{project_id}/stories/{story_id}/reviews/{review_id}
+#:[reviews update] body: comment status*
+#:[reviews delete] DELETE /projects/{project_id}/stories/{story_id}/reviews/{review_id}
 #:[tasks list] GET /projects/{project_id}/stories/{story_id}/tasks
 #:[tasks create] POST /projects/{project_id}/stories/{story_id}/tasks
 #:[tasks create] body: complete description task_desc task_order
@@ -150,13 +269,11 @@ resolve_story() {
 #:[tasks delete] DELETE /projects/{project_id}/stories/{story_id}/tasks/{task_id}
 #:[stories transition] POST /projects/{project_id}/stories/{story_id}/transitions
 #:[stories transition] body: reason to*
+#:[unarchive unarchive] POST /projects/{project_id}/stories/{story_id}/unarchive
+#:[short-links resolve_short_link] GET /short-links/{code}
+#:[story_states list_story_states] GET /story_states
+#:[story_types list_story_types] GET /story_types
 # <<< EA_API
-# Hand-written entries for endpoints absent from the OpenAPI spec.
-# These survive `ea api gen` because they live outside the auto-gen markers.
-#:[links list] GET /projects/{project_id}/stories/{story_id}/links
-#:[links create] POST /projects/{project_id}/stories/{story_id}/links
-#:[links create] body: url*
-#:[links delete] DELETE /projects/{project_id}/stories/{story_id}/links/{link_id}
 
 # Build a JSON body from --key value pairs. Values coerce via JSON (numbers,
 # booleans, arrays, objects); anything that is not valid JSON stays a string.
@@ -226,15 +343,20 @@ dispatch() {
   [[ -n ${1:-} ]] || { cmd_help; return; }
   local entity="$1"; shift
 
-  # Curated entities/actions that live outside the generated EA_API manifest, so
-  # `ea api gen` never clobbers them. The tracker serves these but its OpenAPI
-  # spec omits them, so they cannot be routed by the manifest grep.
-  [[ $entity == labels ]] && { cmd_labels "$pid" "$@"; return; }
+  # `ea labels` alone (no action) is shorthand for the curated list view.
+  [[ $entity == labels && -z ${1:-} ]] && { cmd_labels "$pid"; return; }
 
   [[ -n ${1:-} ]] || { entity_help "$entity"; return; }
   local action="$1"; shift
+  [[ $action == --help || $action == -h || $action == help ]] && { entity_help "$entity"; return; }
 
+  # Curated wrappers: nicer rendering (labels list) or a safety-constrained write
+  # (labels recolor - see cmd_labels) or a UX shortcut (stories owner - ref
+  # resolution + config default). Everything else for these entities (labels
+  # create/get/update/delete, the story-label-attach actions, etc.) is plain
+  # generated API surface and falls through to the generic dispatch below.
   [[ $entity == stories && $action == owner ]] && { cmd_owner "$pid" "$@"; return; }
+  [[ $entity == labels && ($action == list || $action == recolor) ]] && { cmd_labels "$pid" "$action" "$@"; return; }
 
   local a
   for a in "$@"; do [[ $a == --help || $a == -h || $a == help ]] && { op_help "$entity" "$action"; return; }; done
@@ -318,8 +440,8 @@ Curated commands:
 
 API surface (generated):
 EOF
-  grep -oE '^#:\[[a-z]+ [a-z_]+\][[:space:]]+(GET|POST|PUT|DELETE)' "$SELF" \
-    | sed -E 's/^#:\[([a-z]+) ([a-z_]+)\].*/  \1 \2/' | sort -u
+  grep -oE '^#:\[[a-z_-]+ [a-z_]+\][[:space:]]+(GET|POST|PUT|DELETE)' "$SELF" \
+    | sed -E 's/^#:\[([a-z_-]+) ([a-z_]+)\].*/  \1 \2/' | sort -u
 }
 
 # ---- curated commands ----
@@ -346,8 +468,9 @@ cmd_dash() {
 
 
 #@:[stories owner] owner add|rm <ref> [--member <id>]  Add/remove a story owner
-# Owners: POST/DELETE /projects/{pid}/stories/{sid}/owners[/{member_id}]. Absent
-# from the OpenAPI spec, so wired by hand. --member defaults to config .member_id.
+# Owners: POST/DELETE /projects/{pid}/stories/{sid}/owners[/{member_id}] (now also
+# generated as story_owners/epic_owners). Kept as a wrapper for ref resolution and
+# the config .member_id default; --member falls back to config .member_id.
 cmd_owner() {
   local pid="$1"; shift
   local sub="${1:-}"; [[ $# -gt 0 ]] && shift
@@ -375,9 +498,13 @@ cmd_owner() {
   fi
 }
 
-# Labels: GET/PUT /projects/{pid}/labels[/{id}], also absent from the spec.
-# recolor sends color fields ONLY: a label_name in the body trips the tracker's
-# auto-mode classifier, which reads it as a rename and denies the request.
+#@:[labels list] list  List project labels (color-coded table)
+#@:[labels recolor] recolor <id> --bg <hex> --text <hex>  Recolor a label (color only)
+# Labels: GET/PUT /projects/{pid}/labels[/{id}] (also in the generated manifest
+# now; create/get/update/delete/list_labels/add_label/remove_label reach it via
+# generic dispatch). Kept as wrappers for the color-coded table and for recolor's
+# safety constraint: color fields ONLY, never label_name, or the tracker's
+# auto-mode classifier reads it as a rename and denies the request.
 cmd_labels() {
   local pid="$1"; shift
   local sub="${1:-list}"; [[ $# -gt 0 ]] && shift
@@ -422,18 +549,36 @@ api_gen() {
             | $f
               + (if ($t == "array") or (($t|type=="array") and ($t|index("array"))) then "[]" else "" end)
               + (if ($req|index($f)) then "*" else "" end) ];
-      .paths | to_entries[] | .key as $p | (.value|to_entries[]) | .key as $m | .value as $op
-      | ($p | sub("^/api/v1"; "") | split("/")
-          | map(select(. != "" and . != "projects" and (startswith("{")|not)))) as $segs
-      | (if ($segs[-1] | test("transition")) then $segs[-2] else $segs[-1] end) as $E
-      | ($op.operationId | if .=="list_events" then "list" elif .=="get_meta" then "get" else . end) as $A
-      | ($p | sub("^/api/v1"; "")) as $path
-      | ($m|ascii_upcase) as $method
-      | ([ $op.parameters[]? | select(.in=="query") | (.name + (if .required then "*" else "" end)) ]) as $q
-      | ($op.requestBody.content."application/json".schema."$ref" // null) as $bref
-      | ( "#:[\($E) \($A)] \($method) \($path)" ),
-        ( if ($q|length)>0 then "#:[\($E) \($A)] query: " + ($q|join(" ")) else empty end ),
-        ( if $bref then "#:[\($E) \($A)] body: " + (bfields($bref)|join(" ")) else empty end )')
+      def singularize: if test("ies$") then sub("ies$";"y") elif test("s$") then sub("s$";"") else . end;
+      def emit($E; $o):
+        ( "#:[\($E) \($o.a)] \($o.m) \($o.p)" ),
+        ( if ($o.q|length)>0 then "#:[\($E) \($o.a)] query: " + ($o.q|join(" ")) else empty end ),
+        ( if $o.bref then "#:[\($E) \($o.a)] body: " + (bfields($o.bref)|join(" ")) else empty end );
+      [ .paths | to_entries[] | .key as $p | (.value|to_entries[]) | .key as $m | .value as $op
+        | ($p | sub("^/api/v1"; "") | split("/")
+            | map(select(. != "" and . != "projects" and (startswith("{")|not)))) as $segs
+        | (if ($segs|length)==0 then "project"
+           elif ($segs[-1] | test("transition")) then $segs[-2]
+           else $segs[-1] end) as $E0
+        | ($op.operationId | if .=="list_events" then "list" elif .=="get_meta" then "get" else . end) as $A
+        | { e0: $E0, a: $A, m: ($m|ascii_upcase), p: ($p|sub("^/api/v1";"")),
+            q: ([ $op.parameters[]? | select(.in=="query") | (.name + (if .required then "*" else "" end)) ]),
+            bref: ($op.requestBody.content."application/json".schema."$ref" // null) }
+      ] as $ops
+      # A bare entity+action name that spans more than one distinct path is ambiguous:
+      # dispatch()s `grep | head -1` would silently pick one and ignore the other (this
+      # happens for e.g. "owners"/"followers"/"archive", which epics and stories both
+      # have). Qualify only those with their immediate parent collection; leave
+      # anything unambiguous (comments, tasks, ...) using the plain name as before.
+      | ($ops | group_by(.e0 + " " + .a) | map(select((map(.p)|unique|length) > 1) | .[0].e0 + " " + .[0].a)) as $ambiguous
+      | $ops[] | . as $o
+        | (if ($ambiguous | index($o.e0 + " " + $o.a)) then
+             ($o.p | split("/")) as $all
+             | ([$all[] | select(startswith("{"))]) as $braces
+             | ($all | index($braces[1])) as $bi
+             | ($all[$bi-1] | singularize) + "_" + $o.e0
+           else $o.e0 end) as $E
+        | emit($E; $o)')
   awk -v b="$block" '
     /^# >>> EA_API/ { print; print b; skip=1; next }
     /^# <<< EA_API/ { skip=0 }
