@@ -74,6 +74,7 @@ is published to the host; enter the coat to reach a service. Rootless, no sudo.
   ${PROG} enter            open a shell inside the coat
   ${PROG} run -- <cmd>     run <cmd> inside the coat (as you; writes stay yours)
   ${PROG} pid              print the coat's infra PID (build your own nsenter)
+  ${PROG} name             print this worktree's coat name (git-only, for scripts)
   ${PROG} db               start postgres in the coat (localhost:5432, isolated)
   ${PROG} compose [up|down] run/stop this repo's compose.yaml in the coat (up: -f <file>)
   ${PROG} status           show the coat and what's in it
@@ -193,12 +194,15 @@ the daemon its socket points at, not here. Pointers:
   DOCKER_HOST    = ${DOCKER_HOST:-unset}
 
 Entering that pod's namespaces from here is impossible by design (it would be a
-sandbox escape). What works from HERE — talk to the containers over the socket:
+sandbox escape), and podman exec only reaches the SERVICE containers (postgres,
+...), not your own toolchain or source. To run your own tools (cargo, npm) in the
+coat, don't enter per-command: launch this sandbox INTO the coat from the host,
+e.g.
+  ${PROG} run -- <your sandbox launcher>
+so every process inside it is already in the coat on localhost. To only talk to a
+service over the socket from here:
   podman ps --pod --filter pod=${pod}      # the coat's containers
-  podman exec -it <container> <cmd>         # run a command in one of them
-
-To truly enter the coat (${PROG} run / enter), run ${PROG} where podman is
-local — typically the host, not this sandbox.
+  podman exec -it <container> <cmd>
 EOF
     exit 1
 }
@@ -315,6 +319,16 @@ function cmd_pid {
     require_coat "${pod}"
     pid=$(infra_pid "${pod}") || exit 1
     printf '%s\n' "${pid}"
+}
+
+# The coat name for the current worktree (git-derived). Pure git, no podman — for
+# a launcher that wants to check `podman pod exists $(workit name)` before
+# entering. Fails quietly (nonzero) when a name can't be inferred.
+function cmd_name {
+    no_args name "$@"
+    local n
+    n=$(coat_name) || exit 1
+    printf '%s\n' "${n}"
 }
 
 function cmd_db {
@@ -723,9 +737,14 @@ function coat_volumes {
     while IFS= read -r cid; do
         [[ -n "${cid}" ]] || continue
         while IFS= read -r vol; do
-            # Only this coat's own volumes (the <pod>- prefix): never sweep an
-            # external/shared volume a user may have hand-attached to a container.
-            [[ "${vol}" == "${pod}-"* ]] && vols+=("${vol}")
+            # Only this coat's own volumes. The <pod>- prefix alone isn't enough:
+            # coat names nest (workit-foo vs workit-foo-bar), so also require the
+            # volume be unlabeled (legacy) or labeled for THIS coat, never sweep a
+            # sibling coat's volume a user hand-attached here.
+            [[ "${vol}" == "${pod}-"* ]] || continue
+            local owner
+            owner=$(podman volume inspect "${vol}" --format '{{index .Labels "workit.coat"}}' 2>/dev/null || true)
+            [[ -z "${owner}" || "${owner}" == "${pod}" ]] && vols+=("${vol}")
         done < <(podman inspect "${cid}" \
             --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{"\n"}}{{end}}{{end}}' 2>/dev/null || true)
     done < <(podman pod inspect "${pod}" \
@@ -869,6 +888,11 @@ done
 case "${1:-}" in
 help | -h | --help) usage 0 ;;
 "") cmd_suggest ;;
+name)
+    # git-only; no podman/nsenter needed, so it skips need_tools
+    shift
+    cmd_name "$@"
+    ;;
 up | enter | run | pid | db | compose | status | ls | gc | down)
     need_tools
     sub="${1}"

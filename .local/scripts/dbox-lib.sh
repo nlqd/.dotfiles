@@ -339,23 +339,80 @@ dbox_project() {
 # the sandbox tree, not the machine. cgroup v2 with delegated cpu/memory/pids
 # means no root. DBOX_NOLIMIT=1 skips it.
 dbox_exec() {
+    # Launch the sandbox INSIDE the worktree's coat (a rootless-podman netns) when
+    # one exists and is locally enterable, so the coat's services answer on
+    # localhost from within. A sandbox can't enter a coat per-command (its pid ns
+    # is unshared), but the launcher runs on the host and bwrap, which does not
+    # --unshare-net, inherits whatever netns it starts in. --no-coat opts out; the
+    # /proc check skips the wrap when the coat isn't local (e.g. a nested launch
+    # from inside a sandbox), falling back to a normal launch.
+    local -a coat=()
+    # Skip entirely inside a sandbox (dbox sets hostname=bubblewrap): a sandbox
+    # can't enter a host coat, and this avoids a nested launch poking the remote
+    # pod or misfiring the pid-locality check below on a recycled pid number.
+    if [ -z "${DBOX_NO_COAT:-}" ] && [ "$(cat /proc/sys/kernel/hostname 2>/dev/null)" != bubblewrap ] \
+        && command -v workit >/dev/null 2>&1 && command -v podman >/dev/null 2>&1; then
+        local cn pid
+        if cn=$(workit name 2>/dev/null) && podman pod exists "$cn" 2>/dev/null; then
+            if workit up >/dev/null 2>&1; then
+                pid=$(workit pid 2>/dev/null || true)
+                if [ -n "${pid:-}" ] && [ -e "/proc/${pid}" ]; then
+                    coat=(workit run --)
+                    # nsenter --user puts us at uid 0 inside the coat's rootless
+                    # userns (it maps to your real uid on the host). Claude refuses
+                    # --dangerously-skip-permissions as uid 0, so tell it it's
+                    # sandboxed (it is). Only here; a normal launch stays uid 1002.
+                    dbox_add --setenv IS_SANDBOX 1
+                    # The coat netns has egress but the host's 127.0.0.53 stub
+                    # resolver is unreachable inside it, so DNS would die (agent
+                    # can't reach the API). Bind the pod's OWN resolv.conf, which
+                    # podman populates with the right nameserver for whatever
+                    # network backend is active (slirp's 10.0.2.3, pasta's, ...)
+                    # plus the host resolvers and search domains — backend-agnostic,
+                    # so a podman upgrade to pasta doesn't break it. Fall back to
+                    # slirp's forwarder (override with DBOX_COAT_DNS) if it can't be
+                    # read. Appended last so it overrides dbox_system's earlier bind.
+                    local infra_id rcpath rcfd rcfile
+                    infra_id=$(podman pod inspect "$cn" --format '{{.InfraContainerID}}' 2>/dev/null) || infra_id=""
+                    rcpath=$(podman container inspect "$infra_id" --format '{{.ResolvConfPath}}' 2>/dev/null) || rcpath=""
+                    if [ -n "$rcpath" ] && [ -s "$rcpath" ]; then
+                        exec {rcfd}<"$rcpath"
+                        dbox_add --ro-bind-data "$rcfd" /etc/resolv.conf
+                    elif rcfile=$(mktemp 2>/dev/null); then
+                        printf 'nameserver %s\n' "${DBOX_COAT_DNS:-10.0.2.3}" >"$rcfile"
+                        exec {rcfd}<"$rcfile"
+                        rm -f "$rcfile"
+                        dbox_add --ro-bind-data "$rcfd" /etc/resolv.conf
+                    fi
+                    printf 'dbox: launching inside coat %s\n' "$cn" >&2
+                fi
+            else
+                # This branch's coat exists but couldn't be started (e.g. a moved
+                # worktree dir the label no longer matches, or a cross-repo
+                # collision it refuses). Don't silently launch coatless — say so.
+                printf 'dbox: coat %s exists but could not be started; launching without it\n' "$cn" >&2
+            fi
+        fi
+    fi
     if [ -z "${DBOX_NOLIMIT:-}" ] && command -v systemd-run >/dev/null; then
         exec systemd-run --user --scope --quiet \
             -p MemoryMax="${DBOX_MEM:-12G}" -p MemorySwapMax=0 \
             -p CPUQuota="${DBOX_CPU:-600%}" -p TasksMax="${DBOX_TASKS:-8192}" \
-            -- "$BWRAP" "${ARGS[@]}" "$@"
+            -- ${coat[@]+"${coat[@]}"} "$BWRAP" "${ARGS[@]}" "$@"
     fi
-    exec "$BWRAP" "${ARGS[@]}" "$@"
+    exec ${coat[@]+"${coat[@]}"} "$BWRAP" "${ARGS[@]}" "$@"
 }
 
 # Common leading-flag parser. Sets MODE and SHARES; leaves the rest in DBOX_REST.
 DBOX_MODE=live
+DBOX_NO_COAT="${DBOX_NO_COAT:-}"
 DBOX_SHARES=()
 DBOX_REST=()
 dbox_parse() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --scratch) DBOX_MODE=scratch; shift ;;
+            --no-coat) DBOX_NO_COAT=1; shift ;;
             --share)   DBOX_SHARES+=("$2"); shift 2 ;;
             --)        shift; break ;;
             *)         break ;;
