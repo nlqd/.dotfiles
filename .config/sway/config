@@ -150,3 +150,6 @@ bindsym $mod+Shift+o resize grow width 70px
 bar swaybar_command waybar
 
 include /etc/sway/config.d/*
+
+# per-machine config, tracked in repo, auto-selected by hostname (uncomment to enable)
+# include hosts/$(hostname).conf

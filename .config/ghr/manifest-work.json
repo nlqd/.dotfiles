@@ -1,8 +1,8 @@
 [
   {
     "repo": "Alexsjones/llmfit",
-    "asset": "llmfit-v0.9.33-aarch64-apple-darwin.tar.gz",
-    "version": "v0.9.33",
+    "asset": "llmfit-v0.9.38-aarch64-apple-darwin.tar.gz",
+    "version": "v0.9.38",
     "links": {
       "llmfit-v0.8.4-x86_64-unknown-linux-gnu/llmfit": "/home/dungngo/.local/bin/llmfit"
     }
@@ -58,7 +58,7 @@
   {
     "repo": "neovim/neovim",
     "asset": "nvim-linux-x86_64.tar.gz",
-    "version": "v0.12.3",
+    "version": "v0.12.4",
     "links": {
       "nvim-linux-x86_64/bin/nvim": "/usr/local/bin/nvim"
     }
@@ -73,8 +73,8 @@
   },
   {
     "repo": "tmux/tmux-builds",
-    "asset": "tmux-3.6b-linux-x86_64.tar.gz",
-    "version": "v3.6b",
+    "asset": "tmux-3.7b-linux-x86_64.tar.gz",
+    "version": "v3.7b",
     "links": {
       "tmux": "/usr/local/bin/tmux"
     }
@@ -82,7 +82,7 @@
   {
     "repo": "tomasz-tomczyk/crit",
     "asset": "crit-linux-amd64",
-    "version": "v0.16.5",
+    "version": "v0.17.1",
     "links": {
       "crit-linux-amd64": "/home/dungngo/.local/bin/crit"
     }
@@ -90,7 +90,7 @@
   {
     "repo": "yt-dlp/yt-dlp",
     "asset": "yt-dlp",
-    "version": "2026.06.09",
+    "version": "2026.07.04",
     "links": {
       "yt-dlp": "/home/dungngo/.local/bin/yt-dlp"
     }
