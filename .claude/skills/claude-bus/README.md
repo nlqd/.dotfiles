@@ -11,8 +11,9 @@ Built and tested: the transport layer (`init`, `send`, `send-path`, `wait`,
 auto-ack on drain), the liveness layer described below, the probe (`register`,
 `probe-snapshot`, the pure `classify`) and the per-orchestrator monitor (`monitor`,
 `monitor-tick`), the expectation-free watch (`watch`, `unwatch`) that flags a
-persistent sink on two axes, `dead` (its process tree is gone) and `stale` (its
-inbox stops draining), and the secretary membrane (`delegate`
+persistent sink on three axes, `dead` (its process tree is gone), `erroring` (its
+transcript ends on an unresolved API error) and `stale` (its inbox stops draining),
+and the secretary membrane (`delegate`
 for transparent inbox interception, `forward` for verbatim relay, and the
 drained-message `log/`).
 It all sits on the same foundation: plain files and a backgrounded
@@ -133,20 +134,24 @@ sink has none: a secretary that fronts a coordinator's inbox, or an oncall sessi
 receives mail by `send`, `forward`, or a delegated redirect, not by a tracked
 `dispatch`. So when one goes dark, and the failure that exposed this was a
 server-side rate limit that left the process alive but unable to act, nothing points
-at it and its freeze is invisible. `watch <me> <target>` closes that, on the same
-two failure modes the expectation path already knows but without needing an
-expectation. If the target is registered, each tick probes its process tree and
-sends a `dead` alert when it is gone, which is the OOM or crash case (an instrumented
-build blowing past the sandbox's memory cap and getting SIGKILL'd is exactly this).
-And it remembers the oldest undrained message in the target's inbox and sends a
-`stale` alert if the same one persists past `DRAIN_MAX` ticks, which is the
-rate-limited or hung case, alive but not draining. `dead` outranks `stale`, since a
-gone process cannot drain anyway. Neither needs cooperation from the target (a
-rate-limited session cannot self-report), and the drain axis resets the moment the
-target drains, so a merely slow sink never false-alarms. `dead` needs no baseline:
-a death is a death regardless of cause, and the tracked-work path already labels
-`oom` where it holds a baseline to diff against. This is liveness for the agents no
-expectation covers.
+at it and its freeze is invisible. `watch <me> <target>` closes that, on three
+failure modes the expectation path already knows but without needing an expectation.
+If the target is registered, each tick probes its process tree and sends a `dead`
+alert when it is gone, the OOM or crash case (an instrumented build blowing past the
+sandbox's memory cap and getting SIGKILL'd is exactly this). If instead it is alive
+but its registered transcript ends on an unresolved API error, it sends an `erroring`
+alert carrying the HTTP status, the rate-limit or server-error case, read from the
+structured `isApiErrorMessage` entry Claude Code writes rather than by scraping a
+screen. And it remembers the oldest undrained message in the target's inbox and
+sends a `stale` alert if the same one persists past `DRAIN_MAX` ticks, the hung-but-
+alive case. Priority is `dead`, then `erroring`, then `stale`: a gone process cannot
+drain, and a stuck-erroring one is more specific than merely quiet. None of these
+needs cooperation from the target (a rate-limited session cannot self-report), and
+the drain axis resets the moment the target drains, so a merely slow sink never
+false-alarms. `dead` needs no baseline (a death is a death), and `erroring` reads the
+cause straight from the transcript, which is why it beats a naive transcript-mtime-
+flat check: flatness cannot separate a frozen agent from one healthily idle between
+tasks. This is liveness for the agents no expectation covers.
 
 ### 5. Liveness probe: stateless and out-of-process
 

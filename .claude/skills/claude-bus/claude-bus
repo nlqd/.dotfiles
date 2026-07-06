@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # claude-bus: file-based mailbox for cross-Claude-session messaging.
 #
-# One inbox directory per session under $CLAUDE_BUS_ROOT (default /tmp/claude-bus).
+# One inbox directory per session under $CLAUDE_BUS_ROOT (default ~/.cache/claude-bus).
 # SHORT messages only: send refuses bodies over $CLAUDE_BUS_MAX bytes (default 1024).
 # Pass anything large (files, long output) BY PATH via send-path, not inline.
 #
@@ -17,7 +17,10 @@
 # sourced by tests without flipping shell options. The cmd_* functions guard
 # their own inputs and do not rely on -e for correctness.
 
-BUS_ROOT="${CLAUDE_BUS_ROOT:-/tmp/claude-bus}"
+# Default under ~/.cache (XDG cache), not /tmp: /tmp is tmpfs and is wiped on
+# reboot, which both splits the bus (a session that misses an explicit override
+# falls back here) and loses all inbox state; ~/.cache persists it across reboots.
+BUS_ROOT="${CLAUDE_BUS_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/claude-bus}"
 BUS_MAX="${CLAUDE_BUS_MAX:-1024}"   # max message body in bytes; bigger -> pass by path
 
 inbox_dir() { printf '%s/inbox/%s' "$BUS_ROOT" "$1"; }
@@ -178,7 +181,7 @@ cmd_watch() {
   local wf; wf="$(watch_file "$me" "$target")"
   ( flock 9
     jq -n --arg t "$target" --argjson d "$dmax" \
-      '{target:$t,drain_max:$d,last:"",ticks:0,alerted:"none"}' > "$wf.tmp.$$" \
+      '{target:$t,drain_max:$d,last:"",ticks:0}' > "$wf.tmp.$$" \
       && mv -- "$wf.tmp.$$" "$wf"
   ) 9>"$wd/.lock" || { rm -f -- "$wf.tmp.$$"; printf 'watch: failed to write %s\n' "$wf" >&2; exit 1; }
   printf 'watching %s for %s\n' "$target" "$me"
@@ -309,31 +312,45 @@ cmd_drain() {
 # --- liveness probe: out-of-process signal readers (the imperative shell) ---
 cg_base() { printf '%s%s' "${CLAUDE_BUS_SYSFS:-/sys/fs/cgroup}" "$1"; }
 
-# NOTE: cgroup.procs is a kernfs file, so `stat`/`[ -s ]` always report size 0.
-# Emptiness must be tested by reading content, not by file size.
-tree_alive() {  # <cgroup> -> exit 0 if the tree has any live process
+# All three readers walk the whole cgroup SUBTREE, not just the named node. In
+# cgroup v2 a scope that has child cgroups (a coat/bwrap agent's podman leaf, or a
+# nested systemd-run) holds no processes of its own, so reading only the top node's
+# cgroup.procs would see it empty and false-fire "dead" every tick. `find` avoids
+# `shopt -s globstar`, which would leak into a caller that sources this file.
+# NOTE: cgroup.procs is a kernfs file, so `stat`/`[ -s ]` always report size 0;
+# emptiness must be tested by reading content, not by file size.
+tree_alive() {  # <cgroup> -> exit 0 if any leaf in the tree has a live process
   [ -n "$1" ] || return 1
-  local b; b="$(cg_base "$1")"
-  [ -n "$(head -c1 "$b/cgroup.procs" 2>/dev/null)" ]
+  local b; b="$(cg_base "$1")"; [ -d "$b" ] || return 1
+  local f
+  while IFS= read -r f; do
+    [ -n "$(head -c1 "$f" 2>/dev/null)" ] && return 0
+  done < <(find "$b" -name cgroup.procs 2>/dev/null)
+  return 1
 }
 
-tree_net() {    # <cgroup> -> summed bytes_acked across the tree's tcp sockets
+tree_net() {    # <cgroup> -> summed bytes_acked across the subtree's tcp sockets
   [ -n "$1" ] || { echo 0; return; }
-  local b; b="$(cg_base "$1")"
-  # Guard existence before the redirect: a `<` on a missing file (tree already
-  # dead) is a shell error the pipe's 2>/dev/null cannot suppress.
-  [ -e "$b/cgroup.procs" ] || { echo 0; return; }
-  local pids; pids="$(tr '\n' '|' < "$b/cgroup.procs" 2>/dev/null | sed 's/|$//')"
-  [ -n "$pids" ] || { echo 0; return; }
+  local b; b="$(cg_base "$1")"; [ -d "$b" ] || { echo 0; return; }
+  local f pids all=""
+  while IFS= read -r f; do
+    pids="$(tr '\n' '|' 2>/dev/null < "$f" | sed 's/|$//')" || pids=""
+    [ -n "$pids" ] && all="${all:+$all|}$pids"
+  done < <(find "$b" -name cgroup.procs 2>/dev/null)
+  [ -n "$all" ] || { echo 0; return; }
   local sum
-  sum="$(ss -tinp 2>/dev/null | grep -E "pid=(${pids})," -A1 \
+  sum="$(ss -tinp 2>/dev/null | grep -E "pid=(${all})," -A1 \
     | grep -oE 'bytes_acked:[0-9]+' | awk -F: '{s+=$2} END{print s+0}')" || true
   echo "${sum:-0}"
 }
 
-tree_oom() {    # <cgroup> -> cumulative oom_kill count (0 if unknown)
+tree_oom() {    # <cgroup> -> oom_kill count (0 if unknown)
+  # Unlike cgroup.procs (per-cgroup, hence the subtree walk in the readers above),
+  # memory.events is hierarchical by default since Linux 5.2: a scope's own oom_kill
+  # already aggregates its children's, so the top node is the correct, non-double-
+  # counting read.
   local b v; b="$(cg_base "$1")"
-  v="$(awk '/^oom_kill /{print $2}' "$b/memory.events" 2>/dev/null)" || true
+  v="$(awk '/^oom_kill /{print $2; exit}' "$b/memory.events" 2>/dev/null)" || v=""
   echo "${v:-0}"
 }
 
@@ -519,18 +536,22 @@ cmd_monitor_tick() {
         "$pf" > "$pf.w.$$" 2>/dev/null; then mv -- "$pf.w.$$" "$pf"; else rm -f -- "$pf.w.$$"; fi
     ) 9>"$pd/.lock" || true
   done
-  # A watched target holds no expectation, so its liveness lives here on two axes:
-  # dead (its registered process tree is gone: OOM, crash) outranks stale (its inbox
-  # stops draining: rate-limited, hung). Alert once per distinct condition; a fresh
-  # oldest message or a recovered-then-failed target re-arms. `alerted` is a token
-  # ("none"/"dead"/"stale:<id>"), not a bool, so the two axes share one dedup slot and
-  # it is never empty — only `last` can be, so it stays the final @tsv field (a middle
-  # empty would collapse under read's IFS-whitespace and shift the columns).
-  local wf wrec target dmax last wticks prevw oldest oid nlast nticks kav wknown walive token abody wdo
+  # A watched target holds no expectation, so its liveness lives here on three axes,
+  # in priority order: dead (its registered process tree is gone: OOM, crash), then
+  # erroring (alive, but its transcript tail is an unresolved API error: rate limit,
+  # server error), then stale (its inbox stops draining). Each axis has its OWN dedup
+  # marker (da/ea/sa) so a lower axis masked by a transient higher one (a stuck sink
+  # that then gets rate-limited) is NOT re-alerted when the higher clears — only a
+  # genuinely new condition (fresh error status, fresh stuck message, or a recovered-
+  # then-failed axis) alerts. Markers store non-empty via a "-" sentinel so the
+  # empty-able `last` stays the final @tsv field (a middle empty would collapse under
+  # read's IFS-whitespace and shift the columns).
+  local wf wrec target dmax last wticks da ea sa oldest oid nlast nticks kav wknown walive mtr el errstatus isdead curstale abody wdo
   for wf in "$wd"/*.json; do
     [ -e "$wf" ] || continue
-    wrec="$(jq -r '[.target,(.drain_max // 2),(.ticks // 0),(.alerted // "none"),(.last // "")] | @tsv' "$wf" 2>/dev/null)" || continue
-    IFS=$'\t' read -r target dmax wticks prevw last <<<"$wrec"
+    wrec="$(jq -r '[.target,(.drain_max // 2),(.ticks // 0),(.da // "-"),(.ea // "-"),(.sa // "-"),(.last // "")] | @tsv' "$wf" 2>/dev/null)" || continue
+    IFS=$'\t' read -r target dmax wticks da ea sa last <<<"$wrec"
+    [ "$da" = - ] && da=""; [ "$ea" = - ] && ea=""; [ "$sa" = - ] && sa=""
     name_ok "$target" || continue
     # roll the drain-staleness counter: same oldest persisting is the stall
     oldest="$(oldest_msg "$target")"; oid="${oldest%%.from-*}"
@@ -541,28 +562,37 @@ cmd_monitor_tick() {
     else
       nlast="$oldest"; nticks=1
     fi
-    # dead beats stale: a registered target whose tree is gone can't drain anyway
+    # sample each axis's current condition
     kav="$(jq -r '[.known,.alive] | @tsv' <<<"$(probe_snapshot "$target")")" || kav=""
     IFS=$'\t' read -r wknown walive <<<"$kav"
-    token="none"
-    if [ "$wknown" = true ] && [ "$walive" = 0 ]; then
-      token="dead"
-    elif [ -n "$oldest" ] && [ "$nticks" -ge "$dmax" ]; then
-      token="stale:$oid"
+    errstatus=""
+    mtr="$(jq -r '.transcript // ""' "$(meta_file "$target")" 2>/dev/null)" || mtr=""
+    if [ -n "$mtr" ] && [ -f "$mtr" ]; then
+      el="$(tail -n1 "$mtr" 2>/dev/null)" || el=""
+      [ "$(jq -r '.isApiErrorMessage // false' <<<"$el" 2>/dev/null)" = true ] \
+        && errstatus="$(jq -r '.apiErrorStatus // "err"' <<<"$el" 2>/dev/null)"
     fi
-    wdo=""
-    if [ "$token" != none ] && [ "$token" != "$prevw" ]; then wdo=1; fi
-    case "$token" in
-      dead)    abody="dead $target" ;;
-      stale:*) abody="stale $target ${token#stale:}" ;;
-      *)       abody="" ;;
-    esac
+    isdead=""; [ "$wknown" = true ] && [ "$walive" = 0 ] && isdead=1
+    curstale=""; [ -n "$oldest" ] && [ "$nticks" -ge "$dmax" ] && curstale="$oid"
+    # an axis whose condition went inactive re-arms (its marker clears)
+    [ -z "$isdead" ] && da=""
+    [ -z "$errstatus" ] && ea=""
+    [ -z "$curstale" ] && sa=""
+    # emit the highest-priority ACTIVE axis, once per distinct value (per-axis dedup)
+    wdo=""; abody=""
+    if [ -n "$isdead" ]; then
+      [ "$da" != 1 ] && { wdo=1; abody="dead $target"; }; da=1
+    elif [ -n "$errstatus" ]; then
+      [ "$ea" != "$errstatus" ] && { wdo=1; abody="erroring $target $errstatus"; }; ea="$errstatus"
+    elif [ -n "$curstale" ]; then
+      [ "$sa" != "$curstale" ] && { wdo=1; abody="stale $target $oid"; }; sa="$curstale"
+    fi
     (
       flock 9
       [ -e "$wf" ] || exit 0
       [ -n "$wdo" ] && publish "$orch" monitor alert "$(gen_id)" "" "$abody"
-      if jq --arg l "$nlast" --argjson t "$nticks" --arg a "$token" \
-        '.last=$l | .ticks=$t | .alerted=$a' "$wf" > "$wf.w.$$" 2>/dev/null; then
+      if jq --arg da "${da:--}" --arg ea "${ea:--}" --arg sa "${sa:--}" --arg l "$nlast" --argjson t "$nticks" \
+        '.da=$da | .ea=$ea | .sa=$sa | .last=$l | .ticks=$t' "$wf" > "$wf.w.$$" 2>/dev/null; then
         mv -- "$wf.w.$$" "$wf"; else rm -f -- "$wf.w.$$"; fi
     ) 9>"$wd/.lock" || true
   done
