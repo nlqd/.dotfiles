@@ -49,9 +49,11 @@ alias oil='nvim -c "Oil"'
 alias pbcopy='xclip -sel c'
 alias pbpaste='xclip -sel c -o'
 alias nr='newsraft'
+
+### suffer from slop
 alias cl='claude'
-alias cr='ENABLE_LSP_TOOL=true claude -r'
-alias claude='ENABLE_LSP_TOOL=true claude'
+alias cr='claude -r'
+alias cls='claude --model sonnet --effort max'
 
 # NOTE: completion would be cool and avoid these things completely
 function gdiff() {
