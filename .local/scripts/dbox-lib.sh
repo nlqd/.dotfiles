@@ -25,12 +25,14 @@ dbox_namespaces() {
         --hostname bubblewrap --unshare-uts \
         --unshare-pid \
         --die-with-parent
-    # The claude-bus mailbox: bind the host bus root back into the private /tmp so
-    # an agent in one box can message an agent in another (file mailbox; see the
-    # claude-bus skill). Honors $CLAUDE_BUS_ROOT so box and host agree on the path.
+    # The claude-bus mailbox: bind the host bus root into the box at the same path
+    # so an agent in one box can message an agent in another (file mailbox; see the
+    # claude-bus skill). Default matches claude-bus (~/.cache/claude-bus), which the
+    # dev profile already binds rw via dbox_dotfiles; this bind is what carries a
+    # $CLAUDE_BUS_ROOT that points elsewhere (e.g. a /tmp path) into the box too.
     # -try keeps it harmless until a host `claude-bus init` creates the dir; the
     # grant is strictly weaker than the tmux send-keys bind in dbox_tmux.
-    local bus="${CLAUDE_BUS_ROOT:-/tmp/claude-bus}"
+    local bus="${CLAUDE_BUS_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/claude-bus}"
     dbox_add --bind-try "$bus" "$bus"
 }
 
@@ -338,61 +340,91 @@ dbox_project() {
 # Wrap the sandbox in a transient user cgroup scope so an OOM or fork-bomb kills
 # the sandbox tree, not the machine. cgroup v2 with delegated cpu/memory/pids
 # means no root. DBOX_NOLIMIT=1 skips it.
+# True inside a dbox sandbox (it sets its UTS hostname to "bubblewrap"). A sandbox
+# can't enter a host coat (its pid ns is unshared, the pod runs on the host), so
+# coat-launch is skipped there. Factored out so should_enter_coat is unit-testable.
+_dbox_in_sandbox() {
+    [ "$(cat /proc/sys/kernel/hostname 2>/dev/null)" = bubblewrap ]
+}
+
+# Decide whether this launch should enter the worktree's coat. On yes: echo the
+# coat name on stdout and return 0. On no: return non-zero. Precedence:
+#   - inside a sandbox, or --no-coat / DBOX_NO_COAT   -> never
+#   - --coat / DBOX_COAT_FORCE                        -> yes (create+enter) if local
+#   - else auto: only when DBOX_COAT=auto (default) AND a coat already exists
+# Depends only on _dbox_in_sandbox / workit / podman, so tests can inject stubs.
+should_enter_coat() {
+    _dbox_in_sandbox && return 1
+    [ -z "${DBOX_NO_COAT:-}" ] || return 1
+    command -v workit >/dev/null 2>&1 && command -v podman >/dev/null 2>&1 || return 1
+    local cn
+    cn=$(workit name 2>/dev/null) || return 1
+    local existed=0
+    if podman pod exists "$cn" 2>/dev/null; then existed=1; fi
+    if [ "${DBOX_COAT_FORCE:-}" != 1 ]; then
+        # Not forced: honour the mode, and only auto-enter a coat that already
+        # exists. Opt-out is `off` (plus common falsey synonyms); default is auto;
+        # anything else warns and is treated as auto, rather than silently doing
+        # the opposite of a mistyped opt-out (e.g. DBOX_COAT=disabled).
+        case "${DBOX_COAT:-auto}" in
+            off | false | no | none | 0 | disabled) return 1 ;;
+            auto | on | true | yes | 1) ;;
+            *) printf 'dbox: unrecognized DBOX_COAT=%s; using auto\n' "${DBOX_COAT}" >&2 ;;
+        esac
+        [ "$existed" = 1 ] || return 1
+    fi
+    # ensure it's up (creates it under --coat; just starts an existing one)
+    workit up >/dev/null 2>&1 || {
+        printf 'dbox: could not start coat %s; launching without it\n' "$cn" >&2
+        return 1
+    }
+    # the infra pid must live in THIS pid ns for `workit run` to nsenter it
+    local pid
+    pid=$(workit pid 2>/dev/null) || return 1
+    [ -n "$pid" ] && [ -e "/proc/$pid" ] || return 1
+    # name a coat that --coat just provisioned, so an accidental --coat in the
+    # wrong directory is visible rather than a pod created out of nowhere
+    if [ "$existed" = 0 ]; then
+        printf 'dbox: created coat %s (--coat)\n' "$cn" >&2
+    fi
+    printf '%s\n' "$cn"
+}
+
 dbox_exec() {
-    # Launch the sandbox INSIDE the worktree's coat (a rootless-podman netns) when
-    # one exists and is locally enterable, so the coat's services answer on
-    # localhost from within. A sandbox can't enter a coat per-command (its pid ns
-    # is unshared), but the launcher runs on the host and bwrap, which does not
-    # --unshare-net, inherits whatever netns it starts in. --no-coat opts out; the
-    # /proc check skips the wrap when the coat isn't local (e.g. a nested launch
-    # from inside a sandbox), falling back to a normal launch.
+    # If this launch should enter the worktree's coat, wrap the bwrap exec in
+    # `workit run` so the sandbox starts inside the coat's netns (bwrap does not
+    # --unshare-net, so it inherits it), and give it what it needs there: IS_SANDBOX
+    # (nsenter --user makes it uid 0 in the coat's rootless userns, which claude
+    # refuses --dangerously-skip-permissions under) and the coat's own resolv.conf
+    # (the host's 127.0.0.53 stub is unreachable inside the coat, so DNS would die).
     local -a coat=()
-    # Skip entirely inside a sandbox (dbox sets hostname=bubblewrap): a sandbox
-    # can't enter a host coat, and this avoids a nested launch poking the remote
-    # pod or misfiring the pid-locality check below on a recycled pid number.
-    if [ -z "${DBOX_NO_COAT:-}" ] && [ "$(cat /proc/sys/kernel/hostname 2>/dev/null)" != bubblewrap ] \
-        && command -v workit >/dev/null 2>&1 && command -v podman >/dev/null 2>&1; then
-        local cn pid
-        if cn=$(workit name 2>/dev/null) && podman pod exists "$cn" 2>/dev/null; then
-            if workit up >/dev/null 2>&1; then
-                pid=$(workit pid 2>/dev/null || true)
-                if [ -n "${pid:-}" ] && [ -e "/proc/${pid}" ]; then
-                    coat=(workit run --)
-                    # nsenter --user puts us at uid 0 inside the coat's rootless
-                    # userns (it maps to your real uid on the host). Claude refuses
-                    # --dangerously-skip-permissions as uid 0, so tell it it's
-                    # sandboxed (it is). Only here; a normal launch stays uid 1002.
-                    dbox_add --setenv IS_SANDBOX 1
-                    # The coat netns has egress but the host's 127.0.0.53 stub
-                    # resolver is unreachable inside it, so DNS would die (agent
-                    # can't reach the API). Bind the pod's OWN resolv.conf, which
-                    # podman populates with the right nameserver for whatever
-                    # network backend is active (slirp's 10.0.2.3, pasta's, ...)
-                    # plus the host resolvers and search domains — backend-agnostic,
-                    # so a podman upgrade to pasta doesn't break it. Fall back to
-                    # slirp's forwarder (override with DBOX_COAT_DNS) if it can't be
-                    # read. Appended last so it overrides dbox_system's earlier bind.
-                    local infra_id rcpath rcfd rcfile
-                    infra_id=$(podman pod inspect "$cn" --format '{{.InfraContainerID}}' 2>/dev/null) || infra_id=""
-                    rcpath=$(podman container inspect "$infra_id" --format '{{.ResolvConfPath}}' 2>/dev/null) || rcpath=""
-                    if [ -n "$rcpath" ] && [ -s "$rcpath" ]; then
-                        exec {rcfd}<"$rcpath"
-                        dbox_add --ro-bind-data "$rcfd" /etc/resolv.conf
-                    elif rcfile=$(mktemp 2>/dev/null); then
-                        printf 'nameserver %s\n' "${DBOX_COAT_DNS:-10.0.2.3}" >"$rcfile"
-                        exec {rcfd}<"$rcfile"
-                        rm -f "$rcfile"
-                        dbox_add --ro-bind-data "$rcfd" /etc/resolv.conf
-                    fi
-                    printf 'dbox: launching inside coat %s\n' "$cn" >&2
-                fi
-            else
-                # This branch's coat exists but couldn't be started (e.g. a moved
-                # worktree dir the label no longer matches, or a cross-repo
-                # collision it refuses). Don't silently launch coatless — say so.
-                printf 'dbox: coat %s exists but could not be started; launching without it\n' "$cn" >&2
-            fi
+    local cn
+    if cn=$(should_enter_coat); then
+        coat=(workit run --)
+        dbox_add --setenv IS_SANDBOX 1
+        # Bind the pod's OWN resolv.conf (podman writes the right nameserver for the
+        # active backend — slirp's 10.0.2.3, pasta's, ... — plus host resolvers and
+        # search domains), so a podman upgrade to pasta doesn't break coat DNS. Fall
+        # back to slirp's forwarder (override DBOX_COAT_DNS). Appended last so it
+        # overrides dbox_system's earlier /etc/resolv.conf bind.
+        local infra_id rcpath rcfd rcfile
+        infra_id=$(podman pod inspect "$cn" --format '{{.InfraContainerID}}' 2>/dev/null) || infra_id=""
+        rcpath=$(podman container inspect "$infra_id" --format '{{.ResolvConfPath}}' 2>/dev/null) || rcpath=""
+        # The opens are the LAST term of each if-condition on purpose: a bare
+        # `exec {fd}<path` whose redirection fails aborts the whole launch under
+        # `set -euo pipefail` (the wrappers run it), so the mktemp fallback would be
+        # unreachable and a torn-down / unreadable ResolvConfPath would kill the
+        # sandbox instead of just losing coat DNS. In a tested context set -e is
+        # suspended, so a failed open falls through to the fallback (or to no bind).
+        if [ -n "$rcpath" ] && [ -r "$rcpath" ] && [ -s "$rcpath" ] && exec {rcfd}<"$rcpath"; then
+            dbox_add --ro-bind-data "$rcfd" /etc/resolv.conf
+        elif rcfile=$(mktemp 2>/dev/null) &&
+            printf 'nameserver %s\n' "${DBOX_COAT_DNS:-10.0.2.3}" >"$rcfile" &&
+            exec {rcfd}<"$rcfile"; then
+            rm -f "$rcfile"
+            dbox_add --ro-bind-data "$rcfd" /etc/resolv.conf
         fi
+        printf 'dbox: launching inside coat %s\n' "$cn" >&2
     fi
     if [ -z "${DBOX_NOLIMIT:-}" ] && command -v systemd-run >/dev/null; then
         exec systemd-run --user --scope --quiet \
@@ -405,6 +437,12 @@ dbox_exec() {
 
 # Common leading-flag parser. Sets MODE and SHARES; leaves the rest in DBOX_REST.
 DBOX_MODE=live
+# Coat launch mode: "auto" (default) enters the worktree's coat automatically when
+# one already exists; "off" (or a falsey synonym: false/no/none/0/disabled) needs
+# an explicit --coat; an unrecognized value warns and is treated as auto. Per-launch
+# flags --coat (force on) and --no-coat (force off) override the mode.
+DBOX_COAT="${DBOX_COAT:-auto}"
+DBOX_COAT_FORCE="${DBOX_COAT_FORCE:-}"
 DBOX_NO_COAT="${DBOX_NO_COAT:-}"
 DBOX_SHARES=()
 DBOX_REST=()
@@ -412,6 +450,7 @@ dbox_parse() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --scratch) DBOX_MODE=scratch; shift ;;
+            --coat)    DBOX_COAT_FORCE=1; shift ;;
             --no-coat) DBOX_NO_COAT=1; shift ;;
             --share)   DBOX_SHARES+=("$2"); shift 2 ;;
             --)        shift; break ;;
