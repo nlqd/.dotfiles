@@ -154,6 +154,26 @@ else
   ok "probe live-tree checks skipped (no systemd-run/ss)"
 fi
 
+# S2-2b: the readers walk the whole subtree. A coat/bwrap agent puts its procs in
+# a child cgroup (podman leaf), leaving the registered scope itself empty; reading
+# only the top node would false-fire "dead" every tick.
+FAKECG="$CLAUDE_BUS_ROOT/fakecg"
+mkdir -p "$FAKECG/user.slice/coat.scope/libpod-abc"
+: > "$FAKECG/user.slice/coat.scope/cgroup.procs"                            # scope: internal node, empty
+printf '12345\n' > "$FAKECG/user.slice/coat.scope/libpod-abc/cgroup.procs" # procs live in the leaf
+printf 'oom_kill 2\n'  > "$FAKECG/user.slice/coat.scope/memory.events"           # hierarchical: top aggregates the subtree
+printf 'oom_kill 99\n' > "$FAKECG/user.slice/coat.scope/libpod-abc/memory.events" # must NOT be read (would double-count)
+BUS register COATP --cgroup /user.slice/coat.scope >/dev/null
+snap="$(CLAUDE_BUS_SYSFS="$FAKECG" BUS probe-snapshot COATP)"
+eq "subtree proc -> alive (not false-dead)"    "1" "$(jq -r .alive <<<"$snap")"
+eq "oom from hierarchical top node, not child" "2" "$(jq -r .oom   <<<"$snap")"
+# a genuinely empty subtree (all leaves drained) still reads dead
+mkdir -p "$FAKECG/user.slice/gone.scope/leaf"
+: > "$FAKECG/user.slice/gone.scope/cgroup.procs"
+: > "$FAKECG/user.slice/gone.scope/leaf/cgroup.procs"
+BUS register GONEP --cgroup /user.slice/gone.scope >/dev/null
+eq "empty subtree still -> dead" "0" "$(jq -r .alive <<<"$(CLAUDE_BUS_SYSFS="$FAKECG" BUS probe-snapshot GONEP)")"
+
 #############################################################################
 # S2-3: pure classifier
 #############################################################################
@@ -527,6 +547,54 @@ cmd_monitor_tick WLIV4
 eq  "unregistered watch: tick1 no alert" "0" "$(nmsg "$CLAUDE_BUS_ROOT/inbox/WLIV4")"
 cmd_monitor_tick WLIV4
 has "unregistered watch still goes stale" "$(jq -r .body "$(ls "$CLAUDE_BUS_ROOT"/inbox/WLIV4/*.msg | head -1)")" "stale"
+
+#############################################################################
+# S2-17: watch reads the transcript tail — an unresolved API error is 'erroring'
+#############################################################################
+# alive target whose transcript tail is a 429 -> one 'erroring 429' alert
+BUS init WERR >/dev/null
+TJ="$CLAUDE_BUS_ROOT/werr.jsonl"
+printf '%s\n' '{"type":"assistant","isApiErrorMessage":true,"apiErrorStatus":429}' > "$TJ"
+BUS register ERRT --cgroup /x --transcript "$TJ" >/dev/null
+BUS watch WERR ERRT >/dev/null
+probe_snapshot() { echo '{"alive":1,"net":0,"oom":0,"mtime":0,"known":true}'; }   # alive, so not dead
+cmd_monitor_tick WERR
+has "erroring alert on API-error tail"  "$(jq -r .body "$(ls "$CLAUDE_BUS_ROOT"/inbox/WERR/*.msg 2>/dev/null | head -1)")" "erroring"
+has "erroring alert carries the status" "$(jq -r .body "$(ls "$CLAUDE_BUS_ROOT"/inbox/WERR/*.msg 2>/dev/null | head -1)")" "429"
+cmd_monitor_tick WERR
+eq "erroring no duplicate" "1" "$(nmsg "$CLAUDE_BUS_ROOT/inbox/WERR")"
+# recovered: a normal entry after the error -> clean tail -> no error alert
+printf '%s\n' '{"type":"assistant","message":{"role":"assistant"}}' >> "$TJ"
+BUS init WOK3 >/dev/null; BUS register OKT --cgroup /x --transcript "$TJ" >/dev/null; BUS watch WOK3 OKT >/dev/null
+cmd_monitor_tick WOK3
+eq "recovered transcript -> no erroring alert" "0" "$(nmsg "$CLAUDE_BUS_ROOT/inbox/WOK3")"
+# dead outranks erroring: a gone tree with an error tail still alerts 'dead'
+DJ="$CLAUDE_BUS_ROOT/de.jsonl"
+printf '%s\n' '{"isApiErrorMessage":true,"apiErrorStatus":429}' > "$DJ"
+BUS init WDE >/dev/null; BUS register DET --cgroup /x --transcript "$DJ" >/dev/null; BUS watch WDE DET >/dev/null
+probe_snapshot() { echo '{"alive":0,"net":0,"oom":0,"mtime":0,"known":true}'; }   # tree gone
+cmd_monitor_tick WDE
+has "dead outranks erroring" "$(jq -r .body "$(ls "$CLAUDE_BUS_ROOT"/inbox/WDE/*.msg 2>/dev/null | head -1)")" "dead"
+
+#############################################################################
+# S2-18: per-axis dedup — a stale condition masked by a transient error must not
+# re-alert when the error clears (stale -> err -> stale is one stale alert)
+#############################################################################
+BUS init WIX >/dev/null
+IJ="$CLAUDE_BUS_ROOT/wix.jsonl"
+printf '%s\n' '{"message":{"role":"assistant"}}' > "$IJ"   # clean tail (no error yet)
+BUS register IXT --cgroup /x --transcript "$IJ" >/dev/null
+BUS send IXT s "stuck" >/dev/null                          # stale mail that never drains
+BUS watch WIX IXT >/dev/null
+probe_snapshot() { echo '{"alive":1,"net":0,"oom":0,"mtime":0,"known":true}'; }   # alive
+cmd_monitor_tick WIX; cmd_monitor_tick WIX                 # tick2: stale alert
+eq "interleave: stale alerted once" "1" "$(nmsg "$CLAUDE_BUS_ROOT/inbox/WIX")"
+printf '%s\n' '{"isApiErrorMessage":true,"apiErrorStatus":429}' >> "$IJ"   # tail becomes an error
+cmd_monitor_tick WIX                                       # erroring alert (distinct)
+eq "interleave: erroring alert added" "2" "$(nmsg "$CLAUDE_BUS_ROOT/inbox/WIX")"
+printf '%s\n' '{"message":{"role":"assistant"}}' >> "$IJ"  # error clears; the same msg is still stuck
+cmd_monitor_tick WIX                                       # must NOT re-alert the already-known stale
+eq "interleave: cleared error does not re-alert stale" "2" "$(nmsg "$CLAUDE_BUS_ROOT/inbox/WIX")"
 
 #############################################################################
 echo "----"; echo "pass=$pass fail=$fail"; [[ $fail -eq 0 ]]
