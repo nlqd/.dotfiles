@@ -69,12 +69,14 @@ format_uptime() {
 collect_draytek() {
     local host="$1" label="$2" user="$3" pass="$4"
 
-    local raw wan_raw wan1 session_raw arp_raw
-    raw=$(telnet_cmds "$host" "$user" "$pass" "wan status" "show session" "ip arp status") || true
+    local raw wan_raw wan1 session_raw arp_raw v4_raw v6_raw
+    raw=$(telnet_cmds "$host" "$user" "$pass" "wan status" "show session" "ip arp status" "ip ping 8.8.8.8 WAN1" "ip6 ping 2001:4860:4860::8888 WAN1 2") || true
     wan_raw=$(echo "$raw" | sed -n '/^=== wan status ===/,/^=== show session ===/{//!p}') || true
     wan1=$(echo "$wan_raw" | sed -n '/^WAN1:/,/^WAN2:\|^USB_WAN/{p}') || true
     session_raw=$(echo "$raw" | sed -n '/^=== show session ===/,/^=== ip arp status ===/{//!p}') || true
-    arp_raw=$(echo "$raw" | sed -n '/^=== ip arp status ===/,${//!p}') || true
+    arp_raw=$(echo "$raw" | sed -n '/^=== ip arp status ===/,/^=== ip ping/{//!p}') || true
+    v4_raw=$(echo "$raw" | sed -n '/^=== ip ping/,/^=== ip6 ping/{//!p}') || true
+    v6_raw=$(echo "$raw" | sed -n '/^=== ip6 ping/,${//!p}') || true
 
     local status stall ip uptime tx_rate rx_rate sess_cur sess_max clients
     status=$(echo "$wan1" | grep -m1 -oP 'WAN1: \K\w+') || status="unknown"
@@ -86,6 +88,34 @@ collect_draytek() {
     sess_cur=$(echo "$session_raw" | grep -m1 -oP '% Current Session Usage: \K[0-9]+') || sess_cur="0"
     sess_max=$(echo "$session_raw" | grep -m1 -oP 'Maximum Session Number: \K[0-9]+') || sess_max="60000"
     clients=$(echo "$arp_raw" | grep -cP '^\s+\d+\s+192\.168\.') || clients="0"
+
+    # The DrayTek CLI occasionally drops a command's entire reply within one telnet
+    # session (timing/race, not packet loss) — "?" means no attempt was observed,
+    # distinct from a real failure, so a CLI hiccup can't masquerade as an outage.
+    local v4_status
+    if echo "$v4_raw" | grep -q 'Receive reply from'; then
+        v4_status="up"
+    elif echo "$v4_raw" | grep -q 'Pinging'; then
+        v4_status="down"
+    else
+        v4_status="?"
+    fi
+
+    # ip6 ping always prints "Packets: Sent = X, Received = Y, Lost = Z", even on
+    # instant failure, so Sent=0 means no v6 route at all (the current safe baseline)
+    # vs Sent>0/Received=0 meaning a WAN v6 address exists but upstream is blackholed.
+    local v6_sent v6_recv v6_status
+    if echo "$v6_raw" | grep -q 'Packets:'; then
+        v6_sent=$(echo "$v6_raw" | grep -oP 'Sent = \K[0-9]+') || v6_sent="0"
+        v6_recv=$(echo "$v6_raw" | grep -oP 'Received = \K[0-9]+') || v6_recv="0"
+        v6_status="off"
+        if (( v6_sent > 0 )); then
+            v6_status="down"
+            (( v6_recv > 0 )) && v6_status="up"
+        fi
+    else
+        v6_status="?"
+    fi
 
     if [[ "$status" != "Online" ]]; then
         add_issue "${RED}${label}: WAN is ${status}${RST}"
@@ -99,6 +129,12 @@ collect_draytek() {
             add_issue "${YEL}${label}: sessions at ${sess_pct}% (${sess_cur}/${sess_max})${RST}"
         fi
     fi
+    if [[ "$v4_status" == "down" ]]; then
+        add_issue "${RED}${label}: IPv4 ping to 8.8.8.8 failed${RST}"
+    fi
+    if [[ "$v6_status" == "down" ]]; then
+        add_issue "${RED}${label}: IPv6 has a WAN address but ping is blackholed (flap in progress)${RST}"
+    fi
 
     local up_fmt tx_fmt rx_fmt
     up_fmt=$(format_uptime "$uptime")
@@ -108,8 +144,8 @@ collect_draytek() {
     # save raw uptime for flap detection
     echo "$uptime" > "$TMPDIR/uptime-${host##*.}"
 
-    printf "%s\t%s\t%s\t%s/%s\t%s\t%s\t%s / %s\n" \
-        "$label" "$status" "$ip" "$sess_cur" "$sess_max" "$clients" "$up_fmt" "$tx_fmt" "$rx_fmt"
+    printf "%s\t%s\t%s\t%s\t%s\t%s/%s\t%s\t%s\t%s / %s\n" \
+        "$label" "$status" "$ip" "$v4_status" "$v6_status" "$sess_cur" "$sess_max" "$clients" "$up_fmt" "$tx_fmt" "$rx_fmt"
 }
 
 # --- collect data from .3 via curl ---
@@ -144,8 +180,8 @@ collect_ont() {
 
     if echo "$device_raw" | grep -q 'login.asp'; then
         add_issue "${RED}.3 (Viettel): login failed${RST}"
-        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
-            ".3 (Viettel)" "???" "—" "—" "—" "—" "login failed"
+        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+            ".3 (Viettel)" "???" "—" "—" "—" "—" "—" "—" "login failed"
         return
     fi
 
@@ -170,8 +206,13 @@ collect_ont() {
     local display_status="Online"
     [[ "$wan_status" != "up" ]] && display_status="DOWN"
 
-    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
-        ".3 (Viettel)" "$display_status" "${wan_ip:-—}" "—" "$client_count" "—" "—"
+    # No telnet/SNMP on the ONT (ISP-locked), so v4 reuses the WAN status scrape
+    # and v6 is "n/a" rather than a guess — sta-device.asp exposes no v6 fields.
+    local v4_status="down"
+    [[ "$wan_status" == "up" ]] && v4_status="up"
+
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+        ".3 (Viettel)" "$display_status" "${wan_ip:-—}" "$v4_status" "n/a" "—" "$client_count" "—" "—"
 }
 
 # --- DNS health check ---
@@ -389,11 +430,11 @@ start_dns_bg
 printf "%bcollecting...%b\r" "$DIM" "$RST"
 
 r1=$(collect_draytek "192.168.1.1" ".1 (FPT)" "$R1_USER" "$R1_PASS" 2>/dev/null) \
-    || r1=$(printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" ".1 (FPT)" "ERR" "—" "—" "—" "—" "telnet failed")
+    || r1=$(printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" ".1 (FPT)" "ERR" "—" "—" "—" "—" "—" "—" "telnet failed")
 r2=$(collect_draytek "192.168.1.2" ".2 (VNPT)" "$R2_USER" "$R2_PASS" 2>/dev/null) \
-    || r2=$(printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" ".2 (VNPT)" "ERR" "—" "—" "—" "—" "telnet failed")
+    || r2=$(printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" ".2 (VNPT)" "ERR" "—" "—" "—" "—" "—" "—" "telnet failed")
 r3=$(collect_ont 2>/dev/null) \
-    || r3=$(printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" ".3 (Viettel)" "ERR" "—" "—" "—" "—" "curl failed")
+    || r3=$(printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" ".3 (Viettel)" "ERR" "—" "—" "—" "—" "—" "—" "curl failed")
 
 printf "              \r"
 
@@ -410,7 +451,7 @@ if [[ -s "$ISSUES_FILE" ]]; then
 fi
 
 {
-    printf "Router\tWAN\tIP\tSessions\tClnt\tUptime\tTX / RX\n"
+    printf "Router\tWAN\tIP\tv4\tv6\tSessions\tClnt\tUptime\tTX / RX\n"
     echo "$r1"
     echo "$r2"
     echo "$r3"
