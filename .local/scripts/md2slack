@@ -41,7 +41,7 @@ def notify(msg: str) -> None:
 
 
 def is_wayland() -> bool:
-    return bool(os.environ.get("WAYLAND_DISPLAY")) and not os.environ.get("DISPLAY")
+    return bool(os.environ.get("WAYLAND_DISPLAY"))
 
 
 def read_clipboard() -> str:
