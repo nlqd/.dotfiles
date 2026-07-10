@@ -91,6 +91,10 @@ extract_asset() {
   case "$name" in
   *.tar.gz | *.tgz) tar -xzf "$dir/$name" -C "$dir" ;;
   *.zip) unzip -oq "$dir/$name" -d "$dir" ;;
+  *.gz)
+    gunzip -kf "$dir/$name"
+    chmod +x "$dir/${name%.gz}"
+    ;;
   *) chmod +x "$dir/$name" ;;
   esac
 }
@@ -250,6 +254,11 @@ install_repo() {
     echo "Extracting..."
     extract_asset "$dir" "$name"
     binary=$(pick_executable "$dir" "$name") || return 1
+    ;;
+  *.gz)
+    echo "Extracting..."
+    extract_asset "$dir" "$name"
+    binary="${name%.gz}"
     ;;
   *)
     extract_asset "$dir" "$name"

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+# sessionname=claude-hub
+# triggerword="spend limit"
+# message="please continue"
+# nlines=10
+# tmux lsw -t "$sessionname" -F '#{window_id}' | while read -r win_id; do
+#     if tmux capturep -t "$sessionname:${win_id}" -p -S -$nlines | grep -q "$triggerword"; then
+#         tmux send -t "$sessionname:${win_id}" "$message" Enter
+#     fi
+# done
+
+sessionname="claude-hub"
+triggerword="spend limit"
+message="please continue"
+nlines=20
+tmux lsp -s -t "$sessionname" -F '#{pane_id}' | while read -r pane_id; do
+    if tmux capturep -t "$pane_id" -p -S -$nlines | grep -q "$triggerword"; then
+        tmux send -t "$pane_id" "$message" Enter
+    fi
+done
