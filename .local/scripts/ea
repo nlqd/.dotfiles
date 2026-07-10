@@ -129,12 +129,21 @@ resolve_story() {
 #:[mentions list_my_mentions] GET /me/mentions
 #:[mentions list_my_mentions] query: limit cursor since_id unacked
 #:[ack ack_mention] POST /me/mentions/{mention_id}/ack
+#:[notifications list_my_notifications] GET /me/notifications
+#:[notifications list_my_notifications] query: limit cursor since_id unread kind
+#:[read-all read_all] POST /me/notifications/read-all
+#:[resolve-invite resolve_invite] GET /me/notifications/resolve-invite
+#:[resolve-invite resolve_invite] query: token*
+#:[unread-count unread_count] GET /me/notifications/unread-count
+#:[accept accept_notification] POST /me/notifications/{id}/accept
+#:[ack ack_notification] POST /me/notifications/{id}/ack
+#:[decline decline_notification] POST /me/notifications/{id}/decline
 #:[stories my_stories] GET /me/stories
 #:[stories my_stories] query: role state cursor limit
 #:[meta get] GET /meta
 #:[project get] GET /projects/{project_id}
 #:[project update] PUT /projects/{project_id}
-#:[project update] body: agent_key_creator_roles[] auto_plan description effort_scale_id enable_tasks initial_velocity iteration_length_weeks iteration_start_day manual_velocity name public_access velocity_done_state velocity_strategy
+#:[project update] body: agent_key_creator_roles[] auto_plan description effort_scale_id enable_tasks initial_velocity iteration_length_weeks iteration_start_day manual_velocity name points_for_bugs_chores public_access velocity_done_state velocity_strategy
 #:[addable-members list_addable_members] GET /projects/{project_id}/addable-members
 #:[audit-log project_audit_log] GET /projects/{project_id}/audit-log
 #:[epics list] GET /projects/{project_id}/epics
@@ -169,7 +178,7 @@ resolve_story() {
 #:[formats list_formats] GET /projects/{project_id}/export/formats
 #:[export export_format] GET /projects/{project_id}/export/{format}
 #:[json import_json] POST /projects/{project_id}/import/json
-#:[json import_json] body: file_base64 file_name owner repo source* token
+#:[json import_json] body: file_base64 file_name include_pull_requests owner repo source* token
 #:[iterations list] GET /projects/{project_id}/iterations
 #:[iterations create] POST /projects/{project_id}/iterations
 #:[iterations create] body: end* start*
@@ -195,6 +204,8 @@ resolve_story() {
 #:[memberships update] PUT /projects/{project_id}/memberships/{membership_id}
 #:[memberships update] body: role
 #:[memberships delete] DELETE /projects/{project_id}/memberships/{membership_id}
+#:[pin pin] POST /projects/{project_id}/pin
+#:[pin unpin] DELETE /projects/{project_id}/pin
 #:[preferences get_preferences] GET /projects/{project_id}/preferences
 #:[preferences update_preferences] PUT /projects/{project_id}/preferences
 #:[preferences update_preferences] body: display_density panel_config*
@@ -207,7 +218,7 @@ resolve_story() {
 #:[stories bulk_transition] body: reason story_ids[]* to*
 #:[stories get] GET /projects/{project_id}/stories/{story_id}
 #:[stories update] PUT /projects/{project_id}/stories/{story_id}
-#:[stories update] body: current_state description estimate force_state_change icebox labels[] move_to name position priority_id reorder story_type
+#:[stories update] body: current_state description estimate force_state_change icebox labels[] move_to name owners[] position priority_id reorder story_type
 #:[stories delete] DELETE /projects/{project_id}/stories/{story_id}
 #:[story_archive archive] POST /projects/{project_id}/stories/{story_id}/archive
 #:[attachments list] GET /projects/{project_id}/stories/{story_id}/attachments

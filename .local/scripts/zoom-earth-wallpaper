@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# zoom-earth-wallpaper - snapshot the zoom.earth precipitation map as wallpaper
+#
+# Headless-screenshots the current view via rodney (no date= param, so it
+# always loads "now"), hides zoom.earth's own UI chrome by targeting the
+# map's DOM structure (everything under <main> except the map <section>),
+# then points feh at the result.
+set -euo pipefail
+
+URL='https://zoom.earth/maps/precipitation/#view=13.863,115.927,6z/model=icon'
+OUT="$HOME/Downloads/wallpapers/zoom-earth-precipitation.png"
+FEHBG="$HOME/.fehbg"
+WIDTH=3840
+HEIGHT=2160
+
+STRIP_JS="(() => { Array.from(document.querySelectorAll('main > *')).forEach(el => { if (el.tagName !== 'SECTION') el.style.setProperty('display','none','important'); }); return true; })()"
+
+TMP="$(mktemp --suffix=.png)"
+trap 'rodney stop >/dev/null 2>&1 || true; rm -f "$TMP"' EXIT
+
+rodney start >/dev/null
+rodney open "$URL" >/dev/null
+rodney waitload >/dev/null
+rodney waitidle >/dev/null
+
+# The 4K capture size only starts loading its own map/label tiles once we
+# actually request it (a throwaway capture triggers that). Those tile
+# fetches are slow to finish, well past what waitidle alone reports done -
+# give them a real 15s before the shot that counts, or the far corners of
+# the frame come out as a plain, low-detail placeholder.
+rodney screenshot -w "$WIDTH" -h "$HEIGHT" "$TMP" >/dev/null
+sleep 15
+rodney waitidle >/dev/null
+sleep 3
+
+rodney js "$STRIP_JS" >/dev/null
+rodney screenshot -w "$WIDTH" -h "$HEIGHT" "$OUT" >/dev/null
+
+feh --no-fehbg --bg-fill "$OUT"
+
+# Wire .fehbg once so restarts pick this up too; leave it alone afterwards
+# so re-running this script doesn't keep rewriting a file outside its job.
+if ! grep -qF "$OUT" "$FEHBG" 2>/dev/null; then
+  sed -i -E "s|^(feh )|# \1|" "$FEHBG"
+  printf "feh --no-fehbg --bg-fill '%s'\n" "$OUT" >> "$FEHBG"
+fi
+
+echo "wallpaper refreshed: $OUT"
