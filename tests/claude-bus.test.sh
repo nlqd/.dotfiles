@@ -597,4 +597,132 @@ cmd_monitor_tick WIX                                       # must NOT re-alert t
 eq "interleave: cleared error does not re-alert stale" "2" "$(nmsg "$CLAUDE_BUS_ROOT/inbox/WIX")"
 
 #############################################################################
+# S2-19: register merges — an unpassed field inherits the prior meta, so the
+# launcher (--cgroup) and the agent (--transcript) register independently
+# without clobbering. init's self-register goes through the same merge.
+#############################################################################
+BUS register MG --cgroup /user.slice/real.scope >/dev/null      # launcher: cgroup only
+BUS register MG --transcript /tmp/mg.jsonl >/dev/null           # agent: transcript only, later
+mfm="$CLAUDE_BUS_ROOT/meta/MG.json"
+eq "merge keeps prior cgroup"      "/user.slice/real.scope" "$(jq -r .cgroup "$mfm")"
+eq "merge adds new transcript"     "/tmp/mg.jsonl"          "$(jq -r .transcript "$mfm")"
+# reverse order (transcript first) also ends with both fields set
+BUS register MG2 --transcript /tmp/mg2.jsonl >/dev/null
+BUS register MG2 --cgroup /user.slice/real2.scope >/dev/null
+mfm2="$CLAUDE_BUS_ROOT/meta/MG2.json"
+eq "merge (reverse) keeps transcript" "/tmp/mg2.jsonl"          "$(jq -r .transcript "$mfm2")"
+eq "merge (reverse) adds cgroup"      "/user.slice/real2.scope" "$(jq -r .cgroup "$mfm2")"
+# an explicitly-passed field still overwrites the prior value (merge != append-only)
+BUS register MG2 --cgroup /user.slice/new.scope >/dev/null
+eq "explicit flag overwrites prior"   "/user.slice/new.scope" "$(jq -r .cgroup "$mfm2")"
+# init's self-register must not blank a launcher-set transcript (goes via merge)
+BUS register IM --cgroup /user.slice/im.scope --transcript /tmp/im.jsonl >/dev/null
+selfinit /user.slice/im.scope IM >/dev/null
+mfim="$CLAUDE_BUS_ROOT/meta/IM.json"
+eq "init preserves prior transcript"  "/tmp/im.jsonl"        "$(jq -r .transcript "$mfim")"
+eq "init preserves prior cgroup"      "/user.slice/im.scope" "$(jq -r .cgroup "$mfim")"
+
+#############################################################################
+# S2-20: register --supervisor <parent> auto-wires the parent's watch of this
+# agent, so an ephemeral worker is watched at spawn without hand-wiring and the
+# parent learns when it 529s. Create-if-absent: a re-register never resets a
+# live watch's dedup state.
+#############################################################################
+BUS init SUP >/dev/null
+BUS register WRK --cgroup /user.slice/wrk.scope --supervisor SUP >/dev/null
+swf="$CLAUDE_BUS_ROOT/watch/SUP/WRK.json"
+eq "supervisor auto-creates a watch record" "0"   "$([ -f "$swf" ]; echo $?)"
+eq "auto watch targets the worker"          "WRK" "$(jq -r .target "$swf")"
+# end to end: worker registers its transcript (merge keeps cgroup + the watch),
+# then the parent's tick alerts on the worker's 529
+WJ="$CLAUDE_BUS_ROOT/wrk.jsonl"
+printf '%s\n' '{"isApiErrorMessage":true,"apiErrorStatus":529}' > "$WJ"
+BUS register WRK --transcript "$WJ" >/dev/null
+probe_snapshot() { echo '{"alive":1,"net":0,"oom":0,"mtime":0,"known":true}'; }   # alive
+cmd_monitor_tick SUP
+supbody() { jq -r .body "$(ls "$CLAUDE_BUS_ROOT"/inbox/SUP/*.msg 2>/dev/null | head -1)"; }
+has "supervisor learns worker erroring"      "$(supbody)" "erroring"
+has "supervisor erroring alert has status"   "$(supbody)" "529"
+eq  "supervisor erroring alerts once"        "1" "$(nmsg "$CLAUDE_BUS_ROOT/inbox/SUP")"
+# re-supplying --supervisor must not reset the record (would re-fire the alert)
+BUS register WRK --supervisor SUP >/dev/null
+cmd_monitor_tick SUP
+eq "re-register --supervisor preserves dedup" "1" "$(nmsg "$CLAUDE_BUS_ROOT/inbox/SUP")"
+# a self-supervisor is meaningless and creates no watch record
+BUS register SELFS --cgroup /x --supervisor SELFS >/dev/null 2>&1
+eq "self-supervisor creates no watch" "1" "$([ -f "$CLAUDE_BUS_ROOT/watch/SELFS/SELFS.json" ]; echo $?)"
+# a bad supervisor name is rejected before any write
+BUS register BADSUP --supervisor "../x" >/dev/null 2>&1; rc "register rejects bad supervisor name" 7 $?
+
+#############################################################################
+# S2-21: adversarial-review fixes (Fable round on merge + --supervisor)
+#############################################################################
+# (1) init refreshes THIS process's own scope cgroup — a reused bus name must not
+# keep a dead prior session's scope (which would false-fire 'dead'); transcript kept.
+BUS register RU --cgroup /user.slice/old.scope --transcript /tmp/ru.jsonl >/dev/null
+selfinit /user.slice/new.scope RU >/dev/null
+mfru="$CLAUDE_BUS_ROOT/meta/RU.json"
+eq "init refreshes its own scope cgroup" "/user.slice/new.scope" "$(jq -r .cgroup "$mfru")"
+eq "init keeps the launcher transcript"  "/tmp/ru.jsonl"          "$(jq -r .transcript "$mfru")"
+# (3) an explicitly empty flag value means "inherit", not "clear": a launcher
+# passing an unset $CG must not blank a correct cgroup.
+BUS register EC --cgroup /user.slice/keep.scope >/dev/null
+BUS register EC --cgroup "" --transcript /tmp/ec.jsonl >/dev/null
+mfec="$CLAUDE_BUS_ROOT/meta/EC.json"
+eq "empty --cgroup inherits prior"        "/user.slice/keep.scope" "$(jq -r .cgroup "$mfec")"
+eq "empty --cgroup still sets transcript" "/tmp/ec.jsonl"          "$(jq -r .transcript "$mfec")"
+# (4) a value flag with no value is rejected, not an unbound crash or a spin
+BUS register NV --supervisor; rc "register --supervisor needs a value" 2 $?
+BUS register NV --cgroup;     rc "register --cgroup needs a value"     2 $?
+# (2a) a bad drain_max with --supervisor fails fast, before writing meta
+BUS init SUPV >/dev/null
+CLAUDE_BUS_ROOT="$CLAUDE_BUS_ROOT" CLAUDE_BUS_DRAIN_MAX=five bash "$SCRIPT" register WV --cgroup /x --supervisor SUPV >/dev/null 2>&1
+rc "bad drain_max with --supervisor rejected" 5 $?
+eq "rejected register wrote no meta" "1" "$([ -f "$CLAUDE_BUS_ROOT/meta/WV.json" ]; echo $?)"
+# (2b) if the auto-watch write fails, register still exits 0 after a successful meta
+# write (the tip must not leak a non-zero status under set -e). Root ignores 0555.
+if [ "$(id -u)" -ne 0 ]; then
+  BUS init SUPW >/dev/null
+  mkdir -p "$CLAUDE_BUS_ROOT/watch/SUPW"; chmod 0555 "$CLAUDE_BUS_ROOT/watch/SUPW"
+  BUS register WW --cgroup /x --supervisor SUPW >/dev/null 2>&1; rc "auto-watch write failure still exits 0" 0 $?
+  chmod 0755 "$CLAUDE_BUS_ROOT/watch/SUPW"
+  eq "meta written despite watch failure" "0" "$([ -f "$CLAUDE_BUS_ROOT/meta/WW.json" ]; echo $?)"
+else
+  ok "auto-watch write-failure test skipped (root)"; ok "meta-write test skipped (root)"
+fi
+
+#############################################################################
+# S2-22: init surfaces a self-register failure (fail loud), plus arg-parse and
+# drain_max coverage the review flagged as untested.
+#############################################################################
+# (N1) init must not swallow a self-register failure behind a silent exit 1
+if [ "$(id -u)" -ne 0 ]; then
+  R2="$(mktemp -d)"; mkdir -p "$R2/meta"; chmod 0555 "$R2/meta"
+  ierr="$(CLAUDE_BUS_ROOT="$R2" CLAUDE_BUS_SELF_CGROUP=/user.slice/ix.scope bash "$SCRIPT" init IX 2>&1 >/dev/null)"
+  has "init surfaces a self-register failure" "$ierr" "self-register failed"
+  chmod 0755 "$R2/meta"; rm -rf "$R2"
+else
+  ok "init self-register failure test skipped (root)"
+fi
+# a fresh name with an explicitly empty --cgroup still self-detects (fix-3 case b)
+CLAUDE_BUS_ROOT="$CLAUDE_BUS_ROOT" CLAUDE_BUS_SELF_CGROUP=/user.slice/se.scope bash "$SCRIPT" register FE --cgroup "" >/dev/null
+eq "fresh empty --cgroup self-detects" "/user.slice/se.scope" "$(jq -r .cgroup "$CLAUDE_BUS_ROOT/meta/FE.json")"
+# every value flag shares the missing-value guard; an unknown flag still exits 2
+BUS register NV2 --pid;        rc "register --pid needs a value"        2 $?
+BUS register NV2 --transcript; rc "register --transcript needs a value" 2 $?
+BUS register NV2 --bogus;      rc "register rejects unknown flag"       2 $?
+# the auto-watch record honors a custom CLAUDE_BUS_DRAIN_MAX (not just the default)
+BUS init SUPD >/dev/null
+CLAUDE_BUS_ROOT="$CLAUDE_BUS_ROOT" CLAUDE_BUS_DRAIN_MAX=5 bash "$SCRIPT" register WD --cgroup /x --supervisor SUPD >/dev/null
+eq "auto-watch honors CLAUDE_BUS_DRAIN_MAX" "5" "$(jq -r .drain_max "$CLAUDE_BUS_ROOT/watch/SUPD/WD.json")"
+# (D1) write_meta must surface a jq failure, not silently succeed: the redirect
+# creates a 0-byte tmp, so a non-atomic jq-then-mv would rename the empty file and
+# report success over corrupt meta. Simulate jq dying after the redirect.
+d1rc=0
+( jq() { return 1; }; write_meta D1M /x "" "" ) || d1rc=$?
+eq "write_meta reports a jq failure"   "0" "$([ "$d1rc" -ne 0 ]; echo $?)"
+eq "write_meta leaves no corrupt meta" "1" "$([ -f "$CLAUDE_BUS_ROOT/meta/D1M.json" ]; echo $?)"
+eq "write_meta leaves no stale tmp"    "0" "$(find "$CLAUDE_BUS_ROOT/meta" -name 'D1M.json.tmp.*' 2>/dev/null | wc -l)"
+
+#############################################################################
 echo "----"; echo "pass=$pass fail=$fail"; [[ $fail -eq 0 ]]

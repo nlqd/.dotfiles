@@ -56,9 +56,12 @@ self_cgroup() {
 write_meta() {  # <name> <cgroup> <pid> <transcript>
   local md; md="$(dirname "$(meta_file "$1")")"; mkdir -p "$md"
   local tmp; tmp="$(meta_file "$1").tmp.$$"
+  # Atomic + self-reporting: the redirect creates tmp before jq runs, so an
+  # &&-chain is required — otherwise a jq that dies mid-write still leaves a
+  # movable 0-byte tmp and the mv would rename corrupt meta into place and "succeed".
   jq -n --arg name "$1" --arg cgroup "$2" --arg pid "$3" --arg transcript "$4" \
-    '{name:$name, cgroup:$cgroup, pid:$pid, transcript:$transcript}' > "$tmp"
-  mv -- "$tmp" "$(meta_file "$1")"
+    '{name:$name, cgroup:$cgroup, pid:$pid, transcript:$transcript}' > "$tmp" \
+    && mv -- "$tmp" "$(meta_file "$1")" || { rm -f -- "$tmp"; return 1; }
 }
 
 # names are simple tokens, ids are digits/hyphens -- both block path traversal out
@@ -117,32 +120,91 @@ cmd_init() {
   local cg; cg="$(self_cgroup)"
   case "$cg" in
     *.scope | *.service)
-      write_meta "$me" "$cg" "" ""
-      tip "registered for liveness; background 'claude-bus wait $me', drain when it wakes" ;;
+      # Merge: explicit --cgroup refreshes THIS process's own scope (so a reused
+      # name never keeps a dead prior session's scope), while the transcript still
+      # inherits, so a launcher-set one is not blanked. Suppress register's success
+      # chatter, but surface a real failure loudly (init runs at session startup).
+      local rerr
+      if rerr="$(cmd_register "$me" --cgroup "$cg" 2>&1 >/dev/null)"; then
+        tip "registered for liveness; background 'claude-bus wait $me', drain when it wakes"
+      else
+        printf 'init: self-register failed: %s\n' "$rerr" >&2
+        tip "background 'claude-bus wait $me', drain when it wakes (liveness registration failed)"
+      fi ;;
     *)
       tip "background 'claude-bus wait $me', drain when it wakes (no scope cgroup: not monitorable)" ;;
   esac
 }
 
-# register <me> [--cgroup PATH] [--pid PID] [--transcript PATH] -- map a bus name
-# to the process tree the monitor probes. Called by the launch wrapper at spawn,
-# or self-invoked (auto-detects its own scope cgroup from /proc/self/cgroup).
+# register <me> [--cgroup PATH] [--pid PID] [--transcript PATH] [--supervisor NAME]
+# -- map a bus name to the process tree the monitor probes. Called by the launch
+# wrapper at spawn (--cgroup from the container, --transcript once the session
+# writes it), or self-invoked (auto-detects its own scope cgroup). Fields MERGE:
+# a flag not passed inherits the prior meta, so the launcher and the agent can
+# each register the half they know without clobbering the other's.
 cmd_register() {
-  local me="${1:?usage: claude-bus register <me> [--cgroup P] [--pid N] [--transcript P]}"; shift
+  local me="${1:?usage: claude-bus register <me> [--cgroup P] [--pid N] [--transcript P] [--supervisor NAME]}"; shift
   valid_name "$me"
-  local cgroup="" pid="" transcript=""
+  local cgroup="" pid="" transcript="" supervisor=""
+  local set_cgroup="" set_pid="" set_transcript=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --cgroup)     cgroup="$2"; shift 2 ;;
-      --pid)        pid="$2"; shift 2 ;;
-      --transcript) transcript="$2"; shift 2 ;;
+      --cgroup|--pid|--transcript|--supervisor)
+        [ $# -ge 2 ] || { printf 'register: %s needs a value\n' "$1" >&2; exit 2; }
+        case "$1" in
+          --cgroup)     cgroup="$2";     set_cgroup=1 ;;
+          --pid)        pid="$2";        set_pid=1 ;;
+          --transcript) transcript="$2"; set_transcript=1 ;;
+          --supervisor) supervisor="$2" ;;
+        esac
+        shift 2 ;;
       *) printf 'register: unknown flag %s\n' "$1" >&2; exit 2 ;;
     esac
   done
-  [ -n "$cgroup" ] || cgroup="$(self_cgroup)"
-  write_meta "$me" "$cgroup" "$pid" "$transcript"
+  # An explicitly empty value means "inherit", not "clear" (a launcher passing an
+  # unset $CG must not blank a correct field); un-mark it so the merge inherits.
+  [ -n "$cgroup" ]     || set_cgroup=""
+  [ -n "$pid" ]        || set_pid=""
+  [ -n "$transcript" ] || set_transcript=""
+  local dmax="${CLAUDE_BUS_DRAIN_MAX:-2}"
+  if [ -n "$supervisor" ]; then
+    valid_name "$supervisor"
+    case "$dmax" in ''|*[!0-9]*) printf 'register: drain_max must be a non-negative integer\n' >&2; exit 5;; esac
+  fi
+  # Merge + self-detect fallback, serialized so a launcher/agent race can't lose a
+  # field. An unpassed field inherits the prior value; cgroup self-detects only
+  # when still empty, so it never overwrites a launcher-set (correct) cgroup.
+  # Explicit failure check (not set -e): a caller may invoke register in a context
+  # where errexit is ignored (init runs it in an `if` condition), so the meta write
+  # must propagate its own non-zero rather than relying on the shell to abort.
+  # Capture at statement level, NOT `if ! (...)`: bash reports a redirection failure
+  # on a compound command as exit 0 when it is an if-condition, so a `.lock` that
+  # can't be opened would slip through; `|| wrc=$?` sees the real non-zero.
+  local mf md wrc=0; mf="$(meta_file "$me")"; md="$(dirname "$mf")"; mkdir -p "$md"
+  ( flock 9
+    if [ -f "$mf" ]; then
+      [ -n "$set_cgroup" ]     || cgroup="$(jq -r '.cgroup // ""'     "$mf" 2>/dev/null)" || cgroup=""
+      [ -n "$set_pid" ]        || pid="$(jq -r '.pid // ""'           "$mf" 2>/dev/null)" || pid=""
+      [ -n "$set_transcript" ] || transcript="$(jq -r '.transcript // ""' "$mf" 2>/dev/null)" || transcript=""
+    fi
+    [ -n "$cgroup" ] || cgroup="$(self_cgroup)"
+    write_meta "$me" "$cgroup" "$pid" "$transcript"
+  ) 9>"$md/.lock" || wrc=$?
+  if [ "$wrc" -ne 0 ]; then
+    printf 'register: failed to write meta for %s\n' "$me" >&2
+    exit 1
+  fi
   printf 'registered %s\n' "$me"
   tip "a peer can now 'claude-bus dispatch $me <from> <task>' and the monitor can probe it"
+  # --supervisor auto-wires the parent's watch of this agent, so an ephemeral
+  # worker is watched at spawn without the parent hand-wiring each one. Create-
+  # if-absent: a re-register (the merge's second call) never resets a live record.
+  if [ -n "$supervisor" ] && [ "$supervisor" != "$me" ]; then
+    local swd; swd="$(watch_dir "$supervisor")"; mkdir -p "$swd"
+    local swf; swf="$(watch_file "$supervisor" "$me")"
+    ( flock 9; [ -e "$swf" ] || write_watch_record "$supervisor" "$me" "$dmax" ) 9>"$swd/.lock" || true
+    if [ -e "$swf" ]; then tip "$supervisor now watches $me; background 'claude-bus monitor $supervisor' so its alerts land"; fi
+  fi
 }
 
 # delegate <inbox> <to> -- mail addressed to <inbox> is delivered into <to>'s
@@ -165,6 +227,16 @@ cmd_undelegate() {
   printf 'undelegated %s\n' "$inbox"
 }
 
+# write_watch_record <parent> <target> <dmax> -- caller holds the parent's
+# watch-dir lock. Atomic (tmp+mv) so a torn write can't leave an empty record
+# (which would pin the monitor open). Shared by cmd_watch and register's
+# --supervisor auto-watch so the record schema stays in one place.
+write_watch_record() {
+  local wf; wf="$(watch_file "$1" "$2")"
+  jq -n --arg t "$2" --argjson d "$3" '{target:$t,drain_max:$d,last:"",ticks:0}' > "$wf.tmp.$$" \
+    && mv -- "$wf.tmp.$$" "$wf" || { rm -f -- "$wf.tmp.$$"; return 1; }
+}
+
 # watch <me> <target> -- have <me>'s monitor flag <target> when it stops draining
 # its inbox (rate-limited, hung, dead). Unlike dispatch's expectations, this needs
 # no reply and no probe: a persistent sink (a secretary, an oncall) holds no
@@ -179,11 +251,8 @@ cmd_watch() {
   # Write atomically under the same lock unwatch and the tick take, so a torn or
   # racing write can't leave an empty record (which would pin the monitor open).
   local wf; wf="$(watch_file "$me" "$target")"
-  ( flock 9
-    jq -n --arg t "$target" --argjson d "$dmax" \
-      '{target:$t,drain_max:$d,last:"",ticks:0}' > "$wf.tmp.$$" \
-      && mv -- "$wf.tmp.$$" "$wf"
-  ) 9>"$wd/.lock" || { rm -f -- "$wf.tmp.$$"; printf 'watch: failed to write %s\n' "$wf" >&2; exit 1; }
+  ( flock 9; write_watch_record "$me" "$target" "$dmax" ) 9>"$wd/.lock" \
+    || { rm -f -- "$wf.tmp.$$"; printf 'watch: failed to write %s\n' "$wf" >&2; exit 1; }
   printf 'watching %s for %s\n' "$target" "$me"
   tip "background 'claude-bus monitor $me'; a 'stale' alert lands in $me's inbox if $target stops draining"
 }
