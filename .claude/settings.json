@@ -25,6 +25,17 @@
     ]
   },
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/.claude/skills/claude-bus/session-register\""
+          }
+        ]
+      }
+    ],
     "Notification": [
       {
         "matcher": "",

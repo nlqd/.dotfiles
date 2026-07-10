@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# SessionStart hook: register this session for claude-bus liveness monitoring.
+# Runs INSIDE the box; no-ops unless the launcher forwarded CLAUDE_BUS_NAME.
+#
+# Why this shape (verified live 2026-07-10): bwrap unshares only uts+pid (NOT the
+# cgroup ns), and dclaude wraps the session in `systemd-run --user --scope`, so
+# /proc/self/cgroup here IS the real host `app.slice/run-*.scope` that the agent's
+# whole tree lives in — for a coat exactly as for a plain dbox. So `init` self-detects
+# the correct scope with no launcher --cgroup / podman-inspect. On a RESUME the
+# SessionStart hook fires again under a NEW scope (dclaude -r is a full re-launch),
+# and `init` refreshes the now-stale scope. `register --transcript` then adds the
+# transcript path Claude Code hands the hook (which `init` cannot see), so the
+# erroring/API-error axis has something to tail. A worker also self-arms its parent's
+# watch via --supervisor. Never blocks the session (always exits 0).
+set -u
+# Always drain the hook's stdin first (this hook is global and fires on every session;
+# reading before the no-op keeps a non-bus session from seeing a broken pipe).
+payload="$(cat 2>/dev/null || true)"
+name="${CLAUDE_BUS_NAME:-}"
+[ -n "$name" ] || exit 0
+cb="$HOME/.claude/skills/claude-bus/claude-bus"
+[ -x "$cb" ] || exit 0
+tp="$(printf '%s' "$payload" | jq -r '.transcript_path // empty' 2>/dev/null || true)"
+# init: self-detect + refresh the current scope (correct for coat and dbox).
+"$cb" init "$name" >/dev/null 2>&1 || true
+# register: add the transcript (merges, so init's fresh cgroup is preserved); a worker
+# also creates its supervisor's watch. An empty transcript is treated as inherit.
+if [ -n "${CLAUDE_BUS_SUPERVISOR:-}" ]; then
+  "$cb" register "$name" --transcript "$tp" \
+    --supervisor "$CLAUDE_BUS_SUPERVISOR" --role "${CLAUDE_BUS_ROLE:-ephemeral}" >/dev/null 2>&1 || true
+else
+  "$cb" register "$name" --transcript "$tp" >/dev/null 2>&1 || true
+fi
+exit 0
