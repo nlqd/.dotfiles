@@ -122,6 +122,15 @@ minutes (configurable), runs the liveness probe, and only when it finds unlivene
 orchestrator's own inbox. Normal completion still arrives as the worker's own
 `done` message.
 
+The monitor is HOST-ONLY, and refuses to start otherwise. Metas store host-absolute
+cgroup paths, and a sandbox (a dbox) has no usable host cgroupfs, so a monitor run
+from inside a session would read every agent dead: not merely false `dead` alarms
+but, because an ephemeral watch garbage-collects its record on death, silent deletion
+of live workers. The refusal keys off `IS_SANDBOX` (which dbox sets) and an
+unreadable cgroup root. This is also the right architecture: a supervisor belongs
+outside the sessions it supervises, on a host shell that can see the real cgroup tree
+and the shared bus files alike.
+
 So from the orchestrator's seat, both outcomes look the same: mail in its inbox.
 "worker S3 finished" and "worker S3 is dead" arrive the same way, through the
 normal push that re-invokes it. The orchestrator never runs a probe or classifies

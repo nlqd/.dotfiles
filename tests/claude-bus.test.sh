@@ -795,4 +795,31 @@ eq "respawn race: record NOT GC'd (re-confirmed alive)" "0" "$([ -f "$CLAUDE_BUS
 eq "respawn race: no spurious alert"                    "0" "$(nmsg "$CLAUDE_BUS_ROOT/inbox/SPR")"
 
 #############################################################################
+# S2-24: the monitor is HOST-ONLY. Inside a sandbox the metas' host-absolute cgroup
+# paths are unreadable, so every probe reads dead -> false 'dead' alarms and, with
+# the ephemeral GC, deletion of LIVE workers. monitor must refuse rather than nuke.
+#############################################################################
+# the detector: a real host (no sandbox marker, cgroupfs readable) passes
+( monitor_host_ok ); eq "host passes the monitor guard" "0" "$?"
+# an explicit sandbox marker fails it
+( IS_SANDBOX=1 monitor_host_ok ); eq "IS_SANDBOX fails the guard" "1" "$?"
+# no usable cgroupfs fails it
+( CLAUDE_BUS_SYSFS="$CLAUDE_BUS_ROOT/nocg" monitor_host_ok ); eq "missing cgroupfs fails the guard" "1" "$?"
+# a CONTAINER-shaped cgroupfs (root cgroup.procs readable but NO host user.slice) must
+# fail — this is the rootless-podman false-negative the belt exists to catch
+FAKECGP="$CLAUDE_BUS_ROOT/cg-container"; mkdir -p "$FAKECGP"; : > "$FAKECGP/cgroup.procs"
+( CLAUDE_BUS_SYSFS="$FAKECGP" monitor_host_ok ); eq "container cgroupfs fails the guard" "1" "$?"
+# a host-shaped fake (cgroup.procs + user.slice) passes without relying on the real /sys
+FAKECGH="$CLAUDE_BUS_ROOT/cg-host"; mkdir -p "$FAKECGH/user.slice"; : > "$FAKECGH/cgroup.procs"
+( CLAUDE_BUS_SYSFS="$FAKECGH" monitor_host_ok ); eq "host-shaped cgroupfs passes the guard" "0" "$?"
+# cmd_monitor REFUSES to start in a sandbox (exit 8), before any tick/GC
+BUS init HMON >/dev/null
+IS_SANDBOX=1 CLAUDE_BUS_ROOT="$CLAUDE_BUS_ROOT" timeout 5 bash "$SCRIPT" monitor HMON >/dev/null 2>&1
+rc "monitor refuses in a sandbox" 8 $?
+has "monitor refusal says HOST-ONLY" "$(IS_SANDBOX=1 CLAUDE_BUS_ROOT="$CLAUDE_BUS_ROOT" bash "$SCRIPT" monitor HMON 2>&1)" "HOST-ONLY"
+# monitor-tick (the destructive primitive) also refuses in a sandbox — else one call
+# from inside a dbox performs the full nuke, bypassing the monitor guard
+IS_SANDBOX=1 CLAUDE_BUS_ROOT="$CLAUDE_BUS_ROOT" bash "$SCRIPT" monitor-tick HMON >/dev/null 2>&1; rc "monitor-tick refuses in a sandbox" 8 $?
+
+#############################################################################
 echo "----"; echo "pass=$pass fail=$fail"; [[ $fail -eq 0 ]]
