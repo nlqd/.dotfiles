@@ -397,6 +397,15 @@ dbox_exec() {
     # (nsenter --user makes it uid 0 in the coat's rootless userns, which claude
     # refuses --dangerously-skip-permissions under) and the coat's own resolv.conf
     # (the host's 127.0.0.53 stub is unreachable inside the coat, so DNS would die).
+    # Forward the claude-bus identity the spawner set, so the in-box SessionStart hook
+    # can self-register this session. Applies to coat AND plain dbox: the box's own
+    # cgroup scope (systemd-run --scope; bwrap does not unshare the cgroup ns) is what
+    # the monitor probes, so no host-side cgroup handling is needed. `[ -z ] ||` keeps
+    # it errexit-safe when a var is unset.
+    [ -z "${CLAUDE_BUS_NAME:-}" ]       || dbox_add --setenv CLAUDE_BUS_NAME "$CLAUDE_BUS_NAME"
+    [ -z "${CLAUDE_BUS_SUPERVISOR:-}" ] || dbox_add --setenv CLAUDE_BUS_SUPERVISOR "$CLAUDE_BUS_SUPERVISOR"
+    [ -z "${CLAUDE_BUS_ROLE:-}" ]       || dbox_add --setenv CLAUDE_BUS_ROLE "$CLAUDE_BUS_ROLE"
+
     local -a coat=()
     local cn
     if cn=$(should_enter_coat); then

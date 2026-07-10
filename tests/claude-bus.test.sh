@@ -822,4 +822,21 @@ has "monitor refusal says HOST-ONLY" "$(IS_SANDBOX=1 CLAUDE_BUS_ROOT="$CLAUDE_BU
 IS_SANDBOX=1 CLAUDE_BUS_ROOT="$CLAUDE_BUS_ROOT" bash "$SCRIPT" monitor-tick HMON >/dev/null 2>&1; rc "monitor-tick refuses in a sandbox" 8 $?
 
 #############################################################################
+# S2-25: the SessionStart register hook (session-register) — glue that self-
+# registers name + transcript (+ optional supervisor) from the hook's stdin JSON.
+#############################################################################
+HK="$HERE/../.claude/skills/claude-bus/session-register"
+echo '{"transcript_path":"/tmp/sess.jsonl","hook_event_name":"SessionStart"}' \
+  | CLAUDE_BUS_ROOT="$CLAUDE_BUS_ROOT" CLAUDE_BUS_NAME=HOOKA bash "$HK"
+eq "hook registers the name"  "0" "$([ -f "$CLAUDE_BUS_ROOT/meta/HOOKA.json" ]; echo $?)"
+eq "hook sets the transcript" "/tmp/sess.jsonl" "$(jq -r .transcript "$CLAUDE_BUS_ROOT/meta/HOOKA.json")"
+# no CLAUDE_BUS_NAME -> clean no-op
+echo '{"transcript_path":"/tmp/x.jsonl"}' | CLAUDE_BUS_ROOT="$CLAUDE_BUS_ROOT" bash "$HK"; rc "hook no-ops without a name" 0 $?
+# a worker forwards supervisor+role -> the parent's watch record is created ephemeral
+echo '{"transcript_path":"/tmp/w.jsonl"}' \
+  | CLAUDE_BUS_ROOT="$CLAUDE_BUS_ROOT" CLAUDE_BUS_NAME=HOOKW CLAUDE_BUS_SUPERVISOR=HOOKP CLAUDE_BUS_ROLE=ephemeral bash "$HK"
+eq "hook creates the supervisor watch" "0" "$([ -f "$CLAUDE_BUS_ROOT/watch/HOOKP/HOOKW.json" ]; echo $?)"
+eq "hook watch role is ephemeral"      "ephemeral" "$(jq -r .role "$CLAUDE_BUS_ROOT/watch/HOOKP/HOOKW.json")"
+
+#############################################################################
 echo "----"; echo "pass=$pass fail=$fail"; [[ $fail -eq 0 ]]
