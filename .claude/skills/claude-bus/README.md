@@ -41,7 +41,15 @@ failed meta write is surfaced loudly rather than silently reported as success.
 `register <worker> --supervisor <parent>` additionally wires the parent's watch of
 the worker at spawn (create-if-absent, so it never resets a live record), which is
 how a secretary that spawns fresh coats in batches learns when one of them 529s
-without hand-wiring each ephemeral worker.
+without hand-wiring each ephemeral worker. That auto-watch is erroring-only by
+default (role `ephemeral`): a worker dying is its normal terminal state, so a clean
+death is silent and the record is garbage-collected, keeping a churning fleet quiet,
+while erroring and stale still alarm. A worker that dies mid-error is not a clean
+exit, so its final API-error status is surfaced once before the record is reaped.
+The death-alarm is opt-in via `--role supervisor`, for a long-lived agent whose
+unexpected exit is itself the incident; `watch` (used for the persistent
+supervisors) defaults to that role, and a record with no role field reads as
+`supervisor`, so a legacy watch keeps alarming on death.
 
 ## The layers
 
