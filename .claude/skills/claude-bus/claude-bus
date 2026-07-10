@@ -700,8 +700,30 @@ cmd_monitor_tick() {
 
 # monitor <orch> -- background this. Ticks every CLAUDE_BUS_TICK seconds until no
 # open expectation remains, sending only unliveness into the orchestrator's inbox.
+# The monitor is HOST-ONLY. Metas store host-absolute cgroup paths; inside a sandbox
+# (a dbox has no usable host cgroupfs) every probe reads dead, which is not just false
+# `dead` alarms but — with the ephemeral GC — silent deletion of LIVE workers. So the
+# monitor must refuse to run where it cannot read host cgroups. A supervisor belongs
+# outside the sessions it supervises anyway. Three independent signals: IS_SANDBOX
+# (set by dbox); a readable cgroup root; and the host `user.slice` hierarchy the metas
+# live under (a private-cgroup-ns container has a readable root but no user.slice, so
+# the env marker alone is not enough — a rootless podman leaf slips past it). cg_base
+# is reused so the guard resolves cgroups exactly as the probes do.
+monitor_host_ok() {
+  [ -z "${IS_SANDBOX:-}" ] || return 1
+  [ -r "$(cg_base /cgroup.procs)" ] || return 1
+  [ -d "$(cg_base /user.slice)" ] || return 1
+  return 0
+}
+
+# Guard-or-exit for the two host-only entry points (the monitor loop and a bare tick).
+monitor_require_host() {
+  monitor_host_ok || { printf 'monitor: refusing to run — no usable host cgroupfs (a sandbox?). The monitor is HOST-ONLY: run it from a host shell, not inside a session, or it would read every agent dead and GC live workers.\n' >&2; exit 8; }
+}
+
 cmd_monitor() {
   local orch="$1"; valid_name "$orch"
+  monitor_require_host
   local tick="${CLAUDE_BUS_TICK:-180}"
   local pd; pd="$(pending_dir "$orch")"
   local wd; wd="$(watch_dir "$orch")"
@@ -761,7 +783,7 @@ main() {
     forward)   shift; cmd_forward   "$@";;
     pending)   shift; cmd_pending   "$@";;
     close)     shift; cmd_close     "$@";;
-    monitor-tick) shift; cmd_monitor_tick "$@";;
+    monitor-tick) shift; monitor_require_host; cmd_monitor_tick "$@";;
     monitor)   shift; cmd_monitor   "$@";;
     drain)     shift; cmd_drain     "$@";;
     wait)      shift; cmd_wait      "$@";;
