@@ -30,6 +30,19 @@ optional wiring is the launch wrapper calling `register` explicitly to supply th
 transcript path (which sharpens working versus retrying) or to register a worker that
 cannot self-detect its cgroup.
 
+`register` MERGES: a field not passed on a call inherits the prior meta, so the two
+parties that each know only half can register independently without clobbering. The
+launch wrapper supplies `--cgroup` (the container's real cgroup, which the agent
+cannot see from inside its own cgroup namespace) and `--transcript`; the agent's own
+`init` refreshes its scope cgroup and leaves the transcript untouched. An empty flag
+value means inherit, not clear, so a wrapper passing an unset variable cannot blank a
+correct field, and a reused bus name never keeps a dead prior session's scope. A
+failed meta write is surfaced loudly rather than silently reported as success.
+`register <worker> --supervisor <parent>` additionally wires the parent's watch of
+the worker at spawn (create-if-absent, so it never resets a live record), which is
+how a secretary that spawns fresh coats in batches learns when one of them 529s
+without hand-wiring each ephemeral worker.
+
 ## The layers
 
 ### 1. Transport (built)
@@ -152,6 +165,14 @@ false-alarms. `dead` needs no baseline (a death is a death), and `erroring` read
 cause straight from the transcript, which is why it beats a naive transcript-mtime-
 flat check: flatness cannot separate a frozen agent from one healthily idle between
 tasks. This is liveness for the agents no expectation covers.
+
+The alert lands in the watcher's own inbox, so routing is the watch relationship
+itself: there is no `parent` field on the agent and no global tree the bus
+maintains. A supervisor watches its direct children, and their `dead`/`erroring`/
+`stale` events surface to it; each supervisor owns its own watch list, so the
+hierarchy (a coordinator watching its secretaries, a secretary watching the workers
+it spawned) emerges from who-watches-whom rather than from any central registry.
+`register --supervisor` is just the shorthand that creates that watch at spawn.
 
 ### 5. Liveness probe: stateless and out-of-process
 
