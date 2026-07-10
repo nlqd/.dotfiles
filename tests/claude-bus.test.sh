@@ -725,4 +725,74 @@ eq "write_meta leaves no corrupt meta" "1" "$([ -f "$CLAUDE_BUS_ROOT/meta/D1M.js
 eq "write_meta leaves no stale tmp"    "0" "$(find "$CLAUDE_BUS_ROOT/meta" -name 'D1M.json.tmp.*' 2>/dev/null | wc -l)"
 
 #############################################################################
+# S2-23: role-gated death alarm. --supervisor watches are erroring-only by default
+# (role=ephemeral): a clean worker death is silent and GC'd (no churn), while
+# erroring/stale still alarm. The death-alarm is opt-in via role=supervisor, which
+# is also `watch`'s default (the mgr<-sec/onc case).
+#############################################################################
+# register --supervisor tags the auto-watch ephemeral
+BUS init SP >/dev/null
+BUS register EW --cgroup /x --supervisor SP >/dev/null
+eq "register --supervisor role is ephemeral" "ephemeral" "$(jq -r .role "$CLAUDE_BUS_ROOT/watch/SP/EW.json")"
+# an ephemeral worker that dies is silent AND its watch record is GC'd
+probe_snapshot() { echo '{"alive":0,"net":0,"oom":0,"mtime":0,"known":true}'; }
+cmd_monitor_tick SP
+eq "ephemeral death: no alert"    "0" "$(nmsg "$CLAUDE_BUS_ROOT/inbox/SP")"
+eq "ephemeral death: record GC'd" "1" "$([ -f "$CLAUDE_BUS_ROOT/watch/SP/EW.json" ]; echo $?)"
+# but an ephemeral worker still alarms on erroring (the core signal)
+BUS init SP2 >/dev/null
+EWJ="$CLAUDE_BUS_ROOT/ew2.jsonl"; printf '%s\n' '{"isApiErrorMessage":true,"apiErrorStatus":529}' > "$EWJ"
+BUS register EW2 --cgroup /x --transcript "$EWJ" --supervisor SP2 >/dev/null
+probe_snapshot() { echo '{"alive":1,"net":0,"oom":0,"mtime":0,"known":true}'; }
+cmd_monitor_tick SP2
+has "ephemeral still alarms on erroring" "$(jq -r .body "$(ls "$CLAUDE_BUS_ROOT"/inbox/SP2/*.msg 2>/dev/null | head -1)")" "erroring"
+# watch defaults to role=supervisor and DOES alarm on death, not GC'd
+BUS init SP3 >/dev/null
+BUS watch SP3 SUPT >/dev/null
+eq "watch default role is supervisor" "supervisor" "$(jq -r .role "$CLAUDE_BUS_ROOT/watch/SP3/SUPT.json")"
+probe_snapshot() { echo '{"alive":0,"net":0,"oom":0,"mtime":0,"known":true}'; }
+cmd_monitor_tick SP3
+has "supervisor death DOES alarm" "$(jq -r .body "$(ls "$CLAUDE_BUS_ROOT"/inbox/SP3/*.msg 2>/dev/null | head -1)")" "dead"
+eq "supervisor watch not GC'd"    "0" "$([ -f "$CLAUDE_BUS_ROOT/watch/SP3/SUPT.json" ]; echo $?)"
+# register --supervisor --role supervisor opts into the death-alarm
+BUS init SP4 >/dev/null
+BUS register LV --cgroup /x --supervisor SP4 --role supervisor >/dev/null
+eq "register --role supervisor honored" "supervisor" "$(jq -r .role "$CLAUDE_BUS_ROOT/watch/SP4/LV.json")"
+probe_snapshot() { echo '{"alive":0,"net":0,"oom":0,"mtime":0,"known":true}'; }
+cmd_monitor_tick SP4
+has "opted-in supervisor death alarms" "$(jq -r .body "$(ls "$CLAUDE_BUS_ROOT"/inbox/SP4/*.msg 2>/dev/null | head -1)")" "dead"
+# an unregistered/old record with no role field defaults to supervisor (dead alarms)
+BUS init SP5 >/dev/null
+printf '{"target":"OLDT","drain_max":2,"last":"","ticks":0}' > "$CLAUDE_BUS_ROOT/watch/SP5/OLDT.json" 2>/dev/null || { mkdir -p "$CLAUDE_BUS_ROOT/watch/SP5"; printf '{"target":"OLDT","drain_max":2,"last":"","ticks":0}' > "$CLAUDE_BUS_ROOT/watch/SP5/OLDT.json"; }
+probe_snapshot() { echo '{"alive":0,"net":0,"oom":0,"mtime":0,"known":true}'; }
+cmd_monitor_tick SP5
+has "role-less record defaults to supervisor (alarms)" "$(jq -r .body "$(ls "$CLAUDE_BUS_ROOT"/inbox/SP5/*.msg 2>/dev/null | head -1)")" "dead"
+# an invalid role is rejected before any write
+BUS register BR --cgroup /x --supervisor SP4 --role bogus >/dev/null 2>&1; rc "register rejects bad role" 5 $?
+# --role is validated even without --supervisor (catch a typo'd invocation early)
+BUS register NR --cgroup /x --role bogus >/dev/null 2>&1; rc "register validates --role without --supervisor" 5 $?
+# (F1) an ephemeral worker that dies WHILE erroring surfaces the 529 before GC — the
+# primary signal must survive even if no alive+erroring tick landed in between
+BUS init SPF >/dev/null
+FWJ="$CLAUDE_BUS_ROOT/spf.jsonl"; printf '%s\n' '{"isApiErrorMessage":true,"apiErrorStatus":529}' > "$FWJ"
+BUS register FWK --cgroup /x --transcript "$FWJ" --supervisor SPF >/dev/null
+probe_snapshot() { echo '{"alive":0,"net":0,"oom":0,"mtime":0,"known":true}'; }   # dead, mid-error
+cmd_monitor_tick SPF
+has "ephemeral died-while-erroring alerts 529" "$(jq -r .body "$(ls "$CLAUDE_BUS_ROOT"/inbox/SPF/*.msg 2>/dev/null | head -1)")" "erroring"
+eq  "ephemeral died-while-erroring still GC'd" "1" "$([ -f "$CLAUDE_BUS_ROOT/watch/SPF/FWK.json" ]; echo $?)"
+# (F2) a same-name respawn re-registered before the GC lands must not lose its fresh
+# watch: the GC re-confirms death under the lock, so an alive target is not deleted.
+# Emulate the race with a probe that reads dead first (the tick's decision) then alive
+# (the respawn, seen by the under-lock re-confirm).
+BUS init SPR >/dev/null
+BUS register RWK --cgroup /x --supervisor SPR >/dev/null
+# file-backed toggle (each probe call runs in its own $() subshell, so an in-memory
+# counter would not persist): first read dead, every read after alive.
+rm -f "$CLAUDE_BUS_ROOT/.pcflag"
+probe_snapshot() { if [ -e "$CLAUDE_BUS_ROOT/.pcflag" ]; then echo '{"alive":1,"net":0,"oom":0,"mtime":0,"known":true}'; else : > "$CLAUDE_BUS_ROOT/.pcflag"; echo '{"alive":0,"net":0,"oom":0,"mtime":0,"known":true}'; fi; }
+cmd_monitor_tick SPR
+eq "respawn race: record NOT GC'd (re-confirmed alive)" "0" "$([ -f "$CLAUDE_BUS_ROOT/watch/SPR/RWK.json" ]; echo $?)"
+eq "respawn race: no spurious alert"                    "0" "$(nmsg "$CLAUDE_BUS_ROOT/inbox/SPR")"
+
+#############################################################################
 echo "----"; echo "pass=$pass fail=$fail"; [[ $fail -eq 0 ]]

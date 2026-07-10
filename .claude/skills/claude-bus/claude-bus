@@ -145,17 +145,18 @@ cmd_init() {
 cmd_register() {
   local me="${1:?usage: claude-bus register <me> [--cgroup P] [--pid N] [--transcript P] [--supervisor NAME]}"; shift
   valid_name "$me"
-  local cgroup="" pid="" transcript="" supervisor=""
+  local cgroup="" pid="" transcript="" supervisor="" role=""
   local set_cgroup="" set_pid="" set_transcript=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --cgroup|--pid|--transcript|--supervisor)
+      --cgroup|--pid|--transcript|--supervisor|--role)
         [ $# -ge 2 ] || { printf 'register: %s needs a value\n' "$1" >&2; exit 2; }
         case "$1" in
           --cgroup)     cgroup="$2";     set_cgroup=1 ;;
           --pid)        pid="$2";        set_pid=1 ;;
           --transcript) transcript="$2"; set_transcript=1 ;;
           --supervisor) supervisor="$2" ;;
+          --role)       role="$2" ;;
         esac
         shift 2 ;;
       *) printf 'register: unknown flag %s\n' "$1" >&2; exit 2 ;;
@@ -166,10 +167,16 @@ cmd_register() {
   [ -n "$cgroup" ]     || set_cgroup=""
   [ -n "$pid" ]        || set_pid=""
   [ -n "$transcript" ] || set_transcript=""
+  # --role is validated whenever given (a typo fails fast even without --supervisor);
+  # a --supervisor auto-watch is erroring-only by default (role=ephemeral: a worker
+  # dying is its normal terminal state, so the death is silent), and --role supervisor
+  # opts a long-lived agent into the death-alarm.
+  [ -z "$role" ] || case "$role" in supervisor|ephemeral) ;; *) printf 'register: --role must be supervisor or ephemeral\n' >&2; exit 5;; esac
   local dmax="${CLAUDE_BUS_DRAIN_MAX:-2}"
   if [ -n "$supervisor" ]; then
     valid_name "$supervisor"
     case "$dmax" in ''|*[!0-9]*) printf 'register: drain_max must be a non-negative integer\n' >&2; exit 5;; esac
+    role="${role:-ephemeral}"
   fi
   # Merge + self-detect fallback, serialized so a launcher/agent race can't lose a
   # field. An unpassed field inherits the prior value; cgroup self-detects only
@@ -202,7 +209,7 @@ cmd_register() {
   if [ -n "$supervisor" ] && [ "$supervisor" != "$me" ]; then
     local swd; swd="$(watch_dir "$supervisor")"; mkdir -p "$swd"
     local swf; swf="$(watch_file "$supervisor" "$me")"
-    ( flock 9; [ -e "$swf" ] || write_watch_record "$supervisor" "$me" "$dmax" ) 9>"$swd/.lock" || true
+    ( flock 9; [ -e "$swf" ] || write_watch_record "$supervisor" "$me" "$dmax" "$role" ) 9>"$swd/.lock" || true
     if [ -e "$swf" ]; then tip "$supervisor now watches $me; background 'claude-bus monitor $supervisor' so its alerts land"; fi
   fi
 }
@@ -227,13 +234,14 @@ cmd_undelegate() {
   printf 'undelegated %s\n' "$inbox"
 }
 
-# write_watch_record <parent> <target> <dmax> -- caller holds the parent's
+# write_watch_record <parent> <target> <dmax> <role> -- caller holds the parent's
 # watch-dir lock. Atomic (tmp+mv) so a torn write can't leave an empty record
 # (which would pin the monitor open). Shared by cmd_watch and register's
-# --supervisor auto-watch so the record schema stays in one place.
+# --supervisor auto-watch so the record schema stays in one place. <role> is
+# supervisor (death alarms) or ephemeral (death is a normal exit: silent + GC).
 write_watch_record() {
   local wf; wf="$(watch_file "$1" "$2")"
-  jq -n --arg t "$2" --argjson d "$3" '{target:$t,drain_max:$d,last:"",ticks:0}' > "$wf.tmp.$$" \
+  jq -n --arg t "$2" --argjson d "$3" --arg r "$4" '{target:$t,drain_max:$d,role:$r,last:"",ticks:0}' > "$wf.tmp.$$" \
     && mv -- "$wf.tmp.$$" "$wf" || { rm -f -- "$wf.tmp.$$"; return 1; }
 }
 
@@ -251,7 +259,7 @@ cmd_watch() {
   # Write atomically under the same lock unwatch and the tick take, so a torn or
   # racing write can't leave an empty record (which would pin the monitor open).
   local wf; wf="$(watch_file "$me" "$target")"
-  ( flock 9; write_watch_record "$me" "$target" "$dmax" ) 9>"$wd/.lock" \
+  ( flock 9; write_watch_record "$me" "$target" "$dmax" supervisor ) 9>"$wd/.lock" \
     || { rm -f -- "$wf.tmp.$$"; printf 'watch: failed to write %s\n' "$wf" >&2; exit 1; }
   printf 'watching %s for %s\n' "$target" "$me"
   tip "background 'claude-bus monitor $me'; a 'stale' alert lands in $me's inbox if $target stops draining"
@@ -615,11 +623,11 @@ cmd_monitor_tick() {
   # then-failed axis) alerts. Markers store non-empty via a "-" sentinel so the
   # empty-able `last` stays the final @tsv field (a middle empty would collapse under
   # read's IFS-whitespace and shift the columns).
-  local wf wrec target dmax last wticks da ea sa oldest oid nlast nticks kav wknown walive mtr el errstatus isdead curstale abody wdo
+  local wf wrec target dmax last wticks da ea sa role oldest oid nlast nticks kav wknown walive mtr el errstatus isdead curstale abody wdo wgc gkav gknown galive
   for wf in "$wd"/*.json; do
     [ -e "$wf" ] || continue
-    wrec="$(jq -r '[.target,(.drain_max // 2),(.ticks // 0),(.da // "-"),(.ea // "-"),(.sa // "-"),(.last // "")] | @tsv' "$wf" 2>/dev/null)" || continue
-    IFS=$'\t' read -r target dmax wticks da ea sa last <<<"$wrec"
+    wrec="$(jq -r '[.target,(.drain_max // 2),(.ticks // 0),(.da // "-"),(.ea // "-"),(.sa // "-"),(.role // "supervisor"),(.last // "")] | @tsv' "$wf" 2>/dev/null)" || continue
+    IFS=$'\t' read -r target dmax wticks da ea sa role last <<<"$wrec"
     [ "$da" = - ] && da=""; [ "$ea" = - ] && ea=""; [ "$sa" = - ] && sa=""
     name_ok "$target" || continue
     # roll the drain-staleness counter: same oldest persisting is the stall
@@ -647,10 +655,20 @@ cmd_monitor_tick() {
     [ -z "$isdead" ] && da=""
     [ -z "$errstatus" ] && ea=""
     [ -z "$curstale" ] && sa=""
-    # emit the highest-priority ACTIVE axis, once per distinct value (per-axis dedup)
-    wdo=""; abody=""
+    # emit the highest-priority ACTIVE axis, once per distinct value (per-axis dedup).
+    # A dead ephemeral target is a normal exit: no alarm, and GC the record so a
+    # churning worker fleet does not accumulate stale watches. A dead supervisor is
+    # the alarm (its unexpected exit is the whole point).
+    wdo=""; abody=""; wgc=""
     if [ -n "$isdead" ]; then
-      [ "$da" != 1 ] && { wdo=1; abody="dead $target"; }; da=1
+      if [ "$role" = ephemeral ]; then
+        wgc=1
+        # died mid-error: the worker is a casualty of the rate limit, not a clean
+        # exit — surface it once (deduped) before the record is GC'd.
+        [ -n "$errstatus" ] && [ "$ea" != "$errstatus" ] && { wdo=1; abody="erroring $target $errstatus (exited)"; }
+      else
+        [ "$da" != 1 ] && { wdo=1; abody="dead $target"; }; da=1
+      fi
     elif [ -n "$errstatus" ]; then
       [ "$ea" != "$errstatus" ] && { wdo=1; abody="erroring $target $errstatus"; }; ea="$errstatus"
     elif [ -n "$curstale" ]; then
@@ -659,6 +677,18 @@ cmd_monitor_tick() {
     (
       flock 9
       [ -e "$wf" ] || exit 0
+      if [ -n "$wgc" ]; then
+        # Re-confirm death under the lock before the destructive GC: a same-name
+        # respawn between the unlocked probe and here must keep its fresh record and
+        # not inherit the prior incarnation's stale erroring alert.
+        gkav="$(jq -r '[.known,.alive] | @tsv' <<<"$(probe_snapshot "$target")")" || gkav=""
+        IFS=$'\t' read -r gknown galive <<<"$gkav"
+        if [ "$gknown" = true ] && [ "$galive" = 0 ]; then
+          [ -n "$wdo" ] && publish "$orch" monitor alert "$(gen_id)" "" "$abody"
+          rm -f -- "$wf"
+        fi
+        exit 0
+      fi
       [ -n "$wdo" ] && publish "$orch" monitor alert "$(gen_id)" "" "$abody"
       if jq --arg da "${da:--}" --arg ea "${ea:--}" --arg sa "${sa:--}" --arg l "$nlast" --argjson t "$nticks" \
         '.da=$da | .ea=$ea | .sa=$sa | .last=$l | .ticks=$t' "$wf" > "$wf.w.$$" 2>/dev/null; then
