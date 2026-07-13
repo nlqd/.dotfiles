@@ -1,13 +1,5 @@
 [
   {
-    "repo": "Alexsjones/llmfit",
-    "asset": "llmfit-v0.9.38-aarch64-apple-darwin.tar.gz",
-    "version": "v0.9.38",
-    "links": {
-      "llmfit-v0.8.4-x86_64-unknown-linux-gnu/llmfit": "/home/dungngo/.local/bin/llmfit"
-    }
-  },
-  {
     "repo": "CircleCI-Public/circleci-cli",
     "asset": "circleci-cli_0.1.38646_checksums.txt",
     "version": "v0.1.38646",
@@ -33,8 +25,8 @@
   },
   {
     "repo": "altsem/gitu",
-    "asset": "gitu-v0.42.0-x86_64-unknown-linux-gnu.zip",
-    "version": "v0.42.0",
+    "asset": "gitu-v0.43.0-aarch64-apple-darwin.zip",
+    "version": "v0.43.0",
     "links": {
       "gitu-v0.42.0-x86_64-unknown-linux-gnu/gitu": "/home/dungngo/.local/bin/gitu"
     }
@@ -82,7 +74,7 @@
   {
     "repo": "tomasz-tomczyk/crit",
     "asset": "crit-linux-amd64",
-    "version": "v0.17.1",
+    "version": "v0.18.0",
     "links": {
       "crit-linux-amd64": "/home/dungngo/.local/bin/crit"
     }
