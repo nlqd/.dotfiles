@@ -11,11 +11,14 @@
 # done
 
 sessionname="claude-hub"
-triggerword="spend limit"
+triggerword="spend limit|Not logged in|Login expired|API error"
 message="please continue"
 nlines=20
+has=""
 tmux lsp -s -t "$sessionname" -F '#{pane_id}' | while read -r pane_id; do
-    if tmux capturep -t "$pane_id" -p -S -$nlines | grep -q "$triggerword"; then
+    if tmux capturep -t "$pane_id" -p -S -$nlines | grep -E -q "$triggerword"; then
         tmux send -t "$pane_id" "$message" Enter
+        has=true
     fi
 done
+[ -n "$has" ] && exit 1
