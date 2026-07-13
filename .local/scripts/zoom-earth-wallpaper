@@ -12,6 +12,12 @@ OUT="$HOME/Downloads/wallpapers/zoom-earth-precipitation.png"
 FEHBG="$HOME/.fehbg"
 WIDTH=3840
 HEIGHT=2160
+LOCK="${XDG_RUNTIME_DIR:-/tmp}/zoom-earth-wallpaper.lock"
+
+# Guard against a cron tick firing while the previous run is still going
+# (e.g. a slow network); skip rather than stack a second Chrome on top.
+exec 9>"$LOCK"
+flock -n 9 || { echo "already running, skipping" >&2; exit 0; }
 
 STRIP_JS="(() => { Array.from(document.querySelectorAll('main > *')).forEach(el => { if (el.tagName !== 'SECTION') el.style.setProperty('display','none','important'); }); return true; })()"
 
