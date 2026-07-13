@@ -45,12 +45,26 @@ if [ -n "$dir" ]; then
   [ -n "${g[0]}" ] && [ "${g[0]}" != "${g[1]}" ] && [ -n "$branch" ] && in_worktree=1
 fi
 
-# Minimal colors: default fg for most text, green only for the ctx bar.
-# Bold marks active warnings (5h shown, 7d over-pace).
-c_ctx=$'\033[32m'          # green - ctx bar fill
-c_track=$'\033[38;5;240m'  # dim grey - ctx bar empty track
+# Minimal colors: default fg for most text, green for the ctx bar, orange for
+# the 7d block when on the work account. Bold marks active warnings (5h
+# shown, 7d over-pace) — color is identity, bold is urgency, independent axes.
+c_ctx=$'\033[32m'                 # green - ctx bar fill
+c_track=$'\033[38;5;240m'         # dim grey - ctx bar empty track
+c_acct_orange=$'\033[38;5;208m'   # orange - "rememberizer" account
 bold=$'\033[1m'
 reset=$'\033[0m'
+
+# Prefer ~/.claude.json: it's the file a live claude process (sandboxed or
+# not) actually keeps current. The nested ~/.claude/.claude.json only updates
+# when a dbox profile overlay writes it at sandbox launch, then goes stale the
+# moment that sandbox exits, so it can't be trusted as the general source.
+acct_file="$HOME/.claude.json"
+[ -f "$acct_file" ] || acct_file="$HOME/.claude/.claude.json"
+acct_email=$(jq -r '.oauthAccount.emailAddress // ""' "$acct_file" 2>/dev/null)
+case "${acct_email%%@*}" in
+  rememberizer) c_acct=$c_acct_orange ;;
+  *)            c_acct="" ;;
+esac
 
 # bar PCT CELLS FILL TRACK — git-diff style gauge at half-cell resolution.
 # + is a full cell, - the half-filled boundary (a makeshift partial so low
@@ -115,7 +129,8 @@ push() { prios+=("$1"); parts+=("$2"); }
 
 # Rate limits group. Both windows read "{time_to_reset}:{budget_left}%", with
 # time_to_reset in whatever unit is closest (d/h/m), so a near reset tells you
-# how soon in real terms.
+# how soon in real terms. Color is account (orange on rememberizer, default on
+# personal); bold is pace, independent of color:
 #   5h: only when >95% used — bold, since its presence is already a warning.
 #   7d: always; bold when budget-left lags time-left (as % of the window) by
 #       over 10 points (over-pace, slow down).
@@ -127,7 +142,7 @@ if [ -n "$five_h" ] && [ "$five_h" -gt 95 ] 2>/dev/null; then
     fh_left=$(( five_h_reset - now_ts ))
     [ $fh_left -gt 0 ] && fh="${fh} $(fmt_dur $fh_left)"
   fi
-  rl_pieces+=("${bold}${fh}${reset}")
+  rl_pieces+=("${c_acct}${bold}${fh}${reset}")
 fi
 if [ -n "$seven_d" ] && [ -n "$seven_d_reset" ] && [ "$seven_d_reset" -gt 0 ]; then
   sec_left=$(( seven_d_reset - now_ts ))
@@ -140,7 +155,7 @@ if [ -n "$seven_d" ] && [ -n "$seven_d_reset" ] && [ "$seven_d_reset" -gt 0 ]; t
     else
       pace_bold=""
     fi
-    rl_pieces+=("${pace_bold}$(fmt_dur "$sec_left"):${pct_left}%${reset}")
+    rl_pieces+=("${c_acct}${pace_bold}$(fmt_dur "$sec_left"):${pct_left}%${reset}")
   fi
 fi
 [ ${#rl_pieces[@]} -gt 0 ] && push 40 "$(join " " "${rl_pieces[@]}")"

@@ -172,8 +172,8 @@ dbox_dotfiles() {
 # them where it expects regardless of which host identity backs them.
 #
 # Three identity files are overlaid per profile: the token (.credentials.json)
-# and two account-metadata copies, the top-level ~/.claude.json and the nested
-# ~/.claude/.claude.json (the statusline reads the latter's oauthAccount). The
+# and two account-metadata copies, the top-level ~/.claude.json (the statusline
+# reads this one's oauthAccount) and the nested ~/.claude/.claude.json. The
 # nested one lives inside the shared rw ~/.claude, so without this overlay it
 # carries whichever identity last wrote it and bleeds across profiles. Both
 # metadata copies come from the same source; the token is never derived from it.
