@@ -11,3 +11,5 @@
 # Project content that isn't dotfiles
 ^/ansible
 ^/docs
+^/tests
+^/etc
