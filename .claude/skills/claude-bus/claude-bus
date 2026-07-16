@@ -452,11 +452,14 @@ classify() {
   [ "$(jq -r '.known' <<<"$c")" = "false" ] && { echo unknown; return; }
   { [ "$b" = "null" ] || [ -z "$b" ]; } && { echo unknown; return; }
   [ "$(jq -r '.alive' <<<"$c")" = "0" ] && { echo dead; return; }
-  local bo co; bo="$(jq -r '.oom' <<<"$b")"; co="$(jq -r '.oom' <<<"$c")"
+  # The baseline comes from an attacker-writable pending record, and every field below
+  # feeds bash arithmetic (( )), which would EXECUTE a value like `x[$(cmd)]`. Coerce
+  # each to an integer via jq (a non-number reads back 0) so the arithmetic is inert.
+  local bo co; bo="$(jq -r '.oom|numbers // 0' <<<"$b")"; co="$(jq -r '.oom|numbers // 0' <<<"$c")"
   (( co > bo )) && { echo oom; return; }
   local bn cn bm cm
-  bn="$(jq -r '.net' <<<"$b")"; cn="$(jq -r '.net' <<<"$c")"
-  bm="$(jq -r '.mtime' <<<"$b")"; cm="$(jq -r '.mtime' <<<"$c")"
+  bn="$(jq -r '.net|numbers // 0' <<<"$b")"; cn="$(jq -r '.net|numbers // 0' <<<"$c")"
+  bm="$(jq -r '.mtime|numbers // 0' <<<"$b")"; cm="$(jq -r '.mtime|numbers // 0' <<<"$c")"
   if   (( cm > bm )); then echo working
   elif (( cn > bn )); then echo retrying
   else echo idle
@@ -557,7 +560,12 @@ cmd_monitor_tick() {
     # One guarded read: a file drained away mid-tick is a skip, not a set -e death.
     # Process liveness needs a baseline (registered peer); ack-timeliness (whether
     # the worker READ the message) is the expectation's state and needs no probe.
-    rec="$(jq -r '[.state,.peer,.id,.flat,(.ticks // 0),(.baseline|tojson),(.alerted // "")] | @tsv' "$pf" 2>/dev/null)" || continue
+    # Coerce every numeric field by TYPE, not `// 0`: these records are attacker-
+    # writable (shared uid, bind-mounted bus root), and `.ticks`/`.flat` flow into bash
+    # arithmetic below, where a string value like `dmax[$(cmd)]` would EXECUTE cmd in
+    # this host monitor. A non-number reads back as its default, so the arithmetic is
+    # inert. Write-path validation cannot help — the attack hand-writes the JSON.
+    rec="$(jq -r '[.state,.peer,.id,(if (.flat|type)=="number" then .flat else 0 end),(if (.ticks|type)=="number" then .ticks else 0 end),(.baseline|tojson),(.alerted // "")] | @tsv' "$pf" 2>/dev/null)" || continue
     IFS=$'\t' read -r state peer id flat ticks baseline prev <<<"$rec"
     [ "$state" = "awaiting_orch" ] && continue
     ticks=$((ticks + 1))
@@ -626,7 +634,10 @@ cmd_monitor_tick() {
   local wf wrec target dmax last wticks da ea sa role oldest oid nlast nticks kav wknown walive mtr el errstatus isdead curstale abody wdo wgc gkav gknown galive
   for wf in "$wd"/*.json; do
     [ -e "$wf" ] || continue
-    wrec="$(jq -r '[.target,(.drain_max // 2),(.ticks // 0),(.da // "-"),(.ea // "-"),(.sa // "-"),(.role // "supervisor"),(.last // "")] | @tsv' "$wf" 2>/dev/null)" || continue
+    # drain_max/ticks are coerced by TYPE (not `// N`, which lets a string through):
+    # they feed bash arithmetic below, and these records are attacker-writable, so a
+    # value like `dmax[$(cmd)]` would EXECUTE cmd in this host monitor. Fail closed.
+    wrec="$(jq -r '[.target,(if (.drain_max|type)=="number" then .drain_max else 2 end),(if (.ticks|type)=="number" then .ticks else 0 end),(.da // "-"),(.ea // "-"),(.sa // "-"),(.role // "supervisor"),(.last // "")] | @tsv' "$wf" 2>/dev/null)" || continue
     IFS=$'\t' read -r target dmax wticks da ea sa role last <<<"$wrec"
     [ "$da" = - ] && da=""; [ "$ea" = - ] && ea=""; [ "$sa" = - ] && sa=""
     name_ok "$target" || continue

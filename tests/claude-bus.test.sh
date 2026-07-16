@@ -839,4 +839,51 @@ eq "hook creates the supervisor watch" "0" "$([ -f "$CLAUDE_BUS_ROOT/watch/HOOKP
 eq "hook watch role is ephemeral"      "ephemeral" "$(jq -r .role "$CLAUDE_BUS_ROOT/watch/HOOKP/HOOKW.json")"
 
 #############################################################################
+# S2-28: arithmetic-injection defense. The monitor reads numeric fields out of
+# watch/pending records and feeds them to bash arithmetic; bash re-evaluates a
+# variable's VALUE as an expression, so a field like `dmax[$(cmd)]` runs cmd in the
+# HOST monitor. Any same-uid agent can hand-write these records (bind-mounted bus
+# root), so the coercion must happen at READ time, not at the write-path validation
+# the attacker bypasses. set -u does NOT help: the payload names an in-scope var.
+#############################################################################
+probe_snapshot() { echo '{"alive":1,"net":0,"oom":0,"mtime":0,"known":false}'; }
+rm -f "$CLAUDE_BUS_ROOT/PWNED_WATCH" "$CLAUDE_BUS_ROOT/PWNED_PENDING"
+# a hostile WATCH record: .ticks is an arithmetic payload naming an in-scope local
+BUS init WARITH >/dev/null
+BUS send ASINK sender "stuck" >/dev/null
+mkdir -p "$CLAUDE_BUS_ROOT/watch/WARITH"
+jq -n --arg l "$(ls "$CLAUDE_BUS_ROOT"/inbox/ASINK/*.msg | head -1 | xargs -n1 basename)" \
+  '{target:"ASINK",drain_max:2,role:"supervisor",last:$l,ticks:"dmax[$(touch '"$CLAUDE_BUS_ROOT"'/PWNED_WATCH)]"}' \
+  > "$CLAUDE_BUS_ROOT/watch/WARITH/ASINK.json"
+cmd_monitor_tick WARITH; cmd_monitor_tick WARITH
+eq "hostile watch .ticks executes nothing" "1" "$([ -e "$CLAUDE_BUS_ROOT/PWNED_WATCH" ]; echo $?)"
+# and a hostile drain_max on the other arithmetic site (-ge) is inert too
+rm -f "$CLAUDE_BUS_ROOT/PWNED_DMAX"
+jq -n --arg l "$(ls "$CLAUDE_BUS_ROOT"/inbox/ASINK/*.msg | head -1 | xargs -n1 basename)" \
+  '{target:"ASINK",drain_max:"role[$(touch '"$CLAUDE_BUS_ROOT"'/PWNED_DMAX)]",role:"supervisor",last:$l,ticks:1}' \
+  > "$CLAUDE_BUS_ROOT/watch/WARITH/ASINK.json"
+cmd_monitor_tick WARITH; cmd_monitor_tick WARITH
+eq "hostile watch .drain_max executes nothing" "1" "$([ -e "$CLAUDE_BUS_ROOT/PWNED_DMAX" ]; echo $?)"
+# a hostile PENDING record: .ticks feeds `ticks=$((ticks+1))` unconditionally (before
+# any baseline gate), so it is the reachable arithmetic site in the other loop
+BUS init OARITH >/dev/null
+mkdir -p "$CLAUDE_BUS_ROOT/pending/OARITH"
+jq -n '{state:"sent",peer:"P",id:"1-1",flat:0,ticks:"flat_max[$(touch '"$CLAUDE_BUS_ROOT"'/PWNED_PENDING)]",baseline:null,alerted:""}' \
+  > "$CLAUDE_BUS_ROOT/pending/OARITH/1-1.json"
+cmd_monitor_tick OARITH; cmd_monitor_tick OARITH
+eq "hostile pending .ticks executes nothing" "1" "$([ -e "$CLAUDE_BUS_ROOT/PWNED_PENDING" ]; echo $?)"
+# the non-obvious site: the pending record's .baseline is passed into classify(), whose
+# (( co > bo )) comparisons evaluate baseline.oom/.net/.mtime as arithmetic. A live
+# registered peer makes the current probe known+alive, so the oom compare is reached.
+rm -f "$CLAUDE_BUS_ROOT/PWNED_BASELINE"
+probe_snapshot() { echo '{"alive":1,"net":0,"oom":0,"mtime":0,"known":true}'; }
+BUS init OARITH2 >/dev/null
+mkdir -p "$CLAUDE_BUS_ROOT/pending/OARITH2"
+jq -n '{state:"sent",peer:"LIVE",id:"1-1",flat:0,ticks:0,alerted:"",baseline:{alive:1,net:0,mtime:0,known:true,oom:"flat_max[$(touch '"$CLAUDE_BUS_ROOT"'/PWNED_BASELINE)]"}}' \
+  > "$CLAUDE_BUS_ROOT/pending/OARITH2/1-1.json"
+cmd_monitor_tick OARITH2; cmd_monitor_tick OARITH2
+eq "hostile baseline in classify executes nothing" "1" "$([ -e "$CLAUDE_BUS_ROOT/PWNED_BASELINE" ]; echo $?)"
+probe_snapshot() { echo '{"alive":0,"net":0,"oom":0,"mtime":0,"known":false}'; }
+
+#############################################################################
 echo "----"; echo "pass=$pass fail=$fail"; [[ $fail -eq 0 ]]
