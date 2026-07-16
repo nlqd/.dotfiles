@@ -96,6 +96,8 @@ When multiple valid approaches exist, choose based on:
 - When in investigative/explorative/debugging session, use liberally the AGENTS available to you.
   For example, when debugging, ask 2 agents to argue for and against you.
 - Try to be minimal in markdown. Don't bold things out of control. Bold should at most be 1% of the total text only. Same thing with italics.
+- When you see a 'You have reached weekly limit', and you are still able to work,
+   that means that you have just been reset and you should check whatever Monitor or long running process that you had, and re-arm them.
 
 ## Git and GitHub works
 
