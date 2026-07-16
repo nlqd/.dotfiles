@@ -53,14 +53,18 @@ self_cgroup() {
   else awk -F: '$1=="0"{print $3}' /proc/self/cgroup 2>/dev/null; fi
 }
 
-write_meta() {  # <name> <cgroup> <pid> <transcript>
+write_meta() {  # <name> <cgroup> <pid> <transcript> <wake>
   local md; md="$(dirname "$(meta_file "$1")")"; mkdir -p "$md"
   local tmp; tmp="$(meta_file "$1").tmp.$$"
   # Atomic + self-reporting: the redirect creates tmp before jq runs, so an
   # &&-chain is required — otherwise a jq that dies mid-write still leaves a
   # movable 0-byte tmp and the mv would rename corrupt meta into place and "succeed".
-  jq -n --arg name "$1" --arg cgroup "$2" --arg pid "$3" --arg transcript "$4" \
-    '{name:$name, cgroup:$cgroup, pid:$pid, transcript:$transcript}' > "$tmp" \
+  # 0600 is hygiene against OTHER users, not a control against other agents: they all
+  # share this uid and the bus root is bound into every sandbox. That is precisely why
+  # `wake` is structured data the monitor validates and never a command it would run.
+  jq -n --arg name "$1" --arg cgroup "$2" --arg pid "$3" --arg transcript "$4" --argjson wake "${5:-null}" \
+    '{name:$name, cgroup:$cgroup, pid:$pid, transcript:$transcript, wake:$wake}' > "$tmp" \
+    && chmod 0600 "$tmp" \
     && mv -- "$tmp" "$(meta_file "$1")" || { rm -f -- "$tmp"; return 1; }
 }
 
@@ -145,18 +149,20 @@ cmd_init() {
 cmd_register() {
   local me="${1:?usage: claude-bus register <me> [--cgroup P] [--pid N] [--transcript P] [--supervisor NAME]}"; shift
   valid_name "$me"
-  local cgroup="" pid="" transcript="" supervisor="" role=""
-  local set_cgroup="" set_pid="" set_transcript=""
+  local cgroup="" pid="" transcript="" supervisor="" role="" wsock="" wpane="" wake=null
+  local set_cgroup="" set_pid="" set_transcript="" set_wake=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --cgroup|--pid|--transcript|--supervisor|--role)
+      --cgroup|--pid|--transcript|--supervisor|--role|--wake-socket|--wake-pane)
         [ $# -ge 2 ] || { printf 'register: %s needs a value\n' "$1" >&2; exit 2; }
         case "$1" in
-          --cgroup)     cgroup="$2";     set_cgroup=1 ;;
-          --pid)        pid="$2";        set_pid=1 ;;
-          --transcript) transcript="$2"; set_transcript=1 ;;
-          --supervisor) supervisor="$2" ;;
-          --role)       role="$2" ;;
+          --cgroup)      cgroup="$2";     set_cgroup=1 ;;
+          --pid)         pid="$2";        set_pid=1 ;;
+          --transcript)  transcript="$2"; set_transcript=1 ;;
+          --supervisor)  supervisor="$2" ;;
+          --role)        role="$2" ;;
+          --wake-socket) wsock="$2";      set_wake=1 ;;
+          --wake-pane)   wpane="$2";      set_wake=1 ;;
         esac
         shift 2 ;;
       *) printf 'register: unknown flag %s\n' "$1" >&2; exit 2 ;;
@@ -167,6 +173,15 @@ cmd_register() {
   [ -n "$cgroup" ]     || set_cgroup=""
   [ -n "$pid" ]        || set_pid=""
   [ -n "$transcript" ] || set_transcript=""
+  # A wake needs BOTH halves to mean anything; either alone inherits instead.
+  { [ -n "$wsock" ] && [ -n "$wpane" ]; } || set_wake=""
+  # Reject a malformed pane here so a typo fails fast at the call site. This is UX
+  # only: any same-uid agent can hand-write this file, so the exec-time check in the
+  # monitor tick is the actual control.
+  if [ -n "$set_wake" ]; then
+    [[ "$wpane" =~ ^%[0-9]+$ ]] || { printf 'register: --wake-pane must look like %%N\n' >&2; exit 5; }
+    wake="$(jq -n --arg s "$wsock" --arg p "$wpane" '{tmux_socket:$s, pane:$p}')"
+  fi
   # --role is validated whenever given (a typo fails fast even without --supervisor);
   # a --supervisor auto-watch is erroring-only by default (role=ephemeral: a worker
   # dying is its normal terminal state, so the death is silent), and --role supervisor
@@ -193,9 +208,10 @@ cmd_register() {
       [ -n "$set_cgroup" ]     || cgroup="$(jq -r '.cgroup // ""'     "$mf" 2>/dev/null)" || cgroup=""
       [ -n "$set_pid" ]        || pid="$(jq -r '.pid // ""'           "$mf" 2>/dev/null)" || pid=""
       [ -n "$set_transcript" ] || transcript="$(jq -r '.transcript // ""' "$mf" 2>/dev/null)" || transcript=""
+      [ -n "$set_wake" ]       || wake="$(jq -c '.wake // null'           "$mf" 2>/dev/null)" || wake=null
     fi
     [ -n "$cgroup" ] || cgroup="$(self_cgroup)"
-    write_meta "$me" "$cgroup" "$pid" "$transcript"
+    write_meta "$me" "$cgroup" "$pid" "$transcript" "$wake"
   ) 9>"$md/.lock" || wrc=$?
   if [ "$wrc" -ne 0 ]; then
     printf 'register: failed to write meta for %s\n' "$me" >&2
@@ -234,14 +250,18 @@ cmd_undelegate() {
   printf 'undelegated %s\n' "$inbox"
 }
 
-# write_watch_record <parent> <target> <dmax> <role> -- caller holds the parent's
-# watch-dir lock. Atomic (tmp+mv) so a torn write can't leave an empty record
-# (which would pin the monitor open). Shared by cmd_watch and register's
+# write_watch_record <parent> <target> <dmax> <role> [nudge] -- caller holds the
+# parent's watch-dir lock. Atomic (tmp+mv) so a torn write can't leave an empty
+# record (which would pin the monitor open). Shared by cmd_watch and register's
 # --supervisor auto-watch so the record schema stays in one place. <role> is
 # supervisor (death alarms) or ephemeral (death is a normal exit: silent + GC).
+# <nudge> true makes this a wakebot watch: a stale target is WOKEN via its own
+# registered wake command instead of alerted about. wl is the tick of the last
+# wake, which paces the re-nudge.
 write_watch_record() {
   local wf; wf="$(watch_file "$1" "$2")"
-  jq -n --arg t "$2" --argjson d "$3" --arg r "$4" '{target:$t,drain_max:$d,role:$r,last:"",ticks:0}' > "$wf.tmp.$$" \
+  jq -n --arg t "$2" --argjson d "$3" --arg r "$4" --argjson n "${5:-false}" \
+    '{target:$t,drain_max:$d,role:$r,nudge:$n,last:"",ticks:0,wl:0}' > "$wf.tmp.$$" \
     && mv -- "$wf.tmp.$$" "$wf" || { rm -f -- "$wf.tmp.$$"; return 1; }
 }
 
@@ -250,19 +270,32 @@ write_watch_record() {
 # no reply and no probe: a persistent sink (a secretary, an oncall) holds no
 # expectation about itself, so its freeze is otherwise invisible.
 cmd_watch() {
-  local me="${1:?usage: claude-bus watch <me> <target>}"
-  local target="${2:?usage: claude-bus watch <me> <target>}"
+  local me="${1:?usage: claude-bus watch <me> <target> [drain_max] [--nudge]}"
+  local target="${2:?usage: claude-bus watch <me> <target> [drain_max] [--nudge]}"
   valid_name "$me"; valid_name "$target"
-  local dmax="${3:-${CLAUDE_BUS_DRAIN_MAX:-2}}"
+  shift 2
+  local nudge=false dmax=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --nudge) nudge=true ;;
+      *) dmax="$1" ;;
+    esac
+    shift
+  done
+  dmax="${dmax:-${CLAUDE_BUS_DRAIN_MAX:-2}}"
   case "$dmax" in ''|*[!0-9]*) printf 'watch: drain_max must be a non-negative integer\n' >&2; exit 5;; esac
   local wd; wd="$(watch_dir "$me")"; mkdir -p "$wd"
   # Write atomically under the same lock unwatch and the tick take, so a torn or
   # racing write can't leave an empty record (which would pin the monitor open).
   local wf; wf="$(watch_file "$me" "$target")"
-  ( flock 9; write_watch_record "$me" "$target" "$dmax" supervisor ) 9>"$wd/.lock" \
+  ( flock 9; write_watch_record "$me" "$target" "$dmax" supervisor "$nudge" ) 9>"$wd/.lock" \
     || { rm -f -- "$wf.tmp.$$"; printf 'watch: failed to write %s\n' "$wf" >&2; exit 1; }
   printf 'watching %s for %s\n' "$target" "$me"
-  tip "background 'claude-bus monitor $me'; a 'stale' alert lands in $me's inbox if $target stops draining"
+  if [ "$nudge" = true ]; then
+    tip "background 'claude-bus monitor $me'; $target's own registered wake runs if it stops draining"
+  else
+    tip "background 'claude-bus monitor $me'; a 'stale' alert lands in $me's inbox if $target stops draining"
+  fi
 }
 
 cmd_unwatch() {
@@ -441,6 +474,26 @@ probe_snapshot() {  # <name> -> {alive,net,oom,mtime,known}
   jq -n --argjson alive "$alive" --argjson net "$(tree_net "$cg")" \
     --argjson oom "$(tree_oom "$cg")" --argjson mtime "$(trans_mtime "$tr")" \
     '{alive:$alive, net:$net, oom:$oom, mtime:$mtime, known:true}'
+}
+
+# pane_owned <socket> <pane> <target> -- exit 0 iff <pane> is CURRENTLY running <target>'s
+# own process, i.e. the pane's live pane_pid sits in <target>'s registered scope cgroup.
+# This is what actually binds a wake to its agent: the wake record is attacker-writable
+# (shared uid, bind-mounted bus root), so a hostile record could name a valid socket and a
+# well-formed %id pointing at ANY pane — an operator's shell, an editor, another agent.
+# Verified live: the launcher execs into the agent (dbox `exec bwrap`), so pane_pid is the
+# agent's own top process and shares its cgroup — the run-*.scope for a dbox agent, the
+# session scope for a plain one — which is exactly what the agent registered via init.
+# pane_pid is read LIVE from tmux (never stored) to shrink the pid-reuse window, and the
+# tmux call is timeout-bounded like the wake itself so a wedged server cannot stall the tick.
+pane_owned() {  # <socket> <pane> <target>
+  local mcg; mcg="$(jq -r '.cgroup // ""' "$(meta_file "$3")" 2>/dev/null)" || mcg=""
+  [ -n "$mcg" ] || return 1                       # no registered scope -> cannot verify -> refuse
+  local to="${CLAUDE_BUS_WAKE_TIMEOUT:-5}"; case "$to" in ''|*[!0-9]*) to=5 ;; esac; [ "$to" -ge 1 ] || to=5
+  local pp; pp="$(timeout "$to" tmux -S "$1" display-message -p -t "$2" '#{pane_pid}' 2>/dev/null)" || return 1
+  case "$pp" in ''|*[!0-9]*) return 1 ;; esac
+  local pcg; pcg="$(awk -F: '$1=="0"{print $3}' "/proc/$pp/cgroup" 2>/dev/null)" || return 1
+  [ -n "$pcg" ] && [ "$pcg" = "$mcg" ]
 }
 
 # classify <baseline-json> <current-json> -> working|retrying|idle|dead|oom|unknown.
@@ -632,13 +685,31 @@ cmd_monitor_tick() {
   # empty-able `last` stays the final @tsv field (a middle empty would collapse under
   # read's IFS-whitespace and shift the columns).
   local wf wrec target dmax last wticks da ea sa role oldest oid nlast nticks kav wknown walive mtr el errstatus isdead curstale abody wdo wgc gkav gknown galive
+  local nudge wl nwl wnudge wjs wsock wpane wmsg wevery wto wld
+  # Validate the cadence rather than trusting it: a non-numeric value made the
+  # arithmetic compare below error rc=2 INSIDE an `if`, where set -e cannot see it,
+  # so the first nudge fired and no re-nudge ever did. 0 storms one nudge per tick.
+  wevery="${CLAUDE_BUS_WAKE_EVERY:-3}"
+  case "$wevery" in ''|*[!0-9]*) wevery=3 ;; esac
+  [ "$wevery" -ge 1 ] || wevery=3
+  # Same treatment for the exec bound, and for the same reason: coreutils reads
+  # `timeout 0` as NO timeout (re-opening the tick stall), and a non-numeric makes
+  # timeout exit 125, killing every nudge with only a FAILED line nobody reads.
+  wto="${CLAUDE_BUS_WAKE_TIMEOUT:-5}"
+  case "$wto" in ''|*[!0-9]*) wto=5 ;; esac
+  [ "$wto" -ge 1 ] || wto=5
   for wf in "$wd"/*.json; do
     [ -e "$wf" ] || continue
-    # drain_max/ticks are coerced by TYPE (not `// N`, which lets a string through):
+    # nudge/wl sit before the empty-able `last`, so they must NEVER read back empty or
+    # the columns collapse under read's IFS and the record freezes forever. `//` alone
+    # is not enough — it catches null but not "", which jq passes through. Coerce by
+    # TYPE so anything unexpected fails closed (not a nudge, cadence reset) instead.
+    # drain_max/ticks/wl are coerced by TYPE (not `// N`, which lets a string through):
     # they feed bash arithmetic below, and these records are attacker-writable, so a
-    # value like `dmax[$(cmd)]` would EXECUTE cmd in this host monitor. Fail closed.
-    wrec="$(jq -r '[.target,(if (.drain_max|type)=="number" then .drain_max else 2 end),(if (.ticks|type)=="number" then .ticks else 0 end),(.da // "-"),(.ea // "-"),(.sa // "-"),(.role // "supervisor"),(.last // "")] | @tsv' "$wf" 2>/dev/null)" || continue
-    IFS=$'\t' read -r target dmax wticks da ea sa role last <<<"$wrec"
+    # value like `dmax[$(cmd)]` would EXECUTE cmd in this host monitor. Fail closed to
+    # the default. nudge likewise stays a strict boolean.
+    wrec="$(jq -r '[.target,(if (.drain_max|type)=="number" then .drain_max else 2 end),(if (.ticks|type)=="number" then .ticks else 0 end),(.da // "-"),(.ea // "-"),(.sa // "-"),(.role // "supervisor"),(if .nudge == true then "true" else "false" end),(if (.wl|type) == "number" then .wl else 0 end),(.last // "")] | @tsv' "$wf" 2>/dev/null)" || continue
+    IFS=$'\t' read -r target dmax wticks da ea sa role nudge wl last <<<"$wrec"
     [ "$da" = - ] && da=""; [ "$ea" = - ] && ea=""; [ "$sa" = - ] && sa=""
     name_ok "$target" || continue
     # roll the drain-staleness counter: same oldest persisting is the stall
@@ -670,7 +741,10 @@ cmd_monitor_tick() {
     # A dead ephemeral target is a normal exit: no alarm, and GC the record so a
     # churning worker fleet does not accumulate stale watches. A dead supervisor is
     # the alarm (its unexpected exit is the whole point).
-    wdo=""; abody=""; wgc=""
+    wdo=""; abody=""; wgc=""; wnudge=""
+    # the wake cadence only means anything while the target is stale; any other
+    # outcome (it drained, it died, it errored) re-arms the first fire.
+    nwl="$wl"; [ -n "$curstale" ] || nwl=0
     if [ -n "$isdead" ]; then
       if [ "$role" = ephemeral ]; then
         wgc=1
@@ -683,7 +757,53 @@ cmd_monitor_tick() {
     elif [ -n "$errstatus" ]; then
       [ "$ea" != "$errstatus" ] && { wdo=1; abody="erroring $target $errstatus"; }; ea="$errstatus"
     elif [ -n "$curstale" ]; then
-      [ "$sa" != "$curstale" ] && { wdo=1; abody="stale $target $oid"; }; sa="$curstale"
+      # A nudge watch WAKES the target instead of alerting about it: an alert only
+      # helps if some other session is awake to read it, which is exactly what is
+      # in doubt. We run the target's OWN registered wake (it wrote that command at
+      # startup knowing its pane; the operator never supplies it). Re-fire every
+      # wevery stale ticks — one nudge can land while it is mid-turn and be missed.
+      wsock=""; wpane=""
+      if [ "$nudge" = true ]; then
+        wjs="$(jq -r '[(.wake.tmux_socket // ""),(.wake.pane // "")] | @tsv' "$(meta_file "$target")" 2>/dev/null)" || wjs=""
+        IFS=$'\t' read -r wsock wpane <<<"$wjs"
+        # THE control. Every agent shares this uid and the bus root is bound into every
+        # sandbox, so this meta is attacker-writable by any confined agent; register's
+        # checks prove nothing about who wrote the file. Re-validate here, and treat a
+        # record that fails as "no wake" rather than trusting a word of it.
+        [[ "$wpane" =~ ^%[0-9]+$ ]] || wpane=""
+        { [ -n "$wsock" ] && [ -S "$wsock" ] && [ -O "$wsock" ]; } || wsock=""
+        # ...and the pane must currently BE the target's own pane, or a well-formed record
+        # could still aim the nudge at an arbitrary pane. Checked last: it costs a live
+        # tmux round-trip, so only run it once the cheap syntactic checks have passed.
+        if [ -n "$wsock" ] && [ -n "$wpane" ]; then
+          pane_owned "$wsock" "$wpane" "$target" || { wsock=""; wpane=""; }
+        fi
+      fi
+      if [ -n "$wsock" ] && [ -n "$wpane" ]; then
+        if [ "$wl" -eq 0 ] || [ $((nticks - wl)) -ge "$wevery" ]; then wnudge=1; nwl="$nticks"; fi
+      else
+        # No wake registered (a non-tmux agent, or an unregistered target): fall back
+        # to the alert rather than going silent on a stuck inbox.
+        [ "$sa" != "$curstale" ] && { wdo=1; abody="stale $target $oid"; }; sa="$curstale"
+      fi
+    fi
+    # Outside the lock: tmux is an external command, and holding the watch-dir lock
+    # across it would stall every other tick. A wake racing an unwatch is harmless —
+    # worst case one extra nudge. Logged either way: waking someone is an audited act.
+    if [ -n "$wnudge" ]; then
+      wld="$(log_dir "$orch")"; mkdir -p "$wld"
+      # The argv is built HERE, from validated fields, and exec'd with no shell — so
+      # nothing out of the meta is ever parsed as a command. The text is the monitor's
+      # own and is never stored, so a hostile record cannot smuggle keystrokes either;
+      # the worst it can buy is this fixed line typed into a pane it named. Bounded, or
+      # a wedged tmux would silently starve every other watch this monitor holds.
+      wmsg="bus wake: undrained mail — run: claude-bus drain $target"
+      if timeout "$wto" tmux -S "$wsock" send-keys -t "$wpane" -l "$wmsg" >/dev/null 2>&1 \
+        && timeout "$wto" tmux -S "$wsock" send-keys -t "$wpane" Enter >/dev/null 2>&1; then
+        printf '%s nudge %s -> %s pane %s\n' "$(gen_id)" "$orch" "$target" "$wpane" >> "$wld/wake.log"
+      else
+        printf '%s nudge-FAILED %s -> %s pane %s\n' "$(gen_id)" "$orch" "$target" "$wpane" >> "$wld/wake.log"
+      fi
     fi
     (
       flock 9
@@ -701,8 +821,8 @@ cmd_monitor_tick() {
         exit 0
       fi
       [ -n "$wdo" ] && publish "$orch" monitor alert "$(gen_id)" "" "$abody"
-      if jq --arg da "${da:--}" --arg ea "${ea:--}" --arg sa "${sa:--}" --arg l "$nlast" --argjson t "$nticks" \
-        '.da=$da | .ea=$ea | .sa=$sa | .last=$l | .ticks=$t' "$wf" > "$wf.w.$$" 2>/dev/null; then
+      if jq --arg da "${da:--}" --arg ea "${ea:--}" --arg sa "${sa:--}" --arg l "$nlast" --argjson t "$nticks" --argjson wl "$nwl" \
+        '.da=$da | .ea=$ea | .sa=$sa | .last=$l | .ticks=$t | .wl=$wl' "$wf" > "$wf.w.$$" 2>/dev/null; then
         mv -- "$wf.w.$$" "$wf"; else rm -f -- "$wf.w.$$"; fi
     ) 9>"$wd/.lock" || true
   done

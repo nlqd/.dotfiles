@@ -18,7 +18,7 @@ set -u
 payload="$(cat 2>/dev/null || true)"
 name="${CLAUDE_BUS_NAME:-}"
 [ -n "$name" ] || exit 0
-cb="$HOME/.claude/skills/claude-bus/claude-bus"
+cb="${CLAUDE_BUS_BIN:-$HOME/.claude/skills/claude-bus/claude-bus}"
 [ -x "$cb" ] || exit 0
 tp="$(printf '%s' "$payload" | jq -r '.transcript_path // empty' 2>/dev/null || true)"
 # init: self-detect + refresh the current scope (correct for coat and dbox).
@@ -30,5 +30,14 @@ if [ -n "${CLAUDE_BUS_SUPERVISOR:-}" ]; then
     --supervisor "$CLAUDE_BUS_SUPERVISOR" --role "${CLAUDE_BUS_ROLE:-ephemeral}" >/dev/null 2>&1 || true
 else
   "$cb" register "$name" --transcript "$tp" >/dev/null 2>&1 || true
+fi
+# Self-register where to WAKE us: the host wakebot nudges this pane when our inbox
+# sits undrained, independent of our own `wait` (which throttles / may not be armed).
+# Only in tmux, where we know our exact pane %id (unambiguous across sessions/windows)
+# and socket. We record only these two FACTS, never a command — the monitor builds and
+# execs the argv itself, so a hand-written meta can never become code it runs.
+# $TMUX is "socketpath,pid,session"; take the socket.
+if [ -n "${TMUX_PANE:-}" ] && [ -n "${TMUX:-}" ]; then
+  "$cb" register "$name" --wake-socket "${TMUX%%,*}" --wake-pane "$TMUX_PANE" >/dev/null 2>&1 || true
 fi
 exit 0
