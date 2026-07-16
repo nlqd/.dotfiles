@@ -839,6 +839,268 @@ eq "hook creates the supervisor watch" "0" "$([ -f "$CLAUDE_BUS_ROOT/watch/HOOKP
 eq "hook watch role is ephemeral"      "ephemeral" "$(jq -r .role "$CLAUDE_BUS_ROOT/watch/HOOKP/HOOKW.json")"
 
 #############################################################################
+# S2-26: register --wake stores the agent's self-registered wake command in meta
+# (0600, user-owned), and merges like the other fields (a later update never blanks it).
+#############################################################################
+# The wake is STRUCTURED (socket + pane), never a command string: the monitor builds
+# the argv itself, so nothing in this file — which any same-uid agent can write — is
+# ever parsed as a command.
+BUS register WK1 --cgroup /x --wake-socket /tmp/s --wake-pane %3 >/dev/null
+eq "register stores the wake socket" "/tmp/s" "$(jq -r .wake.tmux_socket "$CLAUDE_BUS_ROOT/meta/WK1.json")"
+eq "register stores the wake pane"   "%3"     "$(jq -r .wake.pane "$CLAUDE_BUS_ROOT/meta/WK1.json")"
+# 0600 is hygiene against OTHER users. It is NOT a control against peer agents: they
+# share this uid and the dir is theirs to write. Do not read this as one.
+eq "meta is 0600 (hygiene, not a peer control)" "600" "$(stat -c %a "$CLAUDE_BUS_ROOT/meta/WK1.json")"
+# a transcript-only update keeps the wake (merge)
+BUS register WK1 --transcript /t.jsonl >/dev/null
+eq "wake survives a later update"    "%3"     "$(jq -r .wake.pane "$CLAUDE_BUS_ROOT/meta/WK1.json")"
+# a malformed pane is rejected at register time (fail fast; the real control is at exec)
+BUS register WKBAD --wake-socket /tmp/s --wake-pane 'x; rm -rf /' >/dev/null 2>&1
+rc "register rejects a malformed pane" 5 $?
+# the session-register hook self-registers a tmux wake action when in a pane
+# (CLAUDE_BUS_BIN points the hook at the under-test claude-bus, not the installed one)
+echo '{"transcript_path":"/tmp/h.jsonl"}' \
+  | CLAUDE_BUS_ROOT="$CLAUDE_BUS_ROOT" CLAUDE_BUS_BIN="$SCRIPT" CLAUDE_BUS_NAME=HOOKT TMUX="/tmp/tmux-1000/default,123,0" TMUX_PANE="%7" bash "$HK"
+eq "hook registers its own pane"   "%7" "$(jq -r .wake.pane "$CLAUDE_BUS_ROOT/meta/HOOKT.json")"
+eq "hook registers its own socket" "/tmp/tmux-1000/default" "$(jq -r .wake.tmux_socket "$CLAUDE_BUS_ROOT/meta/HOOKT.json")"
+# no tmux env -> no wake action registered (unset TMUX/TMUX_PANE: the test runner
+# itself is in tmux, so the hook would otherwise inherit the runner's pane)
+echo '{"transcript_path":"/tmp/h2.jsonl"}' | CLAUDE_BUS_ROOT="$CLAUDE_BUS_ROOT" CLAUDE_BUS_BIN="$SCRIPT" CLAUDE_BUS_NAME=HOOKNT TMUX= TMUX_PANE= bash "$HK"
+eq "hook without tmux registers no wake" "null" "$(jq -r '.wake // "null"' "$CLAUDE_BUS_ROOT/meta/HOOKNT.json")"
+
+#############################################################################
+# S2-27: the wakebot — `watch --nudge` runs the TARGET's own registered wake
+# command when its inbox goes stale, INSTEAD of publishing a stale alert that
+# only another (possibly asleep) session would read. Cadence: first fire at the
+# stale threshold, then every CLAUDE_BUS_WAKE_EVERY stale ticks until it drains.
+#############################################################################
+probe_snapshot() { echo '{"alive":0,"net":0,"oom":0,"mtime":0,"known":false}'; }
+export CLAUDE_BUS_DRAIN_MAX=2 CLAUDE_BUS_WAKE_EVERY=3
+# A fake tmux on PATH records the argv the monitor builds (the tick execs tmux
+# directly, so a shell function would not survive `timeout`). Each nudge is two
+# send-keys calls (the literal text, then Enter — count the Enters); a display-message
+# query returns $FAKE_PANE_PID so the pane-ownership check has a pid to resolve.
+export WOKE="$CLAUDE_BUS_ROOT/woke.log"; : > "$WOKE"
+export FAKE_PANE_PID="$$"                 # the test runner's own pid (real, resolvable)
+FAKEBIN="$CLAUDE_BUS_ROOT/bin"; mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/tmux" <<'FAKE'
+#!/usr/bin/env bash
+[ -n "${FAKE_TMUX_HANG:-}" ] && sleep 30
+for a in "$@"; do [ "$a" = "display-message" ] && { printf '%s\n' "${FAKE_PANE_PID}"; exit 0; }; done
+printf '%s\n' "$*" >> "$WOKE"
+[ -n "${FAKE_TMUX_FAIL_SEND:-}" ] && exit 1   # ownership query still answers; the send fails
+exit 0
+FAKE
+chmod +x "$FAKEBIN/tmux"
+export PATH="$FAKEBIN:$PATH"
+nwake() { grep -c 'Enter' "$WOKE" 2>/dev/null || true; }
+# a real socket file, so the exec-time -S check has something valid to accept
+SOCK="$CLAUDE_BUS_ROOT/tmux.sock"
+python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$SOCK"
+# The pane-ownership check requires the named pane's live pane_pid to sit in the
+# target's registered cgroup. The fake tmux reports FAKE_PANE_PID (the runner), so a
+# nudge target must register the runner's OWN cgroup to be considered its pane's owner.
+MYCG="$(awk -F: '$1=="0"{print $3}' /proc/$$/cgroup)"
+nudgereg() { BUS register "$1" --cgroup "$MYCG" --wake-socket "$SOCK" --wake-pane "$2" >/dev/null; }
+
+BUS init WBOT >/dev/null
+nudgereg NAP %7
+BUS watch WBOT NAP --nudge >/dev/null
+eq "watch --nudge records nudge" "true"  "$(jq -r .nudge "$CLAUDE_BUS_ROOT/watch/WBOT/NAP.json")"
+BUS watch WBOT PLAIN >/dev/null
+eq "plain watch is not a nudge"  "false" "$(jq -r .nudge "$CLAUDE_BUS_ROOT/watch/WBOT/PLAIN.json")"
+BUS unwatch WBOT PLAIN >/dev/null
+
+BUS send NAP SENDER "wake up" >/dev/null
+cmd_monitor_tick WBOT                             # tick1: mail just landed, under threshold
+eq "nudge tick1: no wake yet" "0" "$(nwake)"
+cmd_monitor_tick WBOT                             # tick2: stale -> the wake fires
+eq "nudge tick2: wake fires"  "1" "$(nwake)"
+eq "nudge replaces the stale alert" "0" "$(nmsg "$CLAUDE_BUS_ROOT/inbox/WBOT")"
+# the SUCCESS line specifically: grepping the target name alone passes identically on
+# `nudge-FAILED`, so it would certify a wakebot that never actually woke anyone
+has "wake exec is logged for audit" "$(cat "$CLAUDE_BUS_ROOT/log/WBOT/wake.log" 2>/dev/null)" "nudge WBOT -> NAP"
+# the argv is the monitor's own: its socket, its pane, and text the MONITOR composed
+has "wake targets the registered pane"   "$(cat "$WOKE")" "send-keys -t %7"
+has "wake uses the registered socket"    "$(cat "$WOKE")" "-S $SOCK"
+has "wake types the drain instruction"   "$(cat "$WOKE")" "drain NAP"
+cmd_monitor_tick WBOT; cmd_monitor_tick WBOT      # cadence: silent while it stays stuck
+eq "nudge respects the cadence" "1" "$(nwake)"
+cmd_monitor_tick WBOT                             # WAKE_EVERY ticks on -> nudge again
+eq "nudge re-fires after WAKE_EVERY" "2" "$(nwake)"
+BUS drain NAP >/dev/null 2>&1                     # it woke up and drained -> stop nudging
+cmd_monitor_tick WBOT; cmd_monitor_tick WBOT; cmd_monitor_tick WBOT
+eq "drained target stops the wake" "2" "$(nwake)"
+
+# A typo'd or hostile CLAUDE_BUS_WAKE_EVERY must not silently break the cadence:
+# non-numeric falls back to the default (it used to fire once, then never re-fire,
+# because the arithmetic compare errored inside an `if` where set -e cannot see it),
+# and 0 must not storm one nudge per tick.
+: > "$WOKE"
+BUS init WEV >/dev/null
+nudgereg NAP2 %8
+BUS watch WEV NAP2 --nudge >/dev/null
+BUS send NAP2 s "hi" >/dev/null
+CLAUDE_BUS_WAKE_EVERY=abc cmd_monitor_tick WEV     # tick1: under threshold
+CLAUDE_BUS_WAKE_EVERY=abc cmd_monitor_tick WEV     # tick2: stale -> first fire
+eq "junk WAKE_EVERY still fires once" "1" "$(nwake)"
+CLAUDE_BUS_WAKE_EVERY=abc cmd_monitor_tick WEV
+CLAUDE_BUS_WAKE_EVERY=abc cmd_monitor_tick WEV
+CLAUDE_BUS_WAKE_EVERY=abc cmd_monitor_tick WEV     # 3 ticks on (the default cadence)
+eq "junk WAKE_EVERY re-fires on the default" "2" "$(nwake)"
+: > "$WOKE"
+BUS init WEV0 >/dev/null
+nudgereg NAP3 %9
+BUS watch WEV0 NAP3 --nudge >/dev/null
+BUS send NAP3 s "hi" >/dev/null
+CLAUDE_BUS_WAKE_EVERY=0 cmd_monitor_tick WEV0
+CLAUDE_BUS_WAKE_EVERY=0 cmd_monitor_tick WEV0      # first fire
+CLAUDE_BUS_WAKE_EVERY=0 cmd_monitor_tick WEV0      # must not storm
+eq "WAKE_EVERY=0 does not nudge every tick" "1" "$(nwake)"
+
+# a wedged tmux must not stall the whole monitor loop (every other watch would stop
+# being checked). A server that will not even answer the ownership query cannot be
+# verified, so the nudge is bounded, refused, and degraded to a stale alert.
+: > "$WOKE"
+BUS init WHANG >/dev/null
+nudgereg NAPH %10
+BUS watch WHANG NAPH --nudge >/dev/null
+BUS send NAPH s "hi" >/dev/null
+cmd_monitor_tick WHANG
+SECONDS=0; FAKE_TMUX_HANG=1 CLAUDE_BUS_WAKE_TIMEOUT=1 cmd_monitor_tick WHANG
+eq "a wedged tmux is bounded"                 "0" "$([ "$SECONDS" -lt 15 ]; echo $?)"
+eq "a wedged tmux sends nothing"              "0" "$(nwake)"
+has "a wedged tmux degrades to a stale alert" "$(jq -r .body "$(ls "$CLAUDE_BUS_ROOT"/inbox/WHANG/*.msg 2>/dev/null | head -1)")" "stale NAPH"
+
+# ownership verifies (the server answers display-message), but the send-keys itself
+# fails: that IS a nudge attempt, so it counts as no wake and is logged nudge-FAILED.
+: > "$WOKE"
+BUS init WSF >/dev/null
+nudgereg NAPSF %31
+BUS watch WSF NAPSF --nudge >/dev/null
+BUS send NAPSF s "hi" >/dev/null
+cmd_monitor_tick WSF
+FAKE_TMUX_FAIL_SEND=1 cmd_monitor_tick WSF
+eq "a failed send is not counted as woken" "0" "$(nwake)"
+has "a failed send is logged nudge-FAILED"  "$(cat "$CLAUDE_BUS_ROOT/log/WSF/wake.log" 2>/dev/null)" "nudge-FAILED"
+
+# The exec timeout is validated like the cadence: coreutils reads `timeout 0` as
+# UNBOUNDED, which would silently re-open the tick-stalling hang, and a non-numeric
+# makes timeout exit 125 so every nudge dies with only a FAILED line nobody reads.
+: > "$WOKE"
+BUS init WTO >/dev/null
+nudgereg NAPT %12
+BUS watch WTO NAPT --nudge >/dev/null
+BUS send NAPT s "hi" >/dev/null
+cmd_monitor_tick WTO
+SECONDS=0; FAKE_TMUX_HANG=1 CLAUDE_BUS_WAKE_TIMEOUT=0 cmd_monitor_tick WTO
+eq "WAKE_TIMEOUT=0 is still bounded" "0" "$([ "$SECONDS" -lt 20 ]; echo $?)"
+: > "$WOKE"
+BUS init WTO2 >/dev/null
+nudgereg NAPT2 %13
+BUS watch WTO2 NAPT2 --nudge >/dev/null
+BUS send NAPT2 s "hi" >/dev/null
+CLAUDE_BUS_WAKE_TIMEOUT=abc cmd_monitor_tick WTO2
+CLAUDE_BUS_WAKE_TIMEOUT=abc cmd_monitor_tick WTO2
+eq "junk WAKE_TIMEOUT still wakes" "1" "$(nwake)"
+
+# dead outranks the nudge: waking a corpse is pointless and the watcher must still
+# hear that it died (the axes are priority-ordered, and the nudge sits under them).
+: > "$WOKE"
+BUS init WDN >/dev/null
+nudgereg NAPD %14
+BUS watch WDN NAPD --nudge >/dev/null
+BUS send NAPD s "hi" >/dev/null
+probe_snapshot() { echo '{"alive":0,"net":0,"oom":0,"mtime":0,"known":true}'; }
+cmd_monitor_tick WDN; cmd_monitor_tick WDN
+eq "a dead target is not nudged"   "0" "$(nwake)"
+has "a dead target still alerts"   "$(jq -r .body "$(ls "$CLAUDE_BUS_ROOT"/inbox/WDN/*.msg 2>/dev/null | head -1)")" "dead NAPD"
+probe_snapshot() { echo '{"alive":0,"net":0,"oom":0,"mtime":0,"known":false}'; }
+
+# nudge/wl sit BEFORE the empty-able `last` in the @tsv row, so a junk value in either
+# would collapse the columns under read's IFS and freeze the record forever (ticks stop
+# advancing: never stale, never alerts, silently). They must fail closed instead.
+BUS init WTSV >/dev/null
+mkdir -p "$CLAUDE_BUS_ROOT/watch/WTSV"
+jq -n '{target:"TSINK",drain_max:2,role:"supervisor",nudge:"",wl:"",last:"",ticks:0}' \
+  > "$CLAUDE_BUS_ROOT/watch/WTSV/TSINK.json"
+BUS send TSINK s "stuck" >/dev/null
+cmd_monitor_tick WTSV; cmd_monitor_tick WTSV
+eq "a corrupt record still advances its ticks" "2" "$(jq -r .ticks "$CLAUDE_BUS_ROOT/watch/WTSV/TSINK.json")"
+has "a corrupt nudge field falls back to a stale alert" \
+  "$(jq -r .body "$(ls "$CLAUDE_BUS_ROOT"/inbox/WTSV/*.msg 2>/dev/null | head -1)")" "stale TSINK"
+
+# THE SECURITY CONTROL. The bus root is bound read-write into every sandbox and all
+# agents share one uid, so ANY agent can hand-write another's meta — register-time
+# validation is UX, not a control. The monitor must therefore re-validate at exec and
+# refuse to act on a hostile record, rather than exec a shell.
+: > "$WOKE"
+BUS init WSEC >/dev/null
+BUS register EVIL --cgroup /x >/dev/null
+BUS watch WSEC EVIL --nudge >/dev/null
+BUS send EVIL s "hi" >/dev/null
+jq '.wake={tmux_socket:"'"$SOCK"'",pane:"$(touch '"$CLAUDE_BUS_ROOT"'/pwned); rm -rf /"}' \
+  "$CLAUDE_BUS_ROOT/meta/EVIL.json" > "$CLAUDE_BUS_ROOT/meta/EVIL.tmp" && mv "$CLAUDE_BUS_ROOT/meta/EVIL.tmp" "$CLAUDE_BUS_ROOT/meta/EVIL.json"
+cmd_monitor_tick WSEC; cmd_monitor_tick WSEC
+eq "a hand-written hostile pane executes nothing" "1" "$([ -e "$CLAUDE_BUS_ROOT/pwned" ]; echo $?)"
+eq "a hostile pane is not sent to tmux at all"    "0" "$(nwake)"
+has "a hostile pane degrades to a stale alert"    \
+  "$(jq -r .body "$(ls "$CLAUDE_BUS_ROOT"/inbox/WSEC/*.msg 2>/dev/null | head -1)")" "stale EVIL"
+# a socket that is not actually a socket (a planted regular file) is refused too
+: > "$WOKE"
+BUS init WSEC2 >/dev/null
+BUS register EVIL2 --cgroup /x --wake-pane %11 --wake-socket "$CLAUDE_BUS_ROOT/notasock" >/dev/null
+: > "$CLAUDE_BUS_ROOT/notasock"
+BUS watch WSEC2 EVIL2 --nudge >/dev/null
+BUS send EVIL2 s "hi" >/dev/null
+cmd_monitor_tick WSEC2; cmd_monitor_tick WSEC2
+eq "a non-socket wake path is refused" "0" "$(nwake)"
+
+# PANE-OWNERSHIP: even a well-formed pane %id and a valid socket are refused unless the
+# pane's LIVE pane_pid sits in the target's registered cgroup. This is what stops a
+# hostile record aiming an otherwise-valid nudge at another pane (an operator's shell or
+# editor, or a different agent). The record is attacker-writable, so the check is at exec
+# against a LIVE-read pid, not the stored record.
+: > "$WOKE"
+BUS init WSEC3 >/dev/null
+# valid socket + valid pane, but the target's cgroup does NOT contain FAKE_PANE_PID's cg
+BUS register EVIL3 --cgroup /not/the/runners/scope --wake-socket "$SOCK" --wake-pane %20 >/dev/null
+BUS watch WSEC3 EVIL3 --nudge >/dev/null
+BUS send EVIL3 s "hi" >/dev/null
+cmd_monitor_tick WSEC3; cmd_monitor_tick WSEC3
+eq "a pane not owned by the target is not nudged" "0" "$(nwake)"
+has "an unowned pane degrades to a stale alert" \
+  "$(jq -r .body "$(ls "$CLAUDE_BUS_ROOT"/inbox/WSEC3/*.msg 2>/dev/null | head -1)")" "stale EVIL3"
+# and the positive: when the pane_pid genuinely resolves into the target's cgroup, it fires
+: > "$WOKE"
+BUS init WSEC4 >/dev/null
+nudgereg OWN %21
+BUS watch WSEC4 OWN --nudge >/dev/null
+BUS send OWN s "hi" >/dev/null
+cmd_monitor_tick WSEC4; cmd_monitor_tick WSEC4
+eq "a pane owned by the target IS nudged" "1" "$(nwake)"
+
+# Upgrade path: watch records persist on disk, so a monitor running this version will
+# read records written by the PREVIOUS one, which have no nudge/wl fields. They must
+# keep behaving exactly as before (plain stale alert), not break or start nudging.
+BUS init WOLD >/dev/null
+mkdir -p "$CLAUDE_BUS_ROOT/watch/WOLD"
+jq -n '{target:"OSINK",drain_max:2,role:"supervisor",last:"",ticks:0}' > "$CLAUDE_BUS_ROOT/watch/WOLD/OSINK.json"
+BUS send OSINK s "stuck" >/dev/null
+cmd_monitor_tick WOLD; cmd_monitor_tick WOLD
+has "a pre-upgrade watch record still alerts stale" \
+  "$(jq -r .body "$(ls "$CLAUDE_BUS_ROOT"/inbox/WOLD/*.msg | head -1)")" "stale OSINK"
+
+# a nudge watch on a target that registered NO wake (a non-tmux agent) must not go
+# silent: it falls back to the ordinary stale alert so the signal is not lost.
+BUS init WBOT2 >/dev/null
+BUS watch WBOT2 DEAF --nudge >/dev/null
+BUS send DEAF SENDER "hi" >/dev/null
+cmd_monitor_tick WBOT2; cmd_monitor_tick WBOT2
+has "unwakeable target falls back to a stale alert" \
+  "$(jq -r .body "$(ls "$CLAUDE_BUS_ROOT"/inbox/WBOT2/*.msg | head -1)")" "stale DEAF"
+
+#############################################################################
 # S2-28: arithmetic-injection defense. The monitor reads numeric fields out of
 # watch/pending records and feeds them to bash arithmetic; bash re-evaluates a
 # variable's VALUE as an expression, so a field like `dmax[$(cmd)]` runs cmd in the
@@ -864,8 +1126,8 @@ jq -n --arg l "$(ls "$CLAUDE_BUS_ROOT"/inbox/ASINK/*.msg | head -1 | xargs -n1 b
   > "$CLAUDE_BUS_ROOT/watch/WARITH/ASINK.json"
 cmd_monitor_tick WARITH; cmd_monitor_tick WARITH
 eq "hostile watch .drain_max executes nothing" "1" "$([ -e "$CLAUDE_BUS_ROOT/PWNED_DMAX" ]; echo $?)"
-# a hostile PENDING record: .ticks feeds `ticks=$((ticks+1))` unconditionally (before
-# any baseline gate), so it is the reachable arithmetic site in the other loop
+# a hostile PENDING record: .ticks feeds `ticks=$((ticks+1))` unconditionally (line 563,
+# before any baseline gate), so it is the reachable arithmetic site in the other loop
 BUS init OARITH >/dev/null
 mkdir -p "$CLAUDE_BUS_ROOT/pending/OARITH"
 jq -n '{state:"sent",peer:"P",id:"1-1",flat:0,ticks:"flat_max[$(touch '"$CLAUDE_BUS_ROOT"'/PWNED_PENDING)]",baseline:null,alerted:""}' \

@@ -265,6 +265,66 @@ knows all of this at spawn and writes a static `meta/<name>.json` once. No hook 
 no cooperation from the running session, since the in-process signals are the ones
 that go dark when a session stalls.
 
+### 7. The wakebot: pushing a stale agent, and why it stores no command
+
+A watched agent can be alive, healthy, and still not read its mail: its own `wait` is
+throttled by the harness or was never re-armed. The `stale` alert does not help, because
+it lands in ANOTHER inbox and assumes someone is awake to read it — exactly what is in
+doubt. So `watch <me> <target> --nudge` inverts it: when the target goes stale the
+monitor pushes the target directly, by typing a drain instruction into its terminal.
+
+The trust question is the whole design. The monitor runs on the HOST (it must: metas
+hold host-absolute cgroup paths), while the agents it wakes are sandboxed. Every agent
+runs as the SAME uid and `$BUS_ROOT` is bound read-write into every sandbox, so **any
+agent can hand-write any other agent's `meta/<name>.json`**. File modes do not help:
+0600 controls other users, and there are none — the peers are all this user.
+
+That makes one rule non-negotiable: **the monitor must never execute anything it reads
+off the bus.** An earlier revision stored a `wake` command string and ran it with
+`sh -c`. That was a sandbox escape — a confined agent writes one JSON file and gets
+arbitrary code execution on the host, as the host user. It never shipped.
+
+So `meta.wake` stores only two FACTS, never an instruction:
+
+    "wake": {"tmux_socket": "/tmp/tmux-1002/default", "pane": "%7"}
+
+and the monitor builds the argv itself, execs `tmux` directly with no shell, and
+composes the typed message itself rather than storing it. It re-validates both fields
+AT EXEC (`pane` against `^%[0-9]+$`, `tmux_socket` must be a socket this user owns),
+because register-time validation proves nothing about who wrote the file.
+
+One gap remains after that: the fields can be well-formed yet still name a pane that is
+not the agent's — an operator's shell or editor, or another agent's pane. So the monitor
+adds a pane-ownership check: it reads the named pane's live `pane_pid` from tmux and
+requires that pid to sit in the target's own registered scope cgroup. This binds the
+nudge to the agent rather than to a pane number. It works because the launcher execs
+into the agent (`exec bwrap`), so the pane's process IS the agent and shares its cgroup —
+the `run-*.scope` for a dbox agent, the login session scope for a plain one, which is
+exactly what the agent registered at init. `pane_pid` is read live (never stored) to
+shrink the pid-reuse window, and the query is timeout-bounded like the wake itself.
+Anything unverifiable — no registered cgroup, a wedged tmux, a pid in the wrong cgroup —
+degrades to the ordinary stale alert rather than typing into an unverified pane.
+
+Worst case from a fully hostile meta is therefore bounded twice over: it can only name a
+pane that is currently running the target agent, and even then the monitor types one
+fixed, non-command line into it. No metacharacters, no arbitrary argv, no code, no
+aiming at someone else's terminal.
+
+Every exec is logged to `log/<orch>/wake.log`, since waking someone is an action taken
+on their behalf and should be auditable. Both logged fields are validated values, so a
+hostile record cannot forge a log line either.
+
+An agent self-registers these facts from its SessionStart hook, where `$TMUX_PANE` and
+`$TMUX` are known: the pane `%id` is unambiguous, unlike `session:window`, which aliases
+across linked windows. A non-tmux agent registers nothing and falls back to the ordinary
+`stale` alert to a live watcher — the honest answer, rather than inventing a general
+"run this" escape hatch, since that generality *is* the hole.
+
+Cadence: first nudge at the stale threshold, then every `CLAUDE_BUS_WAKE_EVERY` stale
+ticks (one nudge can land mid-turn and be missed), stopping as soon as it drains. The
+exec is bounded by `CLAUDE_BUS_WAKE_TIMEOUT` and runs outside the watch lock, so a
+wedged tmux server cannot stall the tick and silently starve every other watch.
+
 ## Data format
 
 Everything structured is JSON: the message envelope (`{from, to, ts, id, ref,
