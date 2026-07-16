@@ -178,7 +178,7 @@ resolve_story() {
 #:[formats list_formats] GET /projects/{project_id}/export/formats
 #:[export export_format] GET /projects/{project_id}/export/{format}
 #:[json import_json] POST /projects/{project_id}/import/json
-#:[json import_json] body: file_base64 file_name include_pull_requests owner repo source* token
+#:[json import_json] body: dry_run file_base64 file_name include_milestones include_pull_requests include_releases owner repo source* token
 #:[iterations list] GET /projects/{project_id}/iterations
 #:[iterations create] POST /projects/{project_id}/iterations
 #:[iterations create] body: end* start*

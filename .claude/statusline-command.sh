@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Claude Code status line. Order: model+effort ctx rate dir branch version
-# Sections are color-coded and joined by two spaces. ctx renders as a 5-cell
-# bar; the 7-day rate shows what's left (time + budget) with a yellow tint
+# Sections are joined by two spaces. ctx renders as a flat 5-cell bar (no
+# color; +/-/· glyphs alone carry fill vs track); the 7-day rate is prefixed
+# with the account label (dng/rem/ops, from its reset weekday) and bolded
 # when budget lags time by more than 10 points. 5h hidden unless >95%. PR is
 # omitted (Claude Code renders it natively); commented block kept to restore.
 
@@ -45,32 +46,36 @@ if [ -n "$dir" ]; then
   [ -n "${g[0]}" ] && [ "${g[0]}" != "${g[1]}" ] && [ -n "$branch" ] && in_worktree=1
 fi
 
-# Minimal colors: default fg for most text, green for the ctx bar, orange for
-# the 7d block when on the work account. Bold marks active warnings (5h
-# shown, 7d over-pace) — color is identity, bold is urgency, independent axes.
-c_ctx=$'\033[32m'                 # green - ctx bar fill
-c_track=$'\033[38;5;240m'         # dim grey - ctx bar empty track
-c_acct_orange=$'\033[38;5;208m'   # orange - "rememberizer" account
+# Fully flat: no color anywhere, including the ctx bar's fill vs track (the
+# +/-/· glyphs alone carry that distinction). Bold is reserved for the 7-day
+# quota burning faster than time is passing, and for 5h once it's shown.
 bold=$'\033[1m'
 reset=$'\033[0m'
 
-# Prefer ~/.claude.json: it's the file a live claude process (sandboxed or
-# not) actually keeps current. The nested ~/.claude/.claude.json only updates
-# when a dbox profile overlay writes it at sandbox launch, then goes stale the
-# moment that sandbox exits, so it can't be trusted as the general source.
-acct_file="$HOME/.claude.json"
-[ -f "$acct_file" ] || acct_file="$HOME/.claude/.claude.json"
-acct_email=$(jq -r '.oauthAccount.emailAddress // ""' "$acct_file" 2>/dev/null)
-case "${acct_email%%@*}" in
-  rememberizer) c_acct=$c_acct_orange ;;
-  *)            c_acct="" ;;
-esac
+# Account is identified by which weekday the 7-day window resets on, not by
+# reading an account file: dng/jen reset Sunday, op Tuesday, rem Thursday.
+# This comes straight from the live API response for whichever account is
+# actually active this session, so unlike ~/.claude.json it can't go stale
+# across dbox profiles. An unmapped weekday falls back to "wN" (%w is
+# locale-independent, unlike %a/%A) instead of going silently blank, so a
+# 4th account or a wrong assumption shows up as a visible day number.
+acct_label=""
+if [ -n "$seven_d_reset" ] && [ "$seven_d_reset" -gt 0 ] 2>/dev/null; then
+  wday=$(date -d "@$seven_d_reset" +%w)
+  case "$wday" in
+    0) acct_label=dng ;;
+    2) acct_label=ops ;;
+    4) acct_label=rem ;;
+    *) acct_label="w$wday" ;;
+  esac
+fi
 
-# bar PCT CELLS FILL TRACK — git-diff style gauge at half-cell resolution.
-# + is a full cell, - the half-filled boundary (a makeshift partial so low
-# values still register), · the empty track. FILL colors the +/-, TRACK the ·.
+# bar PCT CELLS — git-diff style gauge at half-cell resolution. + is a full
+# cell, - the half-filled boundary (a makeshift partial so low values still
+# register), · the empty track. Flat text, no color: the glyphs alone carry
+# the fill/track distinction.
 bar() {
-  local pct=$1 cells=$2 fill=$3 track=$4
+  local pct=$1 cells=$2
   local max=$((cells * 2))
   local e=$(( (pct * max + 50) / 100 ))
   [ $e -lt 0 ] && e=0
@@ -80,10 +85,10 @@ bar() {
   for ((i = 0; i < cells; i++)); do
     if   [ $i -lt $full ]; then out="${out}+"
     elif [ $i -eq $full ] && [ $half -gt 0 ]; then out="${out}-"
-    else out="${out}${reset}${track}·${fill}"
+    else out="${out}·"
     fi
   done
-  printf '%s%s%s' "$fill" "$out" "$reset"
+  printf '%s' "$out"
 }
 
 # fmt_dur SECONDS — largest sensible unit, rounded up: 5d / 5h / 45m. Days
@@ -125,12 +130,11 @@ push() { prios+=("$1"); parts+=("$2"); }
 [ -n "$model" ] && push 30 "${model:0:1}${effort}"
 
 # ctx as a 5-cell bar; precise % isn't shown since position is the signal.
-[ -n "$used" ] && push 10 "$(bar "$used" 5 "$c_ctx" "$c_track")"
+[ -n "$used" ] && push 10 "$(bar "$used" 5)"
 
 # Rate limits group. Both windows read "{time_to_reset}:{budget_left}%", with
-# time_to_reset in whatever unit is closest (d/h/m), so a near reset tells you
-# how soon in real terms. Color is account (orange on rememberizer, default on
-# personal); bold is pace, independent of color:
+# time_to_reset in whatever unit is closest (d/h/m); the 7-day window is
+# prefixed with the account label. Bold marks pace warnings:
 #   5h: only when >95% used — bold, since its presence is already a warning.
 #   7d: always; bold when budget-left lags time-left (as % of the window) by
 #       over 10 points (over-pace, slow down).
@@ -142,7 +146,7 @@ if [ -n "$five_h" ] && [ "$five_h" -gt 95 ] 2>/dev/null; then
     fh_left=$(( five_h_reset - now_ts ))
     [ $fh_left -gt 0 ] && fh="${fh} $(fmt_dur $fh_left)"
   fi
-  rl_pieces+=("${c_acct}${bold}${fh}${reset}")
+  rl_pieces+=("${bold}${fh}${reset}")
 fi
 if [ -n "$seven_d" ] && [ -n "$seven_d_reset" ] && [ "$seven_d_reset" -gt 0 ]; then
   sec_left=$(( seven_d_reset - now_ts ))
@@ -155,7 +159,9 @@ if [ -n "$seven_d" ] && [ -n "$seven_d_reset" ] && [ "$seven_d_reset" -gt 0 ]; t
     else
       pace_bold=""
     fi
-    rl_pieces+=("${c_acct}${pace_bold}$(fmt_dur "$sec_left"):${pct_left}%${reset}")
+    label="$(fmt_dur "$sec_left"):${pct_left}%"
+    [ -n "$acct_label" ] && label="${acct_label}:${label}"
+    rl_pieces+=("${pace_bold}${label}${reset}")
   fi
 fi
 [ ${#rl_pieces[@]} -gt 0 ] && push 40 "$(join " " "${rl_pieces[@]}")"
