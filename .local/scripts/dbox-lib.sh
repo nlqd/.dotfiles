@@ -200,6 +200,27 @@ dbox_claude() {
         --ro-bind "$creds_src" "$HOME/.claude/.credentials.json" \
         --file "$jfd" "$HOME/.claude.json" \
         --file "$jfd2" "$HOME/.claude/.claude.json"
+
+    # Pin the account across idle. Billing follows the bearer token server-side, so
+    # for a long-lived setup-token (expiresAt 0, no refresh) we export it as
+    # CLAUDE_CODE_OAUTH_TOKEN. That holds the account even when claude re-hydrates
+    # oauthAccount to the default on idle -- and unlike CLAUDE_CONFIG_DIR it keeps
+    # the single shared ~/.claude/projects. bwrap inherits the launcher env (no
+    # --clearenv), so export keeps the token out of argv (no ps / proc-cmdline leak,
+    # unlike --setenv). A refreshable token can't be pinned statically, so there we
+    # UNSET the var: the box falls back to the bound creds file, and a stray value
+    # from the launcher env can never leak in and mis-bill. No jq -> treat as unknown.
+    local ctok="" cexp="" cref=""
+    if command -v jq >/dev/null 2>&1; then
+        ctok=$(jq -r '.claudeAiOauth.accessToken  // empty' "$creds_src" 2>/dev/null)
+        cexp=$(jq -r '.claudeAiOauth.expiresAt    // 0'     "$creds_src" 2>/dev/null)
+        cref=$(jq -r '.claudeAiOauth.refreshToken // ""'    "$creds_src" 2>/dev/null)
+    fi
+    if [ -n "$ctok" ] && [ "$cexp" = 0 ] && [ -z "$cref" ]; then
+        export CLAUDE_CODE_OAUTH_TOKEN="$ctok"
+    else
+        unset CLAUDE_CODE_OAUTH_TOKEN
+    fi
 }
 
 # Host git identity for pushing as the user: gitconfig, a gh credential helper,

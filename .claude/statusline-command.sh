@@ -53,7 +53,7 @@ bold=$'\033[1m'
 reset=$'\033[0m'
 
 # Account is identified by which weekday the 7-day window resets on, not by
-# reading an account file: dng/jen reset Sunday, op Tuesday, rem Thursday.
+# reading an account file: dng/jen reset Sunday, op Monday, rem Thursday.
 # This comes straight from the live API response for whichever account is
 # actually active this session, so unlike ~/.claude.json it can't go stale
 # across dbox profiles. An unmapped weekday falls back to "wN" (%w is
@@ -64,7 +64,7 @@ if [ -n "$seven_d_reset" ] && [ "$seven_d_reset" -gt 0 ] 2>/dev/null; then
   wday=$(date -d "@$seven_d_reset" +%w)
   case "$wday" in
     0) acct_label=dng ;;
-    2) acct_label=ops ;;
+    1) acct_label=ops ;;
     4) acct_label=rem ;;
     *) acct_label="w$wday" ;;
   esac

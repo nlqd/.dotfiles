@@ -289,3 +289,78 @@ def find_split_pairs(presentation, tol=3):
                 if abs(x1 - x2) < tol and abs(y1 - y2) < tol and abs(w1 - w2) < tol and abs(h1 - h2) < tol:
                     hits.append((slide["objectId"], id1, id2, round(x1), round(y1), round(w1), round(h1)))
     return hits
+
+
+# --- editing EXISTING content in place (content-surgical, preserves the element's transform) ---
+
+def settext(id_, text, size, col, font="Arial", bold=False, align="START"):
+    """Replace ALL text in an existing text box IN PLACE and re-style it, keeping the box's
+    position/size. Use this to change copy on a live deck instead of deleteObject + recreate,
+    which resets the transform and wipes any spacing a collaborator hand-tuned. `align`
+    defaults to START on purpose: a fresh box's paragraph alignment is inherited and, depending
+    on the master, often renders CENTER (see SKILL.md Gotchas); pass align=None to leave it
+    untouched. WARNING: the deleteText here fails on an EMPTY box ("startIndex 0 must be less
+    than endIndex 0"); for a maybe-empty target use insert_text() or fetch its length first."""
+    reqs = [
+        {"deleteText": {"objectId": id_, "textRange": {"type": "ALL"}}},
+        {"insertText": {"objectId": id_, "text": text}},
+        {"updateTextStyle": {"objectId": id_, "style": {
+            "fontSize": {"magnitude": size, "unit": "PT"}, "foregroundColor": color(col),
+            "bold": bold, "fontFamily": font}, "fields": "fontSize,foregroundColor,bold,fontFamily"}},
+    ]
+    if align is not None:
+        reqs.append({"updateParagraphStyle": {"objectId": id_, "style": {"alignment": align}, "fields": "alignment"}})
+    return reqs
+
+
+def insert_text(id_, text):
+    """insertText ONLY, for a box or notes placeholder that is currently EMPTY (deleteText
+    errors on an empty range). Follow with updateTextStyle if the run needs styling."""
+    return [{"insertText": {"objectId": id_, "text": text}}]
+
+
+def hyperlink(id_, url, text_range=None):
+    """Make an existing run clickable (updateTextStyle link). Renders underlined; works in the
+    editable/Drive deck, not in a flattened screenshare. Defaults to the whole element; pass a
+    textRange dict to link a sub-span. Good for turning a citation footnote into a source link."""
+    return [{"updateTextStyle": {"objectId": id_, "style": {"link": {"url": url}},
+             "textRange": text_range or {"type": "ALL"}, "fields": "link"}}]
+
+
+# --- page backgrounds ---
+
+def picture_bg(page, url):
+    """Set a slide/master background to a stretched picture (embedded once at set time, like
+    image()). Each slide can override the master's background, so to change a whole deck's
+    texture you often must set this on EVERY slide, not just the master."""
+    return [{"updatePageProperties": {"objectId": page, "pageProperties": {
+        "pageBackgroundFill": {"stretchedPictureFill": {"contentUrl": url}}},
+        "fields": "pageBackgroundFill"}}]
+
+
+def solid_bg(page, hexstr):
+    return [{"updatePageProperties": {"objectId": page, "pageProperties": {
+        "pageBackgroundFill": {"solidFill": {"color": solid(hexstr)}}}, "fields": "pageBackgroundFill"}}]
+
+
+# --- batch plumbing ---
+
+def guarded(requests, revision_id):
+    """Wrap a request list into a batchUpdate body with optimistic-concurrency control. If the
+    deck changed since revision_id the whole batch is rejected 400 (see SKILL.md 'Collaborating
+    on a Shared Deck'); re-fetch and retry rather than blind-resubmit."""
+    return {"requests": requests, "writeControl": {"requiredRevisionId": revision_id}}
+
+
+def assert_no_emdash(requests):
+    """Fail fast if any insertText/replaceAllText copy carries an em/en dash (a reliable
+    AI-writing tell). Call right before submitting a batch that writes human-facing text."""
+    hits = []
+    for r in requests:
+        t = r.get("insertText", {}).get("text", "")
+        rt = r.get("replaceAllText", {}).get("replaceText", "")
+        for s in (t, rt):
+            if "—" in s or "–" in s:
+                hits.append(s[:60])
+    assert not hits, f"em/en dash in batch text: {hits}"
+    return requests

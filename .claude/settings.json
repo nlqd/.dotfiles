@@ -100,7 +100,6 @@
   "autoScrollEnabled": true,
   "teammateMode": "tmux",
   "agentPushNotifEnabled": true,
-  "skipAutoPermissionPrompt": true,
   "voiceEnabled": false,
   "autoUpdates": true,
   "feedbackSurveyState": {
