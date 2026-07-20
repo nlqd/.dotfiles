@@ -621,4 +621,4 @@ This skill is based on [Wikipedia:Signs of AI writing](https://en.wikipedia.org/
 
 Key insight from Wikipedia: "LLMs use statistical algorithms to guess what should come next. The result tends toward the most statistically likely result that applies to the widest variety of cases."
 
-Strongly recommend reading: [AI Writing Tropes to Avoid](./tropes.md) and [my curated set](./mytropes.md).
+Strongly recommend reading: @./tropes.md and @./mytropes.md
