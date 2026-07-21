@@ -74,7 +74,7 @@
   {
     "repo": "tomasz-tomczyk/crit",
     "asset": "crit-linux-amd64",
-    "version": "v0.18.0",
+    "version": "v0.18.1",
     "links": {
       "crit-linux-amd64": "/home/dungngo/.local/bin/crit"
     }
