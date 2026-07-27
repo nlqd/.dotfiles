@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Switch the Samsung S27B80P's active video input via DDC/CI. Codes are
+# vendor-specific (Samsung ignores the MCCS standard table for VCP 0x60),
+# confirmed empirically against what was actually plugged in - see
+# `ddcutil vcpinfo 60 --verbose` for the (wrong, for this monitor) standard
+# table.
+set -euo pipefail
+
+case "${1:-}" in
+  dp)     code=0x09 ;;
+  hdmi)   code=0x05 ;;
+  # usbc) code=0x0d ;;  # unconfirmed guess, seen to flash during the hunt; verify before enabling
+  *)
+    echo "usage: mon-input {dp|hdmi}" >&2
+    exit 1
+    ;;
+esac
+
+ddcutil --display 1 setvcp 60 "$code"
