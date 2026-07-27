@@ -5,6 +5,7 @@ font pango:JetBrainsMono NF 9
 
 exec --no-startup-id dex --autostart --environment i3
 exec --no-startup-id ~/.fehbg
+exec --no-startup-id xrandr --dpi 163
 exec --no-startup-id ibus-daemon --daemonize --replace
 exec --no-startup-id picom -b
 exec --no-startup-id systemctl --user start clipmenud.service
