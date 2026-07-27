@@ -24,23 +24,37 @@ STRIP_JS="(() => { Array.from(document.querySelectorAll('main > *')).forEach(el 
 TMP="$(mktemp --suffix=.png)"
 trap 'rodney stop >/dev/null 2>&1 || true; rm -f "$TMP"' EXIT
 
-rodney start >/dev/null
-rodney open "$URL" >/dev/null
-rodney waitload >/dev/null
-rodney waitidle >/dev/null
+capture() {
+  rodney start >/dev/null
+  rodney open "$URL" >/dev/null
+  rodney waitload >/dev/null
+  rodney waitidle >/dev/null
 
-# The 4K capture size only starts loading its own map/label tiles once we
-# actually request it (a throwaway capture triggers that). Those tile
-# fetches are slow to finish, well past what waitidle alone reports done -
-# give them a real 15s before the shot that counts, or the far corners of
-# the frame come out as a plain, low-detail placeholder.
-rodney screenshot -w "$WIDTH" -h "$HEIGHT" "$TMP" >/dev/null
-sleep 15
-rodney waitidle >/dev/null
-sleep 3
+  # The 4K capture size only starts loading its own map/label tiles once we
+  # actually request it (a throwaway capture triggers that). Those tile
+  # fetches are slow to finish, well past what waitidle alone reports done -
+  # give them a real 15s before the shot that counts, or the far corners of
+  # the frame come out as a plain, low-detail placeholder.
+  rodney screenshot -w "$WIDTH" -h "$HEIGHT" "$TMP" >/dev/null
+  sleep 15
+  rodney waitidle >/dev/null
+  sleep 3
 
-rodney js "$STRIP_JS" >/dev/null
-rodney screenshot -w "$WIDTH" -h "$HEIGHT" "$OUT" >/dev/null
+  rodney js "$STRIP_JS" >/dev/null
+  rodney screenshot -w "$WIDTH" -h "$HEIGHT" "$OUT" >/dev/null
+}
+
+# Chrome occasionally dies or drops the devtools connection mid-run (crash,
+# transient resource pressure); tear it down fully and retry once with a
+# fresh browser rather than letting one hiccup fail the whole cron tick.
+attempt=1
+max_attempts=2
+until capture; do
+  rodney stop >/dev/null 2>&1 || true
+  (( attempt >= max_attempts )) && { echo "capture failed after $max_attempts attempts" >&2; exit 1; }
+  echo "capture attempt $attempt failed, retrying with a fresh browser" >&2
+  attempt=$((attempt + 1))
+done
 
 feh --no-fehbg --bg-fill "$OUT"
 
