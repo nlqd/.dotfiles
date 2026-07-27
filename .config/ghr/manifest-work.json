@@ -42,7 +42,7 @@
   {
     "repo": "hetznercloud/cli",
     "asset": "hcloud-linux-amd64.tar.gz",
-    "version": "v1.66.0",
+    "version": "v1.67.0",
     "links": {
       "hcloud": "/home/dungngo/.local/bin/hcloud"
     }
@@ -53,6 +53,14 @@
     "version": "v0.12.4",
     "links": {
       "nvim-linux-x86_64/bin/nvim": "/usr/local/bin/nvim"
+    }
+  },
+  {
+    "repo": "neurosnap/zmx",
+    "asset": "zmx-0.7.0-linux-aarch64.tar.gz",
+    "version": "v0.7.0",
+    "links": {
+      "zmx": "/home/dungngo/.local/bin/zmx"
     }
   },
   {
