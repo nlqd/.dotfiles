@@ -2,7 +2,7 @@
 
 # https://github.com/jake-stewart/inline
 # require: fzf jq nvim gum inline
-# require(custom): aidd parker diffix jwt
+# require(custom): jwt
 
 set -o pipefail
 shopt -s nullglob
@@ -12,7 +12,6 @@ CACHE_FILE="/tmp/sdai-cache.txt"
 CACHE_TIMEOUT=300 # 5 minutes
 
 COOKIE_FILE="$HOME/.sdai/cookies"
-COUNT_FILE="$HOME/.sdai/count.txt"
 HEADER_REFERER="Referer: https://eastagile.skydeck.ai/"
 
 BG='\e[1;32m'
@@ -20,13 +19,15 @@ CLR='\e[0m'
 
 declare -A MODELS
 
+MODELS["cld-5-fable"]=9484
+MODELS["cld-48-opus"]=9466
+MODELS["cld-5-sonnet"]=9535
 MODELS["cld-45-haiku"]=7640
-MODELS["cld-46-sonnet"]=8564
-MODELS["cld-47-opus"]=9010
-MODELS["gem-31-flash"]=8681
 MODELS["gem-31-pro"]=8545
-MODELS["gpt-55"]=9181
-MODELS["grok-4"]=6986
+MODELS["gem-36-flash"]=9784
+MODELS["gpt-56-terra"]=9699
+MODELS["gpt-56-luna"]=9631
+MODELS["gpt-oss"]=7357
 
 # global context
 STREAMING="false"
@@ -35,7 +36,6 @@ ASSI_MESSAGE_ID=""
 MODEL_NAME=""
 MODEL_ID=""
 MESSAGE=""
-EXECUTING_AGENT=false
 
 QUERY_FILE() {
   echo "/tmp/sdai-query-${CONVERSATION_ID:-new}.md"
@@ -78,12 +78,6 @@ invalidate_cache() {
   [[ -f "$CACHE_FILE" ]] && rm $CACHE_FILE
 }
 
-increment_message_count() {
-  local current
-  current=$(cat "$COUNT_FILE")
-  echo $((current + 1)) >"$COUNT_FILE"
-}
-
 get_access_token() {
   grep "_access" "$COOKIE_FILE" | cut -f7
 }
@@ -121,7 +115,7 @@ post_user_message() {
   echo "$MESSAGE" > $(OUTPUT_FILE)
   call_form "$BASE_URL/conversations/chat_v2/" -F "message=<$(OUTPUT_FILE)" \
     -F "model_id=$MODEL_ID" -F "conversation_id=$CONVERSATION_ID" -F "regenerate_message_id=-1" \
-    -F 'user_model_parameters={"prompt_caching":true,"thinking":{"type":"disabled","budget_tokens":16000},"max_tokens":64000,"temperature":0.17}' \
+    -F 'user_model_parameters={"prompt_caching":true,"thinking":{"type":"enabled","budget_tokens":16000},"max_tokens":64000,"temperature":0.17}' \
     -F 'behavior_settings={"markdown_view":true,"latex_view":false,"explicit_url_detection":false,"function_call_aggressiveness":0,"commentary_enabled":false}' \
     -F 'local_mcp_server_id=4331da01-91fb-414e-9a94-8671425989d0'
 }
@@ -135,8 +129,6 @@ parse_response_stream() {
 }
 
 get_response_stream() {
-  increment_message_count
-
   STREAMING="true"
   call "$BASE_URL/conversations/streaming/" --data '{"message_id": '"$ASSI_MESSAGE_ID"' }' --no-buffer |
     parse_response_stream |
@@ -175,37 +167,6 @@ pick_conversation_ids() {
   get_conversations | jq -c '.results[] | { id, name, size }' | fzf -m | jq '.id'
 }
 
-count_dollars_spent() {
-  local last_monday
-  last_monday=$( ([[ $(uname) = 'Linux' ]] && date -d last-sun +%s) || date -v -sun -u +%s)
-
-  (
-    call "$BASE_URL/conversations/?sort_by=created" | jq -c '.results[] | { id, created }' &
-    call "$BASE_URL/conversations/?sort_by=created&page=2" | jq -c '.results[] | { id, created }' &
-    wait
-  ) |
-    while IFS= read -r conv; do
-      local created
-      created=$(echo "$conv" | jq -r '.created' | sed 's/\.[0-9]*Z$//') # trim off milliseconds
-      local id
-      id=$(echo "$conv" | jq -r '.id')
-
-      local created
-      created=$(
-        ([[ $(uname) = 'Linux' ]] &&
-          date --date="$created" +%s) || date -u -j -f %Y-%m-%dT%H:%M:%S +%s "$created"
-      )
-      [[ $created -gt "$last_monday" ]] && echo "$id"
-    done |
-    (
-      while IFS= read -r id; do
-        call "$BASE_URL/conversations/$id/cost" | jq -r '.conversation_total_usage_cost' &
-      done
-      wait
-    ) |
-    LC_NUMERIC=C awk '{sum += $1} END {print sum}'
-}
-
 get_conversation_history() {
   local res
   res=$(call "$BASE_URL/conversations/$CONVERSATION_ID")
@@ -221,59 +182,115 @@ get_conversation_history() {
   jq -r "[.data.messages[].content] | join(\"\\n$(dash)\\n\")" <<<"$res"
 }
 
+get_pods() {
+  call "$BASE_URL/pods/instances/"
+}
+
+pick_pod_id() {
+  local selected
+  selected=$(
+    ([[ -z $1 ]] &&
+      (get_pods | jq -c '.results[] | { id, name, status }' | fzf --prompt="Select a pod: ")) ||
+      (get_pods | jq -c '.results[] | { id, name, status }' | fzf --filter "$1" | head -n 1)
+  )
+  [[ -z "$selected" ]] && return
+  jq -r '.id' <<<"$selected"
+}
+
 ###
 # MAIN OPS
 ###
 
-execute_agent_command() {
-  local aicommand="$1"
+pod_shell() {
+  local pod_id term_json term_id attach_json token ws_url cookie
 
-  echo ">>>>>>>>> Executing $aicommand"
+  pod_id=$(pick_pod_id "$1")
+  [[ -z "$pod_id" ]] && abort "No pod selected"
 
-  EXECUTING_AGENT=true
-  trap cancel_agent_execution SIGINT
+  term_json=$(call -X POST -d '{}' "$BASE_URL/pods/instances/$pod_id/terminals/")
+  term_id=$(jq -r '.session.id // empty' <<<"$term_json")
+  [[ -z "$term_id" ]] && abort "Failed to create terminal: $term_json"
 
-  sleep 3
-  # if the trap is set then this should trigger
-  [[ "$EXECUTING_AGENT" = "false" ]] && return 1
+  attach_json=$(call -X POST -d '{"role":"driver"}' "$BASE_URL/pods/instances/$pod_id/terminals/$term_id/attach/")
+  token=$(jq -r '.token // empty' <<<"$attach_json")
+  ws_url=$(jq -r '.ws_url // empty' <<<"$attach_json")
+  [[ -z "$token" ]] && abort "Failed to attach: $attach_json"
 
-  trap - SIGINT
-  EXECUTING_AGENT=false
+  cookie=$(get_access_token)
+  [[ -z "$cookie" ]] && abort "No access token — refresh cookies"
 
-  if [[ "$aicommand" = "parker" ]]; then
-    parker $CONVERSATION_ID >&"$(OUTPUT_FILE)"
-  else
-    eval "$aicommand" >&"$(OUTPUT_FILE)"
-  fi
-  MESSAGE="Exit code $?: $(cat "$(OUTPUT_FILE)")"
+  echo -e "${BG}Connected — Ctrl-] to detach${CLR}"
+  SDAI_WS_URL="$ws_url" SDAI_TOKEN="$token" SDAI_COOKIE="$cookie" \
+    node -e '
+const { SDAI_WS_URL: wsPath, SDAI_TOKEN: token, SDAI_COOKIE: cookie } = process.env;
+function frame(opcode, payload) {
+  const len = payload.length;
+  const head = Buffer.from(len < 126 ? [0x80 | opcode, 0x80 | len, 0, 0, 0, 0] : [0x80 | opcode, 0xfe, len >> 8, len & 0xff, 0, 0, 0, 0]));
+  return Buffer.concat([head, payload]);
 }
+function parseFrame(buf) {
+  if (buf.length < 2) return null;
+  let len = buf[1] & 0x7f, off = 2;
+  if (len === 126) { if (buf.length < 4) return null; len = buf.readUInt16BE(2); off = 4; }
+  else if (len === 127) { if (buf.length < 10) return null; len = Number(buf.readBigUInt64BE(2)); off = 10; }
+  if (buf.length < off + len) return null;
+  return { opcode: buf[0] & 0x0f, payload: buf.subarray(off, off + len), rest: buf.subarray(off + len) };
+}
+function splitOnDetach(chunk) {
+  const i = chunk.indexOf(0x1d);
+  return i === -1 ? { before: chunk, detach: false } : { before: chunk.subarray(0, i), detach: true };
+}
+const req = require("https").get({
+  hostname: "admin.skydeck.ai", path: `${wsPath}?token=${encodeURIComponent(token)}`,
+  headers: { Connection: "Upgrade", Upgrade: "websocket", "Sec-WebSocket-Version": "13", "Sec-WebSocket-Key": "AAAAAAAAAAAAAAAAAAAAAA==", Origin: "https://eastagile.skydeck.ai", Cookie: `eastagile_access=${cookie}` },
+}, (r) => { console.error(`sdai pod: HTTP ${r.statusCode}`); process.exit(1); });
+req.on("error", (e) => { console.error(`sdai pod: ${e.message}`); process.exit(1); });
 
-cancel_agent_execution() {
-  echo -e "\n${BG}Agent execution cancelled${CLR}"
-  EXECUTING_AGENT=false
-  dash
+req.on("upgrade", (_res, socket, head) => {
+  let buf = head && head.length ? Buffer.from(head) : Buffer.alloc(0), resized = false;
+  const send = (obj) => socket.write(frame(0x1, Buffer.from(JSON.stringify(obj))));
+  const resize = () => process.stdout.isTTY && send({ type: "resize", cols: process.stdout.columns, rows: process.stdout.rows });
+
+  function pump() {
+    let f;
+    while ((f = parseFrame(buf))) {
+      buf = f.rest;
+      if (f.opcode === 0x8) { socket.end(); process.exit(0); }
+      if (f.opcode !== 0x1) continue;
+      const msg = JSON.parse(f.payload.toString());
+      if (msg.type !== "output") continue;
+      process.stdout.write(msg.data);
+      if (!resized) { resized = true; resize(); }
+    }
+  }
+
+  socket.on("data", (chunk) => { buf = Buffer.concat([buf, chunk]); pump(); });
+  socket.on("close", () => process.exit(0));
+  socket.on("error", (e) => { console.error(`\r\n[connection error: ${e.message}]`); process.exit(1); });
+
+  if (process.stdin.isTTY) process.stdin.setRawMode(true);
+  process.stdout.on("resize", resize);
+  process.stdin.on("data", (chunk) => {
+    const { before, detach } = splitOnDetach(chunk);
+    if (before.length) send({ type: "input", data: before.toString() });
+    if (!detach) return;
+    process.stderr.write("\r\n[detached]\r\n");
+    socket.end(frame(0x8, Buffer.alloc(0)));
+    process.exit(0);
+  });
+
+  pump();
+});
+'
 }
 
 start_chat_session() {
   echo -e "${BG}${MODEL_NAME}${CLR}"
 
   while true; do
-    local queryfile
-    queryfile=$(QUERY_FILE)
-
     dash
 
-    [[ ! -f $(RESPONSE_FILE) ]] && touch $(RESPONSE_FILE)
-    local aicommand
-    aicommand=$(
-      tail -n 4 $(RESPONSE_FILE) | sed -n '/^```agentexecute$/,/^```$/p' | sed '/^```/d'
-    )
-    if [[ -n $CONVERSATION_ID && -n "$aicommand" ]]; then
-      execute_agent_command "$aicommand" ||
-        MESSAGE=$(gum write --char-limit=0 --width=0 --no-show-help --prompt="") || return
-    else
-      MESSAGE=$(gum write --char-limit=0 --width=0 --no-show-help --prompt="") || return
-    fi
+    MESSAGE=$(gum write --char-limit=0 --width=0 --no-show-help --prompt="") || return
 
     if [[ -z "$MESSAGE" ]]; then
       # inline nvim $(QUERY_FILE)
@@ -286,20 +303,6 @@ start_chat_session() {
     # shell execute
     if [[ "$MESSAGE" =~ ^/! ]]; then
       eval "${MESSAGE#/! }"
-      continue
-    fi
-
-    # use aidd prompt
-    if [[ "$MESSAGE" =~ ^/u ]]; then
-      aidd ${MESSAGE#* } >$(QUERY_FILE)
-      # inline nvim "$(QUERY_FILE)"
-      nvim "$(QUERY_FILE)"
-      MESSAGE=$(cat "$(QUERY_FILE)")
-    fi
-
-    # parker
-    if [[ "$MESSAGE" =~ ^/p ]]; then
-      parker $CONVERSATION_ID
       continue
     fi
 
@@ -374,7 +377,7 @@ send_and_recv_cancellable() {
 
 main() {
   [[ "$#" -lt 1 ]] &&
-    abort "Usage: sdai [chat | pick-chat | resume | delete | query-models | count-conv | count-dollars]"
+    abort "Usage: sdai [chat | pick-chat | resume | delete | query-models | pod]"
 
   pick_model "$([ -t 0 ] && echo "opus" || echo "haiku")"
 
@@ -401,38 +404,11 @@ main() {
     call "$BASE_URL/models/" |
       jq -r '.[] | [ .id, .name, .context_window ] | @tsv' | column -t -s $'\t' | sort -u -k2
     ;;
-  count-conv)
-    cat "$COUNT_FILE"
-    ;;
-  count-dollars)
-    count_dollars_spent
-    ;;
-  checkhealth)
-    echo TODO
-    ;;
-  context)
-    wscat -c "wss://admin.skydeck.ai/ws/connect/" \
-      -H "Origin: https://eastagile.skydeck.ai" \
-      -H "Cookie: eastagile_access=$(get_access_token)" \
-      -w -1
-
-    ### conversation-agnostic
-    # {
-    #   "type": "invoke_local_mcp_server",
-    #   "message": "Invoking local MCP server with tool Skydeckai-Code__get_system_info and args {}",
-    #   "data": {
-    #     "tool_call_id": 8291,
-    #     "tool": "Skydeckai-Code__get_system_info",
-    #     "args": {},
-    #     "server_name": "Skydeckai Code"
-    #   }
-    # }
-
-    # call -X PATCH "$BASE_URL/mcp/local_mcp_tool_call/8283" --data '{"result": {"result":"cool"}}'
+  pod)
+    pod_shell "$2"
     ;;
   *)
-    MESSAGE=$(aidd "$@") || abort "No such aidd template: $1"
-    send_and_recv_cancellable
+    abort "Unknown command: $1"
     ;;
   esac
 }
