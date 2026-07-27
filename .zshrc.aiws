@@ -166,7 +166,7 @@ zle -N __tmux_fzf_autocomplete_widget__
 bindkey '^n' __tmux_fzf_autocomplete_widget__
 
 # Automatically create a new session
-tmux has-session -t main 2> /dev/null || tmux new-session -d -s main
+# tmux has-session -t main 2> /dev/null || tmux new-session -d -s main
 
 eval "$(zoxide init zsh)"
 [[ -z "$STARSHIP_SHELL" ]] && eval "$(starship init zsh)"
