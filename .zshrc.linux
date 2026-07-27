@@ -151,7 +151,7 @@ source /usr/share/doc/fzf/examples/key-bindings.zsh
 source /usr/share/doc/fzf/examples/completion.zsh
 
 # Automatically create a new session
-tmux has-session -t main 2> /dev/null || tmux new-session -d -s main
+# tmux has-session -t main 2> /dev/null || tmux new-session -d -s main
 
 eval "$(zoxide init zsh)" 
 eval "$(starship init zsh)"
