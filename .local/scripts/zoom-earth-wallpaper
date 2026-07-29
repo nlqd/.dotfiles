@@ -7,17 +7,35 @@
 # then points feh at the result.
 set -euo pipefail
 
-URL='https://zoom.earth/maps/precipitation/#view=13.863,115.927,6z/model=icon'
+URL='https://zoom.earth/maps/precipitation/#view=21,116,5z/model=icon'
 OUT="$HOME/Downloads/wallpapers/zoom-earth-precipitation.png"
 FEHBG="$HOME/.fehbg"
 WIDTH=3840
 HEIGHT=2160
 LOCK="${XDG_RUNTIME_DIR:-/tmp}/zoom-earth-wallpaper.lock"
 
+# Dedicated profile, isolated from rodney's shared ~/.rodney used by other
+# projects - this script owns it outright and can freely reset it below.
+export RODNEY_HOME="$HOME/.rodney-wallpaper"
+PROFILE_DIR="$RODNEY_HOME/chrome-data"
+PROFILE_MAX_MB=200
+
 # Guard against a cron tick firing while the previous run is still going
 # (e.g. a slow network); skip rather than stack a second Chrome on top.
 exec 9>"$LOCK"
 flock -n 9 || { echo "already running, skipping" >&2; exit 0; }
+
+# Weeks of accumulated cache/IndexedDB/service-worker state in this profile
+# has been observed to reliably crash Chrome mid-capture (confirmed: wiping
+# a 614MB profile immediately fixed repeated EOF crashes). Reset it before
+# it gets that far, since this script has no need for cross-run state.
+if [[ -d "$PROFILE_DIR" ]]; then
+  size_mb=$(du -sm "$PROFILE_DIR" 2>/dev/null | cut -f1)
+  if [[ -n "$size_mb" && "$size_mb" -gt "$PROFILE_MAX_MB" ]]; then
+    rm -rf "$PROFILE_DIR"
+    echo "profile grew to ${size_mb}MB, reset" >&2
+  fi
+fi
 
 STRIP_JS="(() => { Array.from(document.querySelectorAll('main > *')).forEach(el => { if (el.tagName !== 'SECTION') el.style.setProperty('display','none','important'); }); return true; })()"
 
@@ -40,7 +58,13 @@ capture() {
   rodney waitidle >/dev/null
   sleep 3
 
+  # Hiding ~35 sibling elements changes the map section's computed layout,
+  # which triggers the map library's own resize/redraw handling. Capturing
+  # immediately after can catch that mid-reflow (a blank frame) or crash
+  # Chrome outright - give it a moment to settle first.
   rodney js "$STRIP_JS" >/dev/null
+  rodney waitidle >/dev/null
+  sleep 2
   rodney screenshot -w "$WIDTH" -h "$HEIGHT" "$OUT" >/dev/null
 }
 
@@ -51,6 +75,10 @@ attempt=1
 max_attempts=2
 until capture; do
   rodney stop >/dev/null 2>&1 || true
+  # A crashed (not gracefully-stopped) Chrome leaves its Singleton lock
+  # behind, which would otherwise wedge every future attempt - clean, not
+  # just stop, before retrying.
+  rm -f "$PROFILE_DIR"/Singleton{Lock,Cookie,Socket} 2>/dev/null || true
   (( attempt >= max_attempts )) && { echo "capture failed after $max_attempts attempts" >&2; exit 1; }
   echo "capture attempt $attempt failed, retrying with a fresh browser" >&2
   attempt=$((attempt + 1))

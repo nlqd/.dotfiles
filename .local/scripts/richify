@@ -5,50 +5,84 @@ Reads Markdown from stdin and emits ANSI-colored output to stdout. Designed
 to handle character-level streaming where chunk boundaries may split tokens.
 
 Recognized features: fenced code blocks (``` / ~~~), ATX headings (# .. ######),
-inline code (`x`), bold (**x**), italic (*x*), and <think>...</think> blocks.
+inline code (`x`), bold (**x**/__x__), italic (*x*/_x_), and <think>...</think> blocks.
 """
 
 import codecs
 import os
 import sys
 
-
 ESC = "\033["
-RESET = f"{ESC}0m"
-HEADR = f"{ESC}96m"
-FENCE = f"{ESC}33m"
-CODE = f"{ESC}92m"
-ICOD = f"{ESC}95m"
-THINK = f"{ESC}90m"
-BOLD = f"{ESC}1m"
-ITAL = f"{ESC}3m"
+RESET, HEADR, FENCE, CODE, ICOD, THINK, BOLD, ITAL = (
+    f"{ESC}0m", f"{ESC}96m", f"{ESC}33m", f"{ESC}92m",
+    f"{ESC}95m", f"{ESC}90m", f"{ESC}1m", f"{ESC}3m",
+)
 
-OPEN_THINK = "<think>"
-CLOSE_THINK = "</think>"
+OPEN_THINK, CLOSE_THINK = "<think>", "</think>"
 
-LINE_NORMAL = "normal"
-LINE_HEADING = "heading"
-LINE_FENCE_OPEN = "fence_open"
+LINE_NORMAL, LINE_HEADING, LINE_FENCE_OPEN = "normal", "heading", "fence_open"
+
+
+# Pure functional core (no I/O, no mutation) — the Highlighter class below
+# is the imperative shell that feeds it accumulated line-prefix chars.
+
+
+def _leading_run(chars, ch):
+    return len(chars) - len("".join(chars).lstrip(ch))
+
+
+def classify_line(chars):
+    """Decide a line's mode from its chars so far; None means not yet decidable."""
+    c0 = chars[0]
+    if c0 == "#":
+        i = _leading_run(chars, "#")
+        if i > 6:
+            return LINE_NORMAL, None
+        if i == len(chars):
+            return None
+        return (LINE_HEADING if chars[i] == " " else LINE_NORMAL), None
+    if c0 in ("`", "~"):
+        i = _leading_run(chars, c0)
+        if i >= 3:
+            return LINE_FENCE_OPEN, (c0, i)
+        if i == len(chars):
+            return None
+        return LINE_NORMAL, None
+    return LINE_NORMAL, None
+
+
+def is_fence_close(line, fence_char, fence_len):
+    stripped = line.rstrip()
+    return set(stripped) == {fence_char} and len(stripped) >= fence_len
+
+
+def _is_word(ch):
+    return ch is not None and (ch.isalnum() or ch == "_")
+
+
+def _word_boundary_ok(marker, left, next_ch=None):
+    # Only '_' is boundary-gated (avoids snake_case/dunder false triggers).
+    # next_ch is omitted for bold opens, which have no lookahead available.
+    if marker != "_":
+        return True
+    if next_ch is not None and next_ch.isspace():
+        return False
+    return not _is_word(left)
 
 
 class Highlighter:
     def __init__(self, out=None):
         self.out = out if out is not None else sys.stdout
 
-        self.in_fence = False
-        self.fence_char = None
-        self.fence_len = 0
-        self.fence_run_open = False  # leading-fence-char run still being counted
-        self.in_think = False
+        self.in_fence = self.fence_run_open = self.in_think = False
+        self.fence_char, self.fence_len = None, 0
 
         self.line_chars = []
         self.line_decided = False
         self.line_mode = LINE_NORMAL
 
         self.in_inline_code = False
-        self.in_bold = False
-        self.in_italic = False
-        self.pending_star = False
+        self.bold_marker = self.italic_marker = self.pending = self.prev_ch = None
         self.tag_buf = ""
 
     # ---------------------------------------------------------------- API
@@ -59,7 +93,7 @@ class Highlighter:
             self._process(ch)
 
     def flush(self):
-        if self.line_chars or self.tag_buf or self.pending_star:
+        if self.line_chars or self.tag_buf or self.pending:
             self._end_line(emit_newline=False)
         else:
             self._close_inline_styles()
@@ -92,8 +126,7 @@ class Highlighter:
             self.line_chars.append(ch)
             self._try_classify_line()
             if self.line_decided:
-                buf = "".join(self.line_chars)
-                self.line_chars = []
+                buf, self.line_chars = "".join(self.line_chars), []
                 self._begin_decided_line(buf)
             return
 
@@ -110,37 +143,13 @@ class Highlighter:
 
     # ------------------------------------------------- line classification
     def _try_classify_line(self):
-        s = self.line_chars
-        n = len(s)
-        c0 = s[0]
-
-        if c0 == "#":
-            i = 0
-            while i < n and s[i] == "#":
-                i += 1
-            if i > 6:
-                self._decide(LINE_NORMAL)
-                return
-            if i == n:
-                return
-            self._decide(LINE_HEADING if s[i] == " " else LINE_NORMAL)
+        result = classify_line(self.line_chars)
+        if result is None:
             return
-
-        if c0 in ("`", "~"):
-            i = 0
-            while i < n and s[i] == c0:
-                i += 1
-            if i >= 3:
-                self.fence_char = c0
-                self.fence_len = i
-                self._decide(LINE_FENCE_OPEN)
-                return
-            if i == n:
-                return
-            self._decide(LINE_NORMAL)
-            return
-
-        self._decide(LINE_NORMAL)
+        mode, fence_info = result
+        if fence_info:
+            self.fence_char, self.fence_len = fence_info
+        self._decide(mode)
 
     def _decide(self, mode):
         self.line_mode = mode
@@ -159,9 +168,8 @@ class Highlighter:
     # -------------------------------------------------------- end of line
     def _end_line(self, emit_newline=True):
         if self.in_fence:
-            line = "".join(self.line_chars)
-            self.line_chars = []
-            if self._is_fence_close(line):
+            line, self.line_chars = "".join(self.line_chars), []
+            if is_fence_close(line, self.fence_char, self.fence_len):
                 self._w(FENCE + line + RESET)
                 self.in_fence = False
             else:
@@ -172,7 +180,7 @@ class Highlighter:
 
         self._flush_pending_literals()
 
-        # <think> spans newlines: preserve in_bold/in_italic flags and the
+        # <think> spans newlines: preserve bold_marker/italic_marker and the
         # THINK color across the boundary so they restore on </think>.
         if not self.in_think:
             self._close_inline_styles()
@@ -187,15 +195,12 @@ class Highlighter:
             self._w("\n")
 
         self.line_decided = False
-        self.line_mode = LINE_NORMAL
-        self.line_chars = []
-
-    def _is_fence_close(self, line):
-        stripped = line.rstrip()
-        return set(stripped) == {self.fence_char} and len(stripped) >= self.fence_len
+        self.line_mode, self.line_chars, self.prev_ch = LINE_NORMAL, [], None
 
     # ----------------------------------------------------- inline machine
     def _inline(self, ch):
+        prev, self.prev_ch = self.prev_ch, ch
+
         if self.in_inline_code:
             if ch == "`":
                 self._w("`" + RESET)
@@ -209,7 +214,7 @@ class Highlighter:
             if candidate == OPEN_THINK:
                 self.tag_buf = ""
                 # Drop any active inline styles around the tag so THINK reads cleanly
-                if self.in_bold or self.in_italic:
+                if self.bold_marker or self.italic_marker:
                     self._w(RESET)
                 self._w(THINK + OPEN_THINK)
                 self.in_think = True
@@ -219,9 +224,9 @@ class Highlighter:
                 self._w(CLOSE_THINK + RESET)
                 self.in_think = False
                 # Restore any inline styles that were active before the tag
-                if self.in_bold:
+                if self.bold_marker:
                     self._w(BOLD)
-                if self.in_italic:
+                if self.italic_marker:
                     self._w(ITAL)
                 return
             if OPEN_THINK.startswith(candidate) or CLOSE_THINK.startswith(candidate):
@@ -238,20 +243,17 @@ class Highlighter:
             self._w(ch)
             return
 
-        if ch == "*":
-            if self.pending_star:
-                if self.in_bold:
-                    self._w("**" + RESET)
-                    self.in_bold = False
-                else:
-                    self._w(BOLD + "**")
-                    self.in_bold = True
-                self.pending_star = False
-            else:
-                self.pending_star = True
+        if ch in ("*", "_"):
+            if self.pending:
+                if self.pending[0] == ch:
+                    self._toggle_bold(ch, self.pending[1])
+                    self.pending = None
+                    return
+                self._resolve_pending(ch)
+            self.pending = (ch, prev)
             return
 
-        self._resolve_pending_star()
+        self._resolve_pending(ch)
 
         if ch == "`":
             self._w(ICOD + "`")
@@ -260,33 +262,46 @@ class Highlighter:
 
         self._w(ch)
 
-    def _resolve_pending_star(self):
-        if not self.pending_star:
-            return
-        self.pending_star = False
-        if self.in_italic:
-            self._w("*" + RESET)
-            self.in_italic = False
-        elif self.in_bold:
-            self._w("*")
+    def _toggle_bold(self, marker, left):
+        # Closing is checked before the boundary rule, so a style can never
+        # get stuck on regardless of what follows it (here and in _resolve_pending).
+        if self.bold_marker == marker:
+            self._w(marker * 2 + RESET)
+            self.bold_marker = None
+        elif self.bold_marker or not _word_boundary_ok(marker, left):
+            self._w(marker * 2)
         else:
-            self._w(ITAL + "*")
-            self.in_italic = True
+            self._w(BOLD + marker * 2)
+            self.bold_marker = marker
+
+    def _resolve_pending(self, next_ch):
+        if self.pending is None:
+            return
+        marker, left = self.pending
+        self.pending = None
+        if self.italic_marker == marker:
+            self._w(marker + RESET)
+            self.italic_marker = None
+        elif self.bold_marker or self.italic_marker or not _word_boundary_ok(marker, left, next_ch):
+            self._w(marker)
+        else:
+            self._w(ITAL + marker)
+            self.italic_marker = marker
 
     def _flush_pending_literals(self):
         if self.tag_buf:
             self._w(self.tag_buf)
             self.tag_buf = ""
-        if self.pending_star:
-            self._w("*")
-            self.pending_star = False
+        if self.pending:
+            self._w(self.pending[0])
+            self.pending = None
 
     def _close_inline_styles(self):
-        if self.in_inline_code or self.in_bold or self.in_italic:
+        if self.in_inline_code or self.bold_marker or self.italic_marker:
             self._w(RESET)
             self.in_inline_code = False
-            self.in_bold = False
-            self.in_italic = False
+            self.bold_marker = None
+            self.italic_marker = None
 
 
 # ----------------------------------------------------------------- main

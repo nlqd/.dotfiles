@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 
-# https://github.com/jake-stewart/inline
-# require: fzf jq nvim gum inline
+# require: fzf jq nvim gum
 # require(custom): jwt
 
 set -o pipefail
@@ -20,7 +19,7 @@ CLR='\e[0m'
 declare -A MODELS
 
 MODELS["cld-5-fable"]=9484
-MODELS["cld-48-opus"]=9466
+MODELS["cld-5-opus"]=9846
 MODELS["cld-5-sonnet"]=9535
 MODELS["cld-45-haiku"]=7640
 MODELS["gem-31-pro"]=8545
@@ -222,11 +221,9 @@ pod_shell() {
   echo -e "${BG}Connected — Ctrl-] to detach${CLR}"
   SDAI_WS_URL="$ws_url" SDAI_TOKEN="$token" SDAI_COOKIE="$cookie" \
     node -e '
-const { SDAI_WS_URL: wsPath, SDAI_TOKEN: token, SDAI_COOKIE: cookie } = process.env;
 function frame(opcode, payload) {
   const len = payload.length;
-  const head = Buffer.from(len < 126 ? [0x80 | opcode, 0x80 | len, 0, 0, 0, 0] : [0x80 | opcode, 0xfe, len >> 8, len & 0xff, 0, 0, 0, 0]));
-  return Buffer.concat([head, payload]);
+  return Buffer.concat([Buffer.from(len < 126 ? [0x80 | opcode, 0x80 | len, 0, 0, 0, 0] : [0x80 | opcode, 0xfe, len >> 8, len & 0xff, 0, 0, 0, 0]), payload]);
 }
 function parseFrame(buf) {
   if (buf.length < 2) return null;
@@ -240,47 +237,43 @@ function splitOnDetach(chunk) {
   const i = chunk.indexOf(0x1d);
   return i === -1 ? { before: chunk, detach: false } : { before: chunk.subarray(0, i), detach: true };
 }
-const req = require("https").get({
-  hostname: "admin.skydeck.ai", path: `${wsPath}?token=${encodeURIComponent(token)}`,
-  headers: { Connection: "Upgrade", Upgrade: "websocket", "Sec-WebSocket-Version": "13", "Sec-WebSocket-Key": "AAAAAAAAAAAAAAAAAAAAAA==", Origin: "https://eastagile.skydeck.ai", Cookie: `eastagile_access=${cookie}` },
-}, (r) => { console.error(`sdai pod: HTTP ${r.statusCode}`); process.exit(1); });
-req.on("error", (e) => { console.error(`sdai pod: ${e.message}`); process.exit(1); });
-
-req.on("upgrade", (_res, socket, head) => {
-  let buf = head && head.length ? Buffer.from(head) : Buffer.alloc(0), resized = false;
-  const send = (obj) => socket.write(frame(0x1, Buffer.from(JSON.stringify(obj))));
-  const resize = () => process.stdout.isTTY && send({ type: "resize", cols: process.stdout.columns, rows: process.stdout.rows });
-
-  function pump() {
-    let f;
-    while ((f = parseFrame(buf))) {
-      buf = f.rest;
-      if (f.opcode === 0x8) { socket.end(); process.exit(0); }
-      if (f.opcode !== 0x1) continue;
-      const msg = JSON.parse(f.payload.toString());
-      if (msg.type !== "output") continue;
-      process.stdout.write(msg.data);
-      if (!resized) { resized = true; resize(); }
+const { SDAI_WS_URL, SDAI_TOKEN, SDAI_COOKIE } = process.env;
+require("https").get({
+  hostname: "admin.skydeck.ai", path: `${SDAI_WS_URL}?token=${encodeURIComponent(SDAI_TOKEN)}`,
+  headers: { Connection: "Upgrade", Upgrade: "websocket", "Sec-WebSocket-Version": "13", "Sec-WebSocket-Key": "AAAAAAAAAAAAAAAAAAAAAA==", Origin: "https://eastagile.skydeck.ai", Cookie: `eastagile_access=${SDAI_COOKIE}` },
+}, (r) => { console.error(`sdai pod: HTTP ${r.statusCode}`); process.exit(1); })
+  .on("error", (e) => { console.error(`sdai pod: ${e.message}`); process.exit(1); })
+  .on("upgrade", (_res, socket, head) => {
+    let buf = head && head.length ? Buffer.from(head) : Buffer.alloc(0), resized = false;
+    const send = (obj) => socket.write(frame(0x1, Buffer.from(JSON.stringify(obj))));
+    const resize = () => process.stdout.isTTY && send({ type: "resize", cols: process.stdout.columns, rows: process.stdout.rows });
+    const pump = () => {
+      let f;
+      while ((f = parseFrame(buf))) {
+        buf = f.rest;
+        if (f.opcode === 0x8) { socket.end(); process.exit(0); }
+        if (f.opcode !== 0x1) continue;
+        const msg = JSON.parse(f.payload.toString());
+        if (msg.type !== "output") continue;
+        process.stdout.write(msg.data);
+        if (!resized) { resized = true; resize(); }
+      }
     }
-  }
 
-  socket.on("data", (chunk) => { buf = Buffer.concat([buf, chunk]); pump(); });
-  socket.on("close", () => process.exit(0));
-  socket.on("error", (e) => { console.error(`\r\n[connection error: ${e.message}]`); process.exit(1); });
+    socket.on("data", (chunk) => { buf = Buffer.concat([buf, chunk]); pump(); }).on("close", () => process.exit(0)).on("error", (e) => { console.error(`\r\n[connection error: ${e.message}]`); process.exit(1); });
+    process.stdout.on("resize", resize);
+    if (process.stdin.isTTY) process.stdin.setRawMode(true);
+    process.stdin.on("data", (chunk) => {
+      const { before, detach } = splitOnDetach(chunk);
+      if (before.length) send({ type: "input", data: before.toString() });
+      if (!detach) return;
+      process.stderr.write("\r\n[detached]\r\n");
+      socket.end(frame(0x8, Buffer.alloc(0)));
+      process.exit(0);
+    });
 
-  if (process.stdin.isTTY) process.stdin.setRawMode(true);
-  process.stdout.on("resize", resize);
-  process.stdin.on("data", (chunk) => {
-    const { before, detach } = splitOnDetach(chunk);
-    if (before.length) send({ type: "input", data: before.toString() });
-    if (!detach) return;
-    process.stderr.write("\r\n[detached]\r\n");
-    socket.end(frame(0x8, Buffer.alloc(0)));
-    process.exit(0);
+    pump();
   });
-
-  pump();
-});
 '
 }
 
@@ -293,7 +286,7 @@ start_chat_session() {
     MESSAGE=$(gum write --char-limit=0 --width=0 --no-show-help --prompt="") || return
 
     if [[ -z "$MESSAGE" ]]; then
-      # inline nvim $(QUERY_FILE)
+      # or: https://github.com/jake-stewart/inline
       nvim $(QUERY_FILE)
       MESSAGE=$(cat $(QUERY_FILE))
     else

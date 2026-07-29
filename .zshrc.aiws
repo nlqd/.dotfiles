@@ -169,7 +169,7 @@ bindkey '^n' __tmux_fzf_autocomplete_widget__
 # tmux has-session -t main 2> /dev/null || tmux new-session -d -s main
 
 eval "$(zoxide init zsh)"
-[[ -z "$STARSHIP_SHELL" ]] && eval "$(starship init zsh)"
+eval "$(starship init zsh)"
 
 # OSC 133 prompt marks for tmux copy-last-output (prefix+O); starship won't emit them (starship#5463).
 # A must ride inside PROMPT: a precmd-printed mark dies when zle redraws the prompt line.
