@@ -1,0 +1,496 @@
+#!/usr/bin/env node
+'use strict';
+const http = require('http');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawn } = require('child_process');
+
+const HOME = os.homedir();
+const COOKIE_FILE = path.join(HOME, '.sdai', 'cookies');
+const TOKEN_FILE = path.join(HOME, '.sdai', 'proxy-token');
+const BASE_URL = 'https://admin.skydeck.ai/api/v1';
+const REFERER = 'Referer: https://eastagile.skydeck.ai/';
+const PORT = Number(process.env.SKYDECK_PROXY_PORT || 8788);
+const MCP_SERVER_ID = '4331da01-91fb-414e-9a94-8671425989d0';
+const MAX_SESSIONS = 20;
+
+function getOrCreateToken() {
+  try {
+    return fs.readFileSync(TOKEN_FILE, 'utf8').trim();
+  } catch {
+    const token = require('crypto').randomBytes(24).toString('hex');
+    fs.mkdirSync(path.dirname(TOKEN_FILE), { recursive: true });
+    fs.writeFileSync(TOKEN_FILE, token, { mode: 0o600 });
+    return token;
+  }
+}
+const PROXY_TOKEN = getOrCreateToken();
+
+// alias -> Skydeck's stable `name` field. Never hardcode the numeric `id` here — it
+// drifts (confirmed: every entry below was off by a few points from a live /models/
+// query on 2026-08-05) — resolve it fresh from the API on every request instead.
+const MODEL_ALIASES = {
+  'cld-45-haiku': 'claude-haiku-4-5-20251001',
+  'cld-5-sonnet': 'claude-sonnet-5',
+  'cld-48-opus': 'claude-opus-4-8',
+  'gem-35-flash': 'gemini/gemini-3.5-flash-lite',
+  'gem-31-pro': 'gemini/gemini-3.1-pro-preview',
+  'gpt-56-terra': 'gpt-5.6-terra',
+  'gpt-56-luna': 'gpt-5.6-luna',
+};
+const MODELS_TTL_MS = 5 * 60 * 1000;
+let modelsCache = null;
+
+async function fetchLiveModels() {
+  if (modelsCache && Date.now() - modelsCache.fetchedAt < MODELS_TTL_MS) return modelsCache.byName;
+  const out = await call([`${BASE_URL}/models/`]);
+  const list = JSON.parse(out.toString());
+  const byName = new Map(list.map((m) => [m.name, m]));
+  modelsCache = { byName, fetchedAt: Date.now() };
+  return byName;
+}
+
+async function resolveModelId(alias) {
+  const name = MODEL_ALIASES[alias];
+  if (!name) return null;
+  const byName = await fetchLiveModels();
+  const entry = byName.get(name);
+  return entry ? entry.id : null;
+}
+
+function getAccessToken() {
+  const text = fs.readFileSync(COOKIE_FILE, 'utf8');
+  const line = text.split('\n').find((l) => l.includes('eastagile_access'));
+  const token = line ? line.split('\t')[6] : '';
+  if (!token) throw new Error(`no access token in ${COOKIE_FILE} — refresh cookies`);
+  return token;
+}
+
+function jwtExp(token) {
+  return JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()).exp;
+}
+
+async function withRetry(fn, { retries = 2, baseDelayMs = 500, shouldRetry = () => true } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (attempt >= retries || !shouldRetry(e)) throw e;
+      await new Promise((r) => setTimeout(r, baseDelayMs * 2 ** attempt));
+    }
+  }
+}
+
+function runCurl(args, onChunk) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('curl', ['-s', ...args]);
+    const chunks = [];
+    proc.stdout.on('data', (c) => (onChunk ? onChunk(c.toString()) : chunks.push(c)));
+    proc.on('close', (code) =>
+      code === 0 ? resolve(Buffer.concat(chunks)) : reject(new Error(`curl exited ${code}`))
+    );
+    proc.on('error', reject);
+  });
+}
+
+async function refreshIfNeeded() {
+  const exp = jwtExp(getAccessToken());
+  if (Math.floor(Date.now() / 1000) > exp) {
+    await runCurl([
+      '-X', 'POST', '-o', '/dev/null', `${BASE_URL}/authentication/token/refresh/`,
+      '-H', REFERER, '--cookie', COOKIE_FILE, '--cookie-jar', COOKIE_FILE,
+    ]);
+  }
+}
+
+async function call(args, onChunk) {
+  await refreshIfNeeded();
+  return runCurl(['--cookie', COOKIE_FILE, '-H', 'Content-Type: application/json', '-H', REFERER, ...args], onChunk);
+}
+
+async function callForm(args) {
+  await refreshIfNeeded();
+  return runCurl(['--cookie', COOKIE_FILE, '-H', 'Content-Type: multipart/form-data', '-H', REFERER, ...args]);
+}
+
+async function postMessage({ modelId, conversationId, messageText, useMcp }) {
+  const tmpFile = path.join(os.tmpdir(), `skydeck-proxy-msg-${process.pid}-${Date.now()}.txt`);
+  fs.writeFileSync(tmpFile, messageText);
+  try {
+    const out = await withRetry(() =>
+      callForm([
+        `${BASE_URL}/conversations/chat_v2/`,
+        '-F', `message=<${tmpFile}`,
+        '-F', `model_id=${modelId}`,
+        '-F', `conversation_id=${conversationId || ''}`,
+        '-F', 'regenerate_message_id=-1',
+        '-F', 'user_model_parameters={"prompt_caching":true,"thinking":{"type":"enabled","budget_tokens":16000},"max_tokens":64000,"temperature":0.17}',
+        '-F', `behavior_settings={"markdown_view":true,"latex_view":false,"explicit_url_detection":false,"function_call_aggressiveness":${useMcp ? 0 : 1},"commentary_enabled":false}`,
+        // Skydeck's own local_mcp_server injects a server-side system prompt describing that
+        // server's real attached functions (here, just web_search), which competes with and
+        // overrides our own pi-tool-call instructions. Only attach it when the client isn't
+        // declaring its own tools; when it is, we rely entirely on our own marker convention.
+        ...(useMcp ? ['-F', `local_mcp_server_id=${MCP_SERVER_ID}`] : []),
+      ]),
+      { shouldRetry: (e) => !String(e.message).includes('refresh cookies') }
+    );
+    const parsed = JSON.parse(out.toString());
+    if (!parsed || !parsed.data || !parsed.data.conversation_id) {
+      throw new Error(`unexpected skydeck response: ${out.toString().slice(0, 300)}`);
+    }
+    return parsed;
+  } finally {
+    fs.unlinkSync(tmpFile);
+  }
+}
+
+async function streamResponse(messageId, onDelta) {
+  let receivedAny = false;
+  await withRetry(
+    () =>
+      call(
+        [`${BASE_URL}/conversations/streaming/`, '--data', JSON.stringify({ message_id: messageId }), '--no-buffer'],
+        (text) => {
+          let parsed;
+          try {
+            parsed = JSON.parse('[' + text.replaceAll('}{', '},{') + ']');
+          } catch {
+            return;
+          }
+          for (const item of parsed) {
+            if (item && item.chunks) {
+              receivedAny = true;
+              onDelta(item.chunks);
+            }
+          }
+        }
+      ),
+    { shouldRetry: () => !receivedAny }
+  );
+}
+
+function stripThink(text) {
+  return text.replace(/^\s*<think>[\s\S]*?<\/think>\s*/, '');
+}
+
+function makeThinkStripper() {
+  let buf = '';
+  let resolved = false;
+  let hasThink = null;
+  return function (delta) {
+    if (resolved) return delta;
+    buf += delta;
+    if (hasThink === null) {
+      const trimmed = buf.replace(/^\s+/, '');
+      if (trimmed.length === 0) return '';
+      hasThink = trimmed.startsWith('<think>');
+      if (!hasThink) {
+        resolved = true;
+        const out = buf;
+        buf = '';
+        return out;
+      }
+    }
+    const closeIdx = buf.indexOf('</think>');
+    if (closeIdx === -1) return '';
+    resolved = true;
+    const out = buf.slice(closeIdx + '</think>'.length).replace(/^\s+/, '');
+    buf = '';
+    return out;
+  };
+}
+
+// --- OpenAI-compatible message translation ---
+
+function extractText(msg) {
+  if (msg.tool_calls) return JSON.stringify(msg.tool_calls);
+  if (typeof msg.content === 'string') return msg.content;
+  if (Array.isArray(msg.content)) return msg.content.map((p) => p.text || '').join('');
+  return '';
+}
+
+// --- Tool-calling: our own explicit marker, not Skydeck's native (hallucination-prone) mcp-header format ---
+
+function formatToolsInstructions(tools) {
+  if (!tools || !tools.length) return '';
+  const list = tools
+    .map((t) => {
+      const fn = t.function || t;
+      return `- ${fn.name}: ${fn.description || ''}\n  parameters: ${JSON.stringify(fn.parameters || {})}`;
+    })
+    .join('\n');
+  return (
+    `\n\nYou have access to the following tools:\n${list}\n\n` +
+    'When you need to call one, end your response with exactly one fenced code block in this exact form, ' +
+    'with nothing after it:\n```pi-tool-call\n{"name": "<tool name>", "arguments": {<arguments as JSON matching that tool\'s parameters>}}\n```\n' +
+    'Only emit this block when you actually want to invoke a tool. Otherwise answer normally with no code block. ' +
+    'Do not use any other format for calling tools, and never fabricate a "CALL RESULT" or claim a function executed, that is not how tools work here.'
+  );
+}
+
+function firstBalancedJson(text) {
+  const start = text.indexOf('{');
+  if (start === -1) return null;
+  let depth = 0;
+  for (let i = start; i < text.length; i++) {
+    if (text[i] === '{') depth++;
+    else if (text[i] === '}') {
+      depth--;
+      if (depth === 0) {
+        try {
+          return JSON.parse(text.slice(start, i + 1));
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function extractToolCall(text) {
+  const ownMatch = text.match(/```pi-tool-call\s*\n([\s\S]*?)\n```\s*$/);
+  if (ownMatch) {
+    let obj;
+    try {
+      obj = JSON.parse(ownMatch[1]);
+    } catch {
+      obj = null;
+    }
+    if (obj && typeof obj.name === 'string') {
+      return { name: obj.name, arguments: obj.arguments || {}, prefixText: text.slice(0, ownMatch.index).trim() };
+    }
+  }
+
+  // Fall back to Skydeck's own native mcp-header format: the model reliably names the
+  // right function and arguments there even though the "CALL RESULT" that follows is
+  // fabricated. Take the first occurrence and discard everything after it.
+  const mcpMatch = text.match(/mcp-function-name['"]>([a-zA-Z_][a-zA-Z0-9_]*)\(\)<\/div>/);
+  if (mcpMatch) {
+    const beforeMcp = text.slice(0, mcpMatch.index);
+    const detailsIdx = beforeMcp.lastIndexOf('<details>');
+    const prefixText = (detailsIdx === -1 ? beforeMcp : beforeMcp.slice(0, detailsIdx)).trim();
+    const afterName = text.slice(mcpMatch.index + mcpMatch[0].length);
+    // Prefer the fenced ```json block, but the model doesn't always emit the newline right
+    // after the fence — fall back to balance-scanning the raw tail for JSON so a missing
+    // newline doesn't sink the whole extraction and leak this raw HTML into the chat.
+    const jsonBlockMatch = afterName.match(/```json\s*([\s\S]*?)```/);
+    const argsSource = jsonBlockMatch ? jsonBlockMatch[1] : afterName;
+    const args = firstBalancedJson(argsSource);
+    if (args !== null) return { name: mcpMatch[1], arguments: args, prefixText };
+  }
+
+  return null;
+}
+
+function randomCallId() {
+  return `call_${require('crypto').randomBytes(12).toString('hex')}`;
+}
+
+const sessions = []; // [{ messages, conversationId }], most-recently-used at the end
+
+function messagesEqual(a, b) {
+  if (a.length !== b.length) return false;
+  return a.every((m, i) => m.role === b[i].role && extractText(m) === extractText(b[i]));
+}
+
+// Dirge's harness re-injects a one-shot "[Tool-use examples]" few-shot demo immediately
+// before whichever message is newest on every request, instead of keeping it pinned at a
+// fixed position in history — so it isn't real conversation content and must be dropped
+// before comparing message arrays for continuity.
+function isEphemeralScaffold(m) {
+  return m.role === 'user' && extractText(m).startsWith('[Tool-use examples]');
+}
+
+function normalizeForMatch(messages) {
+  return messages.filter((m) => !isEphemeralScaffold(m));
+}
+
+function resolveConversation(messages) {
+  const normalized = normalizeForMatch(messages);
+  const prefix = normalized.slice(0, -1);
+
+  let idx = sessions.findIndex((s) => messagesEqual(prefix, normalizeForMatch(s.messages)));
+  if (idx === -1) {
+    // Dirge also drops the assistant's plain-text (non-tool-call) reply from the history it
+    // resends on the *next* request — tolerate exactly that one missing trailing message.
+    idx = sessions.findIndex((s) => {
+      const sNorm = normalizeForMatch(s.messages);
+      const last = sNorm[sNorm.length - 1];
+      if (!last || last.role !== 'assistant' || last.tool_calls) return false;
+      return messagesEqual(prefix, sNorm.slice(0, -1));
+    });
+  }
+  if (idx === -1) return null;
+  const [session] = sessions.splice(idx, 1);
+  sessions.push(session);
+  return session.conversationId;
+}
+
+function saveSession(messages, conversationId) {
+  sessions.push({ messages, conversationId });
+  while (sessions.length > MAX_SESSIONS) sessions.shift();
+}
+
+// --- HTTP server ---
+
+function handleModels(res) {
+  const data = Object.keys(MODEL_ALIASES).map((id) => ({ id, object: 'model', created: 0, owned_by: 'skydeck' }));
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ object: 'list', data }));
+}
+
+async function handleChatCompletions(req, res) {
+  let body = '';
+  req.on('data', (c) => (body += c));
+  req.on('end', async () => {
+    let parsed;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: 'invalid JSON', type: 'invalid_request_error' } }));
+      return;
+    }
+
+    const { model, messages, stream, tools } = parsed;
+    let modelId;
+    try {
+      modelId = await resolveModelId(model);
+    } catch (e) {
+      res.writeHead(502, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: `skydeck error: ${e.message}`, type: 'api_error' } }));
+      return;
+    }
+    if (!modelId) {
+      res.writeHead(400, { 'Content-Type': 'application/json' }).end(
+        JSON.stringify({ error: { message: `unknown model: ${model}. known: ${Object.keys(MODEL_ALIASES).join(', ')}`, type: 'invalid_request_error', code: 'model_not_found' } })
+      );
+      return;
+    }
+
+    const conversationId = resolveConversation(messages);
+    const lastMsg = messages[messages.length - 1];
+    let messageText =
+      lastMsg.role === 'tool'
+        ? `Tool result${lastMsg.name ? ` for ${lastMsg.name}` : ''}:\n${extractText(lastMsg)}`
+        : extractText(lastMsg);
+    if (!conversationId) {
+      const sys = messages.find((m) => m.role === 'system');
+      const prefix = (sys ? extractText(sys) : '') + formatToolsInstructions(tools);
+      if (prefix.trim()) messageText = `${prefix}\n\n${messageText}`;
+    }
+
+    let postResult;
+    try {
+      postResult = await postMessage({ modelId, conversationId, messageText, useMcp: !(tools && tools.length) });
+    } catch (e) {
+      res.writeHead(502, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: `skydeck error: ${e.message}`, type: 'api_error' } }));
+      return;
+    }
+
+    const newConversationId = postResult.data.conversation_id;
+    const msgs = postResult.data.messages;
+    const messageId = msgs[msgs.length - 1].id;
+
+    const created = Math.floor(Date.now() / 1000);
+    const id = `chatcmpl-${created}-${Math.random().toString(36).slice(2)}`;
+
+    // With tools in play we must see the complete response before we know whether it's a
+    // tool call or plain content, so buffer fully instead of streaming deltas live.
+    const bufferForTools = Boolean(tools && tools.length);
+
+    if (stream && !bufferForTools) {
+      let full = '';
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+      const stripper = makeThinkStripper();
+      await streamResponse(messageId, (rawDelta) => {
+        full += rawDelta;
+        const delta = stripper(rawDelta);
+        if (!delta) return;
+        res.write(`data: ${JSON.stringify({
+          id, object: 'chat.completion.chunk', created, model,
+          choices: [{ index: 0, delta: { content: delta }, finish_reason: null }],
+        })}\n\n`);
+      });
+      res.write(`data: ${JSON.stringify({
+        id, object: 'chat.completion.chunk', created, model,
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+      })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+      saveSession([...messages, { role: 'assistant', content: stripThink(full) }], newConversationId);
+      return;
+    }
+
+    let full = '';
+    await streamResponse(messageId, (delta) => { full += delta; });
+    const cleanFull = stripThink(full);
+    const toolCall = extractToolCall(cleanFull);
+
+    let assistantMessage;
+    let finishReason;
+    if (toolCall) {
+      assistantMessage = {
+        role: 'assistant',
+        content: toolCall.prefixText || null,
+        tool_calls: [{ id: randomCallId(), type: 'function', function: { name: toolCall.name, arguments: JSON.stringify(toolCall.arguments) } }],
+      };
+      finishReason = 'tool_calls';
+    } else {
+      assistantMessage = { role: 'assistant', content: cleanFull };
+      finishReason = 'stop';
+    }
+
+    if (stream) {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+      const delta = toolCall
+        ? {
+            role: 'assistant',
+            content: assistantMessage.content,
+            tool_calls: assistantMessage.tool_calls.map((tc, i) => ({ index: i, ...tc })),
+          }
+        : { role: 'assistant', content: cleanFull };
+      res.write(`data: ${JSON.stringify({
+        id, object: 'chat.completion.chunk', created, model,
+        choices: [{ index: 0, delta, finish_reason: null }],
+      })}\n\n`);
+      res.write(`data: ${JSON.stringify({
+        id, object: 'chat.completion.chunk', created, model,
+        choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
+      })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+    } else {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        id, object: 'chat.completion', created, model,
+        choices: [{ index: 0, message: assistantMessage, finish_reason: finishReason }],
+        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      }));
+    }
+
+    saveSession([...messages, assistantMessage], newConversationId);
+  });
+}
+
+function checkAuth(req, res) {
+  const auth = req.headers.authorization || '';
+  if (auth === `Bearer ${PROXY_TOKEN}`) return true;
+  res.writeHead(401, { 'Content-Type': 'application/json' }).end(
+    JSON.stringify({ error: { message: 'invalid or missing bearer token', type: 'invalid_request_error', code: 'invalid_api_key' } })
+  );
+  return false;
+}
+
+const server = http.createServer((req, res) => {
+  if (!checkAuth(req, res)) return;
+  if (req.method === 'GET' && req.url === '/v1/models') return handleModels(res);
+  if (req.method === 'POST' && req.url === '/v1/chat/completions') return handleChatCompletions(req, res);
+  res.writeHead(404, { 'Content-Type': 'application/json' }).end(
+    JSON.stringify({ error: { message: 'not found', type: 'invalid_request_error' } })
+  );
+});
+
+server.listen(PORT, '127.0.0.1', () => {
+  console.error(`skydeck-proxy listening on http://127.0.0.1:${PORT} (token in ${TOKEN_FILE})`);
+});

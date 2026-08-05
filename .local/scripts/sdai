@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-# require: fzf jq nvim gum
-# require(custom): jwt
+# require: fzf jq nvim gum node
+# require(custom): richify
 
 set -o pipefail
 shopt -s nullglob
@@ -58,6 +58,10 @@ abort() {
   echo "$1" && exit 1
 }
 
+richify_or_cat() {
+  command -v richify >/dev/null && richify || cat
+}
+
 pick_model() {
   local selected
   selected=$(
@@ -87,7 +91,7 @@ get_access_token() {
 
 refresh() {
   local exp
-  exp=$(get_access_token | jwt | jq '.exp')
+  exp=$(get_access_token | node -e 'let t="";process.stdin.on("data",d=>t+=d).on("end",()=>console.log(JSON.parse(Buffer.from(t.split(".")[1],"base64url")).exp))')
 
   [[ "$(date +%s)" -gt "$exp" ]] &&
     curl -s -X POST -o /dev/null "$BASE_URL/authentication/token/refresh/" \
@@ -132,7 +136,7 @@ get_response_stream() {
   call "$BASE_URL/conversations/streaming/" --data '{"message_id": '"$ASSI_MESSAGE_ID"' }' --no-buffer |
     parse_response_stream |
     tee $(RESPONSE_FILE) |
-    richify
+    richify_or_cat
 
   STREAMING="false"
 }
@@ -252,6 +256,7 @@ require("https").get({
       while ((f = parseFrame(buf))) {
         buf = f.rest;
         if (f.opcode === 0x8) { socket.end(); process.exit(0); }
+        if (f.opcode === 0x9) { socket.write(frame(0xa, f.payload)); continue; }
         if (f.opcode !== 0x1) continue;
         const msg = JSON.parse(f.payload.toString());
         if (msg.type !== "output") continue;
@@ -384,7 +389,7 @@ main() {
     ;;
   r | resume)
     CONVERSATION_ID=$(pick_conversation_id) || abort "No conversation selected"
-    get_conversation_history | richify
+    get_conversation_history | richify_or_cat
     start_chat_session
     ;;
   d | delete)
