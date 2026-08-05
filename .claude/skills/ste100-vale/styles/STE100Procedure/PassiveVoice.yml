@@ -1,0 +1,7 @@
+extends: sequence
+message: "Passive voice ('%[1]s %[2]s') is not allowed in procedures. Use active voice (STE Section 5: Procedural writing)."
+level: error
+tokens:
+  - pattern: 'am|is|are|was|were|be|been|being'
+    tag: VB|VBP|VBZ|VBD|VBN
+  - tag: VBN

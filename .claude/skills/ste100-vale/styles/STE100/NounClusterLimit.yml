@@ -1,0 +1,12 @@
+extends: sequence
+message: "Noun cluster of more than three words: '%[1]s %[2]s %[3]s %[4]s' (STE-2.1)."
+level: error
+tokens:
+  - pattern: '\w+'
+    tag: NN|NNS|NNP|NNPS
+  - pattern: '\w+'
+    tag: NN|NNS|NNP|NNPS
+  - pattern: '\w+'
+    tag: NN|NNS|NNP|NNPS
+  - pattern: '\w+'
+    tag: NN|NNS|NNP|NNPS

@@ -1,0 +1,24 @@
+extends: substitution
+message: "Use '%s' instead of '%s'."
+level: error
+ignorecase: true
+swap:
+  colour: color
+  centre: center
+  behaviour: behavior
+  favourite: favorite
+  organise: organize
+  organisation: organization
+  analyse: analyze
+  travelled: traveled
+  travelling: traveling
+  cancelled: canceled
+  cancelling: canceling
+  programme: program
+  licence: license
+  defence: defense
+  labour: labor
+  neighbour: neighbor
+  aluminium: aluminum
+  tyre: tire
+  kerb: curb

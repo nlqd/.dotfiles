@@ -1,0 +1,7 @@
+extends: sequence
+message: "Perfect tense ('%[1]s %[2]s') is not an approved verb form (STE-3.4)."
+level: error
+tokens:
+  - pattern: 'have|has|had'
+    tag: VB|VBP|VBZ|VBD
+  - tag: VBN

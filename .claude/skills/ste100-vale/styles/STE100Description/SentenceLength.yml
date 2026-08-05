@@ -1,0 +1,6 @@
+extends: occurrence
+message: "Description sentences must not exceed 25 words (found %d) (STE Section 6: Descriptive writing)."
+level: error
+scope: sentence
+max: 25
+token: '\b\w+\b'

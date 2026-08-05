@@ -1,0 +1,30 @@
+name: Test
+
+on: [push, pull_request]
+
+jobs:
+  cucumber:
+    runs-on: ubuntu-latest
+    env:
+      VALE_VERSION: 3.15.2
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - name: Install vale
+        run: |
+          wget "https://github.com/errata-ai/vale/releases/download/v${VALE_VERSION}/vale_${VALE_VERSION}_Linux_64-bit.tar.gz"
+          mkdir bin && tar -xzf "vale_${VALE_VERSION}_Linux_64-bit.tar.gz" -C bin vale
+          echo "$PWD/bin" >> "$GITHUB_PATH"
+
+      - name: Build dictionary
+        run: ruby scripts/build-dictionary
+
+      - name: Features
+        run: bundle exec cucumber --format progress
+        env:
+          CUCUMBER_PUBLISH_QUIET: true

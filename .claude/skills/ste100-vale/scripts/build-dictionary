@@ -1,0 +1,102 @@
+#!/usr/bin/env ruby
+# Converts dictionary/ste100-words.csv (bring-your-own, gitignored) into the
+# generated Vale/Hunspell files that back STE100.ApprovedWords. Falls back to
+# the example CSV when the real one doesn't exist yet, so the structural
+# rules still work out of the box.
+
+require 'csv'
+require 'fileutils'
+
+root = File.expand_path('..', __dir__)
+real_csv = File.join(root, 'dictionary', 'ste100-words.csv')
+example_csv = File.join(root, 'dictionary', 'ste100-words.example.csv')
+source = File.exist?(real_csv) ? real_csv : example_csv
+
+warn "No #{real_csv} found, using #{example_csv} instead." unless File.exist?(real_csv)
+
+required_columns = %w[word pos approved alternatives note]
+entries = {}
+
+CSV.foreach(source, headers: true).with_index(2) do |row, line_no|
+  missing = required_columns - row.headers.compact
+  if missing.any?
+    abort "#{source}:#{line_no}: missing column(s): #{missing.join(', ')}"
+  end
+
+  word = row['word']&.strip&.downcase
+  abort "#{source}:#{line_no}: empty word" if word.nil? || word.empty?
+
+  approved = case row['approved']&.strip&.downcase
+             when 'true' then true
+             when 'false' then false
+             else abort "#{source}:#{line_no}: 'approved' must be true or false, got #{row['approved'].inspect}"
+             end
+
+  pos = row['pos']&.strip&.downcase
+
+  if entries.key?(word) && entries[word] != [approved, pos]
+    abort "#{source}:#{line_no}: '#{word}' already appeared with a conflicting 'approved' or 'pos' value"
+  end
+
+  entries[word] = [approved, pos]
+end
+
+words = entries.select { |_, (approved, _)| approved }.keys.sort
+nouns_only = entries.select { |_, (approved, pos)| approved && pos == 'n' }.keys.sort
+verbs_only = entries.select { |_, (approved, pos)| approved && pos == 'v' }.keys.sort
+
+generated = File.join(root, 'styles', 'STE100', 'generated')
+dict_dir = File.join(generated, 'dictionaries')
+FileUtils.mkdir_p(dict_dir)
+
+File.write(File.join(dict_dir, 'en_US.dic'), "#{words.size}\n#{words.join("\n")}\n")
+File.write(File.join(dict_dir, 'en_US.aff'), "SET UTF-8\n")
+
+# Vale's `spelling` check silently loads zero words if the rule file itself
+# lives in a subdirectory of its style (confirmed empirically); it must sit
+# at the top level of styles/STE100/, even though the .dic/.aff data it
+# points at via dicpath can live anywhere.
+File.write(File.join(root, 'styles', 'STE100', 'ApprovedWords.yml'), <<~YAML)
+  extends: spelling
+  message: "'%s' is not an approved word (STE-1.1)."
+  level: error
+  custom: true
+  append: false
+  dicpath: STE100/generated/dictionaries
+  dictionaries:
+    - en_US
+YAML
+
+# One word, one approved part of speech (STE-1.2). Only the noun<->verb
+# confusion is covered: a word approved as noun-only flagged when tagged as
+# any verb form, and vice versa. Other part-of-speech mixups (e.g.
+# adjective/adverb) aren't generated; the two-tag alternation approach isn't
+# validated for those and would need its own check.
+verb_tags = 'VB|VBD|VBG|VBN|VBP|VBZ'
+noun_tags = 'NN|NNS|NNP|NNPS'
+
+if nouns_only.any?
+  pattern = nouns_only.map { |w| Regexp.escape(w) }.join('|')
+  File.write(File.join(root, 'styles', 'STE100', 'WordPartOfSpeechNoun.yml'), <<~YAML)
+    extends: sequence
+    message: "'%[1]s' is approved as a noun only, not as a verb (STE-1.2)."
+    level: error
+    tokens:
+      - pattern: '#{pattern}'
+        tag: #{verb_tags}
+  YAML
+end
+
+if verbs_only.any?
+  pattern = verbs_only.map { |w| Regexp.escape(w) }.join('|')
+  File.write(File.join(root, 'styles', 'STE100', 'WordPartOfSpeechVerb.yml'), <<~YAML)
+    extends: sequence
+    message: "'%[1]s' is approved as a verb only, not as a noun (STE-1.2)."
+    level: error
+    tokens:
+      - pattern: '#{pattern}'
+        tag: #{noun_tags}
+  YAML
+end
+
+puts "Built #{words.size} approved word(s) from #{source}."

@@ -1,0 +1,6 @@
+extends: occurrence
+message: "Procedure sentences must not exceed 20 words (found %d) (STE Section 5: Procedural writing)."
+level: error
+scope: sentence
+max: 20
+token: '\b\w+\b'

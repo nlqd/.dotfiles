@@ -1,0 +1,7 @@
+extends: sequence
+message: "Do not use progressive tense ('%[1]s %[2]s'). Use the simple form instead (STE Section 3: Verbs)."
+level: error
+tokens:
+  - pattern: 'am|is|are|was|were|be|been|being'
+    tag: VB|VBP|VBZ|VBD|VBN
+  - tag: VBG

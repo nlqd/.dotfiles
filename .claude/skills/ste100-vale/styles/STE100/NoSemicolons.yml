@@ -1,0 +1,6 @@
+extends: existence
+message: "Do not use semicolons (STE-8.11)."
+level: error
+nonword: true
+tokens:
+  - ';'

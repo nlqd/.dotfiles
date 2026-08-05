@@ -1,0 +1,9 @@
+# Terminology pairs are domain-specific: we can't know which synonyms your
+# documents actually confuse. The pair below is a placeholder, replace or
+# extend `either` with your own domain's pairs.
+extends: consistency
+message: "Inconsistent terminology: use only one of 'install' or 'fit' throughout (STE-1.11)."
+level: error
+ignorecase: true
+either:
+  install: fit

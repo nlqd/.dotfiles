@@ -1,0 +1,4 @@
+word,pos,approved,alternatives,note
+demo-start,v,true,,EXAMPLE ROW - approved word for the schema demo, not real STE100 data
+demo-begin,v,false,demo-start,EXAMPLE ROW - a rejected word pointing at its approved alternative
+demo-check,n,true,,EXAMPLE ROW - approved as a noun only, not as a verb

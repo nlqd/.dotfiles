@@ -1,0 +1,8 @@
+/dictionary/ste100-words.csv
+/styles/STE100/generated/
+/styles/STE100/ApprovedWords.yml
+/styles/STE100/WordPartOfSpeechNoun.yml
+/styles/STE100/WordPartOfSpeechVerb.yml
+/bin/vale
+/.bundle/
+/vendor/bundle/

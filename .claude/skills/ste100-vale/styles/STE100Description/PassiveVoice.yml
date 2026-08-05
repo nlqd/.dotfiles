@@ -1,0 +1,10 @@
+# STE allows passive voice in descriptions only when the agent is genuinely
+# unknown; that judgment call can't be automated, so this warns rather than
+# errors, prompting a human review instead of an auto-reject.
+extends: sequence
+message: "Passive voice ('%[1]s %[2]s'). Allowed only when the agent is genuinely unknown, review this usage (STE Section 6: Descriptive writing)."
+level: suggestion
+tokens:
+  - pattern: 'am|is|are|was|were|be|been|being'
+    tag: VB|VBP|VBZ|VBD|VBN
+  - tag: VBN

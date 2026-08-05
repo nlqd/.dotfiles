@@ -1,0 +1,6 @@
+extends: occurrence
+message: "Paragraph exceeds 6 sentences (found %d) (STE-6.7)."
+level: error
+scope: paragraph
+max: 6
+token: '[.!?]'
