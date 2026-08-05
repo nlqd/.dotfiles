@@ -55,6 +55,30 @@ alias cl='claude'
 alias cr='claude -r'
 alias cls='claude --model sonnet --effort max'
 
+function rm() {
+  emulate -L zsh
+
+  if [[ -t 0 ]]; then
+    local -a targets
+    local arg reply
+    for arg in "$@"; do
+      [[ "$arg" == -* ]] || targets+=("${arg:A}")
+    done
+
+    if (( $#targets )); then
+      print -u2 "rm:"
+      printf '    %s\n' $targets >&2
+      read -r "reply?    confirm? [y/N] "
+      if [[ "$reply" != [yY]* ]]; then
+        print -u2 "    aborted."
+        return 1
+      fi
+    fi
+  fi
+
+  command rm "$@"
+}
+
 # NOTE: completion would be cool and avoid these things completely
 function gdiff() {
   local current

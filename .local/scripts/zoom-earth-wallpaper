@@ -7,7 +7,7 @@
 # then points feh at the result.
 set -euo pipefail
 
-URL='https://zoom.earth/maps/precipitation/#view=21,116,5z/model=icon'
+URL='https://zoom.earth/maps/precipitation/#view=12.5,65,4z/model=icon'
 OUT="$HOME/Downloads/wallpapers/zoom-earth-precipitation.png"
 FEHBG="$HOME/.fehbg"
 WIDTH=3840

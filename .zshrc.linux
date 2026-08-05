@@ -44,7 +44,31 @@ alias lg='lazygit'
 alias dbui='nvim -c "DBUI"'
 alias cr='claude -r'
 
-y() {
+function rm() {
+  emulate -L zsh
+
+  if [[ -t 0 ]]; then
+    local -a targets
+    local arg reply
+    for arg in "$@"; do
+      [[ "$arg" == -* ]] || targets+=("${arg:A}")
+    done
+
+    if (( $#targets )); then
+      print -u2 "rm:"
+      printf '    %s\n' $targets >&2
+      read -r "reply?    confirm? [y/N] "
+      if [[ "$reply" != [yY]* ]]; then
+        print -u2 "    aborted."
+        return 1
+      fi
+    fi
+  fi
+
+  command rm "$@"
+}
+
+function y() {
   local tmp="$(mktemp -t "yazi-cwd.XXXXXX")" cwd
   yazi "$@" --cwd-file="$tmp"
   if cwd="$(command cat -- "$tmp")" && [ -n "$cwd" ] && [ "$cwd" != "$PWD" ]; then
