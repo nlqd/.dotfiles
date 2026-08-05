@@ -4,6 +4,14 @@ set -euo pipefail
 CREDS_FILE="$HOME/.config/router-monitor/creds"
 TELNET_HELPER="$HOME/.local/scripts/.router-telnet.py"
 WATCH_HELPER="$HOME/.local/scripts/.router-watch.py"
+WIFI_EXTRACT_WAN="$HOME/.local/scripts/.router-wifi-extract-wan.js"
+WIFI_EXTRACT_CLIENTS="$HOME/.local/scripts/.router-wifi-extract-clients.js"
+WIFI_NOTABLE_FILTER="$HOME/.local/scripts/.router-wifi-notable.jq"
+CHROME_COOKIES="$HOME/.local/scripts/chrome-cookies-linux"
+RODNEY="$HOME/.local/bin/rodney"
+UNIFI_CONSOLE_ID="D021F9DE36A500000000066AB68C0000000006B77EBB00000000627FFFA6:234758090"
+WIFI_LOG_FILE="$HOME/.cache/router-status/wifi.jsonl"
+MAIN_LOG_FILE="$HOME/.cache/router-status/main.jsonl"
 
 TMPDIR="${XDG_RUNTIME_DIR:-/tmp}/router-monitor-$$"
 mkdir -p "$TMPDIR"
@@ -16,7 +24,7 @@ RST='\033[0m'
 BOLD='\033[1m'
 
 case "${1:-}" in
-    --setup|--teardown) ;;
+    --setup|--teardown|wifi) ;;
     *)
         # shellcheck source=/dev/null
         source "$CREDS_FILE"
@@ -364,6 +372,48 @@ show_probes() {
     } | column -t -s$'\t'
 }
 
+log_main_jsonl() {
+    local r1_line="$1" r2_line="$2" r3_line="$3"
+    mkdir -p "$(dirname "$MAIN_LOG_FILE")"
+
+    local dns1 dns2 dns3 speed1 speed2 speed3 issue_count
+    dns1=$(cut -d$'\t' -f2 "$TMPDIR/dns-1.txt" 2>/dev/null) || dns1="—"
+    dns2=$(cut -d$'\t' -f2 "$TMPDIR/dns-2.txt" 2>/dev/null) || dns2="—"
+    dns3=$(cut -d$'\t' -f2 "$TMPDIR/dns-3.txt" 2>/dev/null) || dns3="—"
+    speed1=$(cut -d$'\t' -f2 "$TMPDIR/speed-1.txt" 2>/dev/null) || speed1="—"
+    speed2=$(cut -d$'\t' -f2 "$TMPDIR/speed-2.txt" 2>/dev/null) || speed2="—"
+    speed3=$(cut -d$'\t' -f2 "$TMPDIR/speed-3.txt" 2>/dev/null) || speed3="—"
+    issue_count=0
+    [[ -s "$ISSUES_FILE" ]] && issue_count=$(wc -l < "$ISSUES_FILE")
+
+    jq -nc \
+        --arg ts "$(date -Iseconds)" \
+        --arg r1 "$r1_line" --arg r2 "$r2_line" --arg r3 "$r3_line" \
+        --arg dns1 "$dns1" --arg dns2 "$dns2" --arg dns3 "$dns3" \
+        --arg speed1 "$speed1" --arg speed2 "$speed2" --arg speed3 "$speed3" \
+        --argjson issues "$issue_count" \
+        '
+        def router_fields:
+          split("\t") as $f |
+          {
+            wan: $f[1],
+            v4: $f[3],
+            v6: $f[4],
+            sessions: ($f[5] | split("/")[0] | tonumber? // null),
+            clients: ($f[6] | tonumber? // null)
+          };
+        def ms_val: if test("^[0-9]+ms$") then (rtrimstr("ms") | tonumber) else null end;
+        def mbps_val: if test(" Mbps$") then (rtrimstr(" Mbps") | tonumber) else null end;
+        {
+          ts: $ts,
+          issues: $issues,
+          r1: (($r1 | router_fields) + {dns_ms: ($dns1 | ms_val), speed_mbps: ($speed1 | mbps_val)}),
+          r2: (($r2 | router_fields) + {dns_ms: ($dns2 | ms_val), speed_mbps: ($speed2 | mbps_val)}),
+          r3: (($r3 | router_fields) + {dns_ms: ($dns3 | ms_val), speed_mbps: ($speed3 | mbps_val)})
+        }
+        ' >> "$MAIN_LOG_FILE" 2>/dev/null || true
+}
+
 # --- setup/teardown for secondary IPs ---
 
 HOST_IF="eno2"
@@ -402,12 +452,140 @@ do_teardown() {
     echo "secondary IPs and routes removed"
 }
 
+# --- wifi (UniFi Site Manager, via a real browser session) ---
+
+log_wifi_jsonl() {
+    mkdir -p "$(dirname "$WIFI_LOG_FILE")"
+    jq -nc \
+        --arg ts "$(date -Iseconds)" \
+        --argjson ok "$1" \
+        --argjson isp_quality "${2:-null}" \
+        --argjson total_wifi "${3:-null}" \
+        --argjson degraded "${4:-null}" \
+        --argjson notable "${5:-null}" \
+        '{ts: $ts, ok: $ok, isp_quality: $isp_quality, total_wifi: $total_wifi, degraded: $degraded, notable: $notable}' \
+        >> "$WIFI_LOG_FILE"
+}
+
+do_wifi() {
+    wifi_start_time=$SECONDS
+    wifi_tmp=""
+    # registered up front so every exit path — including the early checks below —
+    # reports timing and cleans up, not just the ones after setup succeeds
+    trap '[[ -n "$wifi_tmp" ]] && rm -rf "$wifi_tmp"; "$RODNEY" stop > /dev/null 2>&1 || true; printf "%bfinished in %ds%b\n" "$DIM" "$((SECONDS - wifi_start_time))" "$RST"' EXIT
+
+    command -v "$RODNEY" > /dev/null || { echo "rodney not found at $RODNEY" >&2; exit 1; }
+    [[ -x "$CHROME_COOKIES" ]] || { echo "chrome-cookies-linux not found at $CHROME_COOKIES" >&2; exit 1; }
+
+    # isolated rodney profile so this never collides with an ad-hoc `rodney`
+    # session (shared ~/.rodney chrome profile can't be used by two processes at once)
+    export RODNEY_HOME="$HOME/.local/state/router-status-wifi/rodney"
+    mkdir -p "$RODNEY_HOME"
+
+    wifi_tmp=$(mktemp -d)
+    local cookiefile="$wifi_tmp/cookies.txt"
+
+    "$CHROME_COOKIES" ui.com > "$cookiefile"
+    chmod 600 "$cookiefile"
+    [[ -s "$cookiefile" ]] || { echo "no ui.com cookies in Chrome — log into unifi.ui.com in Chrome first" >&2; exit 1; }
+
+    "$RODNEY" start > /dev/null 2>&1 || true
+    # NOTE: rodney's `cookies set` only takes name/value as CLI args, no stdin or
+    # file-based import exists, so the live auth cookie (UBIC_AUTH, ~30d bearer
+    # credential) is briefly visible via ps/procfs to any other local user for
+    # the life of each short-lived call. Accepted risk on a single-user machine;
+    # revisit if this ever runs somewhere that isn't.
+    while IFS=$'\t' read -r domain _flag path secure _expiry name value; do
+        domain="${domain#\#HttpOnly_}"
+        local secure_flag=()
+        [[ "$secure" == "TRUE" ]] && secure_flag=(--secure)
+        "$RODNEY" cookies set "$name" "$value" --domain "$domain" --path "$path" "${secure_flag[@]}" --httponly > /dev/null 2>&1 || true
+    done < "$cookiefile"
+    rm -f "$cookiefile"
+
+    [[ -t 1 ]] && printf "%bloading wifi data...%b\r" "$DIM" "$RST"
+
+    "$RODNEY" open "https://unifi.ui.com/consoles/${UNIFI_CONSOLE_ID}/network/default/dashboard" > /dev/null 2>&1 || true
+    sleep 3
+    "$RODNEY" waitidle > /dev/null 2>&1 || true
+    local wan_json
+    wan_json=$("$RODNEY" js "$(cat "$WIFI_EXTRACT_WAN")" 2>/dev/null) || wan_json='{}'
+    echo "$wan_json" | jq empty 2>/dev/null || wan_json='{}'
+
+    "$RODNEY" open "https://unifi.ui.com/consoles/${UNIFI_CONSOLE_ID}/network/default/clients/active" > /dev/null 2>&1 || true
+    sleep 4
+    "$RODNEY" waitidle > /dev/null 2>&1 || true
+    local clients_json
+    clients_json=$("$RODNEY" js "$(cat "$WIFI_EXTRACT_CLIENTS")" 2>/dev/null) || clients_json='[]'
+    echo "$clients_json" | jq empty 2>/dev/null || clients_json='[]'
+
+    [[ -t 1 ]] && printf "              \r"
+
+    echo ""
+    printf "%bWiFi Status%b  %b%s%b\n" "$BOLD" "$RST" "$DIM" "$(date '+%Y-%m-%d %H:%M:%S')" "$RST"
+    echo ""
+
+    local uptime monthly_usage isp_name
+    uptime=$(echo "$wan_json" | jq -r '.uptime // "—"')
+    monthly_usage=$(echo "$wan_json" | jq -r '.monthlyUsage // "—"')
+    isp_name=$(echo "$wan_json" | jq -r '.ispName // "—"')
+    printf "Console: %bUDM SE - HCMC Tam Dao%b (%s)\n" "$BOLD" "$RST" "$isp_name"
+    printf "Uptime: %s\n" "$uptime"
+    printf "Usage this month: %s\n" "$monthly_usage"
+
+    local isp_quality
+    isp_quality=$(echo "$wan_json" | jq -r '.ispQuality // empty')
+    if [[ -n "$isp_quality" ]] && (( isp_quality < 90 )); then
+        echo ""
+        printf "%b%bISP quality low: %s%%%b\n" "$BOLD" "$YEL" "$isp_quality" "$RST"
+    fi
+
+    local raw_count
+    raw_count=$(echo "$clients_json" | jq -r 'length')
+
+    if (( raw_count == 0 )); then
+        echo ""
+        printf "%b%bextraction failed — got 0 clients back (session/page load issue, not an empty network). try again.%b\n" "$BOLD" "$RED" "$RST"
+        echo ""
+        log_wifi_jsonl false
+        return 0
+    fi
+
+    local notable_json total_count degraded_count shown_count
+    notable_json=$(echo "$clients_json" | jq -f "$WIFI_NOTABLE_FILTER")
+    total_count=$(echo "$notable_json" | jq -r '.total')
+    degraded_count=$(echo "$notable_json" | jq -r '.degraded')
+    shown_count=$(echo "$notable_json" | jq -r '.shown')
+
+    log_wifi_jsonl true "${isp_quality:-null}" "$total_count" "$degraded_count" "$shown_count"
+
+    echo ""
+    printf "%bAccess Points%b\n" "$BOLD" "$RST"
+    echo "$clients_json" | jq -r '[.[] | select(.ap != "" and .ap != "WireGuard")] | group_by(.ap) | map({ap: .[0].ap, clients: length}) | sort_by(-.clients) | .[] | "\(.ap)\t\(.clients)"' \
+        | { printf "AP\tClients\n"; cat; } | column -t -s$'\t'
+
+    echo ""
+    printf "%bClients%b %b(%s wifi, %s not Excellent, showing %s notable)%b\n" "$BOLD" "$RST" "$DIM" "$total_count" "$degraded_count" "$shown_count" "$RST"
+    {
+        printf "Name\tAP\tExp\tTech\tCh\tDL\n"
+        echo "$notable_json" | jq -r '
+            .clients[] |
+            "\(.name[0:22])\t\((.ap // "—")[0:14])\t\(.experience // "—")\t\(
+                (.tech // "—") | gsub("WiFi "; "W") | gsub(", "; " ")
+            )\t\(
+                (.channel // "—") | gsub(" "; " ") | gsub(" \\("; "/") | gsub(" GHz, "; "G/") | gsub(" MHz\\)"; "M")
+            )\t\(.download // "—")"'
+    } | column -t -s$'\t'
+    echo ""
+}
+
 # --- main ---
 
 case "${1:-}" in
     --setup)    do_setup; exit 0 ;;
     --teardown) do_teardown; exit 0 ;;
     --watch)    python3 "$WATCH_HELPER" "${2:-30s}"; exit 0 ;;
+    wifi)       do_wifi; exit 0 ;;
 esac
 
 NO_SPEED=false
@@ -427,7 +605,7 @@ echo ""
 $NO_SPEED || start_speed_bg
 start_dns_bg
 
-printf "%bcollecting...%b\r" "$DIM" "$RST"
+[[ -t 1 ]] && printf "%bcollecting...%b\r" "$DIM" "$RST"
 
 r1=$(collect_draytek "192.168.1.1" ".1 (FPT)" "$R1_USER" "$R1_PASS" 2>/dev/null) \
     || r1=$(printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" ".1 (FPT)" "ERR" "—" "—" "—" "—" "—" "—" "telnet failed")
@@ -436,7 +614,7 @@ r2=$(collect_draytek "192.168.1.2" ".2 (VNPT)" "$R2_USER" "$R2_PASS" 2>/dev/null
 r3=$(collect_ont 2>/dev/null) \
     || r3=$(printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" ".3 (Viettel)" "ERR" "—" "—" "—" "—" "—" "—" "curl failed")
 
-printf "              \r"
+[[ -t 1 ]] && printf "              \r"
 
 # WAN flap detection using raw uptimes saved by collect_draytek
 check_wan_flap ".1" "$(cat "$TMPDIR/uptime-1" 2>/dev/null || echo "—")" 2>/dev/null || true
@@ -458,6 +636,8 @@ fi
 } | column -t -s$'\t'
 
 show_probes || true
+
+log_main_jsonl "$r1" "$r2" "$r3"
 
 if $VERBOSE; then
     show_flap_log || true
