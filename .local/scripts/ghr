@@ -8,6 +8,52 @@ API="https://api.github.com/repos"
 
 mkdir -p "$CACHE_DIR" "$CONFIG_DIR" "$BIN_DIR"
 
+# Anonymous GitHub API is 60 req/hour per IP and a fan-out spends one per tool,
+# so a full update can run dry mid-flight. A token raises that to 5000.
+export GHR_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+GHR_TOKEN_TRIED=0
+
+# gh is a fallback, not a dependency: it is only consulted once the anonymous
+# quota is provably too small for the run about to happen.
+resolve_token() {
+  [ -n "$GHR_TOKEN" ] && return 0
+  [ "$GHR_TOKEN_TRIED" = 1 ] && return 1
+  GHR_TOKEN_TRIED=1
+  command -v gh >/dev/null 2>&1 || return 1
+  GHR_TOKEN=$(gh auth token 2>/dev/null)
+  [ -n "$GHR_TOKEN" ]
+}
+
+# Asset downloads deliberately stay anonymous: browser_download_url redirects to
+# a CDN host that rejects a forwarded Authorization header.
+gh_api() {
+  if [ -n "$GHR_TOKEN" ]; then
+    curl -sf -H "Authorization: Bearer $GHR_TOKEN" "$API/$1"
+  else
+    curl -sf "$API/$1"
+  fi
+}
+export -f gh_api
+export API
+
+# Checked before a fan-out rather than discovered halfway through it. The
+# rate_limit endpoint does not itself count against the quota.
+ensure_quota() {
+  local needed="$1"
+  local core remaining reset
+  core=$(curl -sf "https://api.github.com/rate_limit") || return 0
+  remaining=$(echo "$core" | jq -r '.resources.core.remaining')
+  [ "$remaining" -ge "$needed" ] && return 0
+
+  reset=$(echo "$core" | jq -r '.resources.core.reset')
+  if resolve_token; then
+    echo "GitHub quota is $remaining, this run needs up to $needed. Using gh token."
+  else
+    echo "GitHub quota is $remaining, this run needs up to $needed." >&2
+    echo "Resets at $(date -d "@$reset" '+%H:%M'). Set GITHUB_TOKEN, or install gh, for 5000/hour." >&2
+  fi
+}
+
 PROFILE_FILE="$CONFIG_DIR/profile"
 if [ -f "$PROFILE_FILE" ]; then
   GHR_PROFILE=$(cat "$PROFILE_FILE")
@@ -44,11 +90,207 @@ manifest_upsert() {
     | manifest_write
 }
 
-fuzzy_match_asset() {
+# Platform vocabularies, as "canonical:synonym synonym ...". Upstreams rename
+# x86_64 to amd64 between releases, so membership matters, not spelling.
+# Bare "x86" is deliberately absent: it would match inside "x86_64".
+ARCH_CLASSES=(
+  "x86_64:x86_64 x86-64 amd64 x64"
+  "aarch64:aarch64 arm64 armv8"
+  "arm:arm armv7 armv6 armhf"
+  "i686:i686 i386"
+)
+OS_CLASSES=(
+  "linux:linux"
+  "darwin:darwin macos apple osx"
+  "windows:windows"
+  "freebsd:freebsd"
+)
+LIBC_CLASSES=(
+  "musl:musl"
+  "gnu:gnu glibc"
+)
+
+# Whole-token match, so "arm" does not match "arm64" and "gnu" does not match
+# "gnutls".
+has_token() {
+  printf '%s' "$1" | grep -qiE "(^|[^a-z0-9])$2([^a-z0-9]|\$)"
+}
+
+# Print the canonical class a string declares, or nothing if it declares none.
+classify() {
+  local name="$1"
+  shift
+  local entry member
+  for entry in "$@"; do
+    for member in ${entry#*:}; do
+      if has_token "$name" "$member"; then
+        echo "${entry%%:*}"
+        return 0
+      fi
+    done
+  done
+}
+
+# Re-derived every run and never written to the manifest. A stored copy can
+# drift out of sync with the machine, which is how a wrong-arch binary survives.
+HOST_ARCH=$(classify "$(uname -m)" "${ARCH_CLASSES[@]}")
+HOST_OS=$(classify "$(uname -s)" "${OS_CLASSES[@]}")
+
+# Reject only assets that positively name a different platform. Naming nothing
+# recognizable is not disqualifying: upstreams invent spellings constantly
+# ("linux64" tokenizes as neither), and verify_arch is the real backstop.
+host_compatible() {
+  local declared
+  declared=$(classify "$1" "${ARCH_CLASSES[@]}")
+  [ -n "$declared" ] && [ -n "$HOST_ARCH" ] && [ "$declared" != "$HOST_ARCH" ] && return 1
+  declared=$(classify "$1" "${OS_CLASSES[@]}")
+  [ -n "$declared" ] && [ -n "$HOST_OS" ] && [ "$declared" != "$HOST_OS" ] && return 1
+  return 0
+}
+
+# True unless both strings declare a class from this vocabulary and disagree.
+# Silence on either side is fine; upstreams add and drop tokens between releases.
+agrees_on() {
+  local stored="$1" candidate="$2"
+  shift 2
+  local s c
+  s=$(classify "$stored" "$@")
+  c=$(classify "$candidate" "$@")
+  [ -z "$s" ] || [ -z "$c" ] || [ "$s" = "$c" ]
+}
+
+# Checksums, signatures and provenance sit beside the real assets and carry the
+# same platform tokens, so they pass every filter below unless dropped here.
+is_sidecar() {
+  case "$1" in
+  *.sha256 | *.sha256sum | *.sha512 | *.sha1 | *.md5) return 0 ;;
+  *.asc | *.sig | *.pem | *.cert | *.sbom) return 0 ;;
+  *.json | *.jsonl | *.txt) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+
+# Query for the similarity ranking. Version tokens come out because they
+# changed; platform tokens come out because host_compatible already guaranteed
+# them, and a stale arch token from a poisoned record can only prevent a match.
+ranking_query() {
+  local entry member pat=""
+  for entry in "${ARCH_CLASSES[@]}" "${OS_CLASSES[@]}"; do
+    for member in ${entry#*:}; do
+      pat="$pat|$member"
+    done
+  done
+  # Looped rather than /g: each match eats the separator on both sides, so
+  # adjacent tokens ("aarch64-apple-darwin") need a rescan to all come out.
+  echo "$1" | sed -E 's/v?[0-9]+(\.[0-9]+)+//g' |
+    sed -E ":a;s/(^|[^a-zA-Z0-9])(${pat#|})([^a-zA-Z0-9]|\$)/\1\3/I;ta"
+}
+
+# Rewrite the stored name for a new version. Tags and asset names disagree about
+# the "v" prefix, so try both spellings.
+version_substitutions() {
+  local stored="$1" old="$2" new="$3"
+  [ -z "$old" ] && return
+  echo "${stored//$old/$new}"
+  echo "${stored//${old#v}/${new#v}}"
+}
+
+# Pick the asset in a new release corresponding to the one the user installed.
+# Descends a confidence ladder and declines rather than guessing at the bottom,
+# because a similarity ranking always returns something whether or not it is
+# right. Prints the chosen name; returns 1 for "no confident answer".
+select_asset() {
+  local stored="$1" available="$2" old_ver="$3" new_ver="$4"
+
+  # The host is the one input that cannot have been poisoned by an earlier bad
+  # match, so it gates every rung below, the exact-name rung included. Without
+  # that, one wrong pick is written back to the manifest and repeats forever.
+  local viable
+  viable=$(echo "$available" | while IFS= read -r a; do
+    [ -n "$a" ] && ! is_sidecar "$a" && host_compatible "$a" && echo "$a"
+  done)
+  [ -z "$viable" ] && return 1
+
+  if ! host_compatible "$stored"; then
+    echo "  note: recorded asset $stored is not for this host, re-selecting" >&2
+  fi
+
+  # The name did not change.
+  if echo "$viable" | grep -qxF "$stored"; then
+    echo "$stored"
+    return 0
+  fi
+
+  # The name changed only by version. Nothing is parsed, so this is correct by
+  # construction for any naming scheme whose template held still.
+  local guess
+  while IFS= read -r guess; do
+    [ -z "$guess" ] && continue
+    if echo "$viable" | grep -qxF "$guess"; then
+      echo "$guess"
+      return 0
+    fi
+  done < <(version_substitutions "$stored" "$old_ver" "$new_ver")
+
+  # Only one asset can run here, so there is nothing left to disambiguate. This
+  # is what survives an upstream renaming its assets wholesale.
+  if [ "$(echo "$viable" | wc -l)" -eq 1 ]; then
+    echo "$viable"
+    return 0
+  fi
+
+  # Several will run. The stored name says which flavour was wanted.
+  local narrowed
+  narrowed=$(echo "$viable" | while IFS= read -r a; do
+    agrees_on "$stored" "$a" "${LIBC_CLASSES[@]}" && echo "$a"
+  done)
+  [ -z "$narrowed" ] && narrowed="$viable"
+  if [ "$(echo "$narrowed" | wc -l)" -eq 1 ]; then
+    echo "$narrowed"
+    return 0
+  fi
+
+  # Still ambiguous, so fall back to ranking by similarity to the stored name.
+  # Everything left runs here, so this only chooses a flavour, never an arch.
+  local query candidate
+  query=$(ranking_query "$stored")
+  while IFS= read -r candidate; do
+    if [ -n "$candidate" ]; then
+      echo "$candidate"
+      return 0
+    fi
+  done < <(echo "$narrowed" | fzf --filter="$query" --no-sort)
+
+  return 1
+}
+
+# Whatever the filename claimed, check what we actually got. This is the only
+# rung that survives an upstream renaming scheme wholesale.
+verify_arch() {
+  local path="$1"
+  command -v file >/dev/null 2>&1 || return 0
+
+  # -L so a symlink is judged by its target, not reported as "symbolic link to".
+  local desc
+  desc=$(file -bL "$path")
+  case "$desc" in
+  *ELF* | *Mach-O*) ;;
+  *) return 0 ;;
+  esac
+
+  local declared
+  declared=$(classify "$desc" "${ARCH_CLASSES[@]}")
+  [ -z "$declared" ] || [ -z "$HOST_ARCH" ] && return 0
+  [ "$declared" = "$HOST_ARCH" ]
+}
+
+# Matches a binary's path inside an extracted archive, where names carry no
+# platform tokens (an archive is already platform-specific). Asset selection
+# uses select_asset instead.
+fuzzy_match_name() {
   local stored="$1"
   local available="$2"
 
-  # Exact match first
   local exact
   exact=$(echo "$available" | grep -xF "$stored")
   if [ -n "$exact" ]; then
@@ -56,18 +298,13 @@ fuzzy_match_asset() {
     return 0
   fi
 
-  # Strip version numbers to create a looser fzf query
   local query
-  query=$(echo "$stored" | sed -E 's/v?[0-9]+\.[0-9]+(\.[0-9]+)?([-_.][a-zA-Z0-9.]+)*//g')
-
+  query=$(echo "$stored" | sed -E 's/v?[0-9]+(\.[0-9]+)+//g')
   local match
   match=$(echo "$available" | fzf --filter="$query" --no-sort | head -1)
 
-  if [ -n "$match" ]; then
-    echo "$match"
-    return 0
-  fi
-  return 1
+  [ -n "$match" ] || return 1
+  echo "$match"
 }
 
 list_extracted_files() {
@@ -83,7 +320,7 @@ fuzzy_match_binary() {
   available=$(list_extracted_files "$dir" "$archive_name" | while read -r f; do
     [ -x "$dir/$f" ] && echo "$f"
   done)
-  fuzzy_match_asset "$stored" "$available"
+  fuzzy_match_name "$stored" "$available"
 }
 
 extract_asset() {
@@ -113,7 +350,7 @@ prompt_symlink() {
 
   # Caller captures stdout via $(...); route readline I/O through /dev/tty so
   # the editable prompt is actually visible.
-  read -r -e -i "$default" -p "Symlink: " symlink_path </dev/tty 2>/dev/tty
+  read -r -e -i "$default" -p "Symlink for $binary_path: " symlink_path </dev/tty 2>/dev/tty
   echo "${symlink_path:-$default}"
 }
 
@@ -189,19 +426,48 @@ pick_executable() {
       fi
       idx=$((idx + 1))
     done
-    printf "\nSelect executable [1]: "
+    printf "\nSelect executables [1] (e.g. 1 3, 2-4, all): "
   } >/dev/tty
 
-  local n
-  read -r n </dev/tty
-  n="${n:-1}"
+  local input
+  read -r input </dev/tty
+  input="${input:-1}"
 
-  if ! [[ "$n" =~ ^[0-9]+$ ]] || [ "$n" -lt 1 ] || [ "$n" -gt "${#all[@]}" ]; then
-    echo "Invalid selection: $n" >&2
+  local indices=() i
+  if [ "$input" = "a" ] || [ "$input" = "all" ]; then
+    for ((i = 1; i <= ${#all[@]}; i++)); do indices+=("$i"); done
+  else
+    local tok
+    for tok in ${input//,/ }; do
+      if [[ "$tok" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+        for ((i = BASH_REMATCH[1]; i <= BASH_REMATCH[2]; i++)); do indices+=("$i"); done
+      elif [[ "$tok" =~ ^[0-9]+$ ]]; then
+        indices+=("$tok")
+      else
+        echo "Invalid selection: $tok" >&2
+        return 1
+      fi
+    done
+  fi
+
+  local picked=() seen=" "
+  local n
+  for n in "${indices[@]}"; do
+    if [ "$n" -lt 1 ] || [ "$n" -gt "${#all[@]}" ]; then
+      echo "Invalid selection: $n" >&2
+      return 1
+    fi
+    case "$seen" in *" $n "*) continue ;; esac
+    seen+="$n "
+    picked+=("${all[$((n - 1))]}")
+  done
+
+  if [ "${#picked[@]}" -eq 0 ]; then
+    echo "Nothing selected" >&2
     return 1
   fi
 
-  echo "${all[$((n - 1))]}"
+  printf '%s\n' "${picked[@]}"
 }
 
 install_repo() {
@@ -210,8 +476,10 @@ install_repo() {
   dir=$(get_dir "$repo")
   mkdir -p "$dir"
 
+  ensure_quota 1
+
   local release
-  release=$(curl -sf "$API/$repo/releases/latest") || {
+  release=$(gh_api "$repo/releases/latest") || {
     echo "No releases for $repo" >&2
     return 1
   }
@@ -248,40 +516,48 @@ install_repo() {
   curl -L --progress-bar -o "$dir/$name" "$url"
   write_cache_meta "$dir" "$repo" "$ver"
 
-  local binary
+  local binaries=()
   case "$name" in
   *.tar.gz | *.tgz | *.zip)
     echo "Extracting..."
     extract_asset "$dir" "$name"
-    binary=$(pick_executable "$dir" "$name") || return 1
+    local picked
+    picked=$(pick_executable "$dir" "$name") || return 1
+    mapfile -t binaries <<<"$picked"
     ;;
   *.gz)
     echo "Extracting..."
     extract_asset "$dir" "$name"
-    binary="${name%.gz}"
+    binaries=("${name%.gz}")
     ;;
   *)
     extract_asset "$dir" "$name"
-    binary="$name"
+    binaries=("$name")
     ;;
   esac
 
-  # Archives don't always carry the +x bit (and unzip won't add it), so the
-  # picked binary can land non-executable. restore_single chmods; match it here.
-  chmod +x "$dir/$binary"
+  local links_json="{}"
+  local binary symlink_path
+  for binary in "${binaries[@]}"; do
+    # Archives don't always carry the +x bit (and unzip won't add it), so a
+    # picked binary can land non-executable. restore_single chmods; match it here.
+    chmod +x "$dir/$binary"
 
-  local symlink_path
-  symlink_path=$(prompt_symlink "$binary")
-  if ! safe_ln "$dir/$binary" "$symlink_path"; then
-    echo "Failed to create symlink: $symlink_path" >&2
-    return 1
-  fi
+    # Advisory only: an explicit pick can legitimately be cross-arch, unlike the
+    # unattended update path where the same mismatch is always a bug.
+    verify_arch "$dir/$binary" || echo "warning: $binary is not $HOST_ARCH" >&2
 
-  local links_json
-  links_json=$(jq -n --arg src "$binary" --arg dst "$symlink_path" '{($src): $dst}')
+    symlink_path=$(prompt_symlink "$binary")
+    if ! safe_ln "$dir/$binary" "$symlink_path"; then
+      echo "Failed to create symlink: $symlink_path" >&2
+      return 1
+    fi
+    links_json=$(echo "$links_json" | jq -c --arg s "$binary" --arg d "$symlink_path" '. + {($s): $d}')
+  done
+
   manifest_upsert "$repo" "$name" "$ver" "$links_json"
 
-  echo "Installed $repo ($ver) -> $symlink_path"
+  echo "Installed $repo ($ver) -> $(echo "$links_json" | jq -r 'values | join(", ")')"
 }
 
 all_links_valid() {
@@ -289,6 +565,9 @@ all_links_valid() {
   local dst
   while IFS= read -r dst; do
     [ -e "$dst" ] || return 1
+    # "Up to date" has to mean runnable, not merely present. Without this a
+    # wrong-arch binary is reported healthy forever and never re-selected.
+    verify_arch "$dst" || return 1
   done < <(echo "$links_json" | jq -r '.[]')
   return 0
 }
@@ -304,8 +583,8 @@ restore_single() {
   mkdir -p "$dir"
 
   local release
-  release=$(curl -sf "$API/$repo/releases/latest") || {
-    echo "$prefix $repo ... FAIL (no releases)" >&2
+  release=$(gh_api "$repo/releases/latest") || {
+    echo "$prefix $repo ... FAIL (no releases or quota exhausted)" >&2
     return 1
   }
 
@@ -324,28 +603,51 @@ restore_single() {
   available=$(echo "$release" | jq -r '.assets[].name')
 
   local matched_asset
-  matched_asset=$(fuzzy_match_asset "$asset" "$available") || {
-    echo "$prefix $repo ... FAIL (asset ambiguous, run ghr install manually)" >&2
+  matched_asset=$(select_asset "$asset" "$available" "$old_ver" "$ver") || {
+    echo "$prefix $repo ... FAIL (no confident asset match, run ghr install manually)" >&2
     return 1
   }
 
   local url
   url=$(echo "$release" | jq -r --arg name "$matched_asset" '.assets[] | select(.name == $name) | .browser_download_url')
 
-  # Download to temp then rename, so in-use executables (ETXTBSY) and partial
-  # downloads don't clobber a working binary.
-  if ! curl -sfL -o "$dir/.dl.tmp" "$url"; then
-    rm -f "$dir/.dl.tmp"
+  # Stage the whole update before touching the cache dir, so a release that
+  # fails verification leaves the working binary and its symlinks alone.
+  local stage="$dir/.stage"
+  rm -rf "$stage"
+  mkdir -p "$stage"
+
+  if ! curl -sfL -o "$stage/$matched_asset" "$url"; then
+    rm -rf "$stage"
     echo "$prefix $repo ... FAIL (download error)" >&2
     return 1
   fi
-  mv "$dir/.dl.tmp" "$dir/$matched_asset"
+  extract_asset "$stage" "$matched_asset"
 
+  local src dst actual_src
+  while IFS=$'\t' read -r src dst; do
+    actual_src=$(fuzzy_match_binary "$src" "$stage" "$matched_asset") || actual_src="$src"
+    if [ ! -e "$stage/$actual_src" ]; then
+      rm -rf "$stage"
+      echo "$prefix $repo ... FAIL ($src missing from $matched_asset, keeping $old_ver)" >&2
+      return 1
+    fi
+    chmod +x "$stage/$actual_src" 2>/dev/null
+    if ! verify_arch "$stage/$actual_src"; then
+      rm -rf "$stage"
+      echo "$prefix $repo ... FAIL ($matched_asset is not $HOST_ARCH, keeping $old_ver)" >&2
+      return 1
+    fi
+  done < <(echo "$links_json" | jq -r 'to_entries[] | "\(.key)\t\(.value)"')
+
+  # Verified. Rename rather than copy, so an in-use executable (ETXTBSY) and a
+  # partial download can't clobber a good binary.
+  mv "$stage/$matched_asset" "$dir/$matched_asset"
+  rm -rf "$stage"
   write_cache_meta "$dir" "$repo" "$ver"
   extract_asset "$dir" "$matched_asset"
 
   local new_links_json="{}"
-  local src dst actual_src
   while IFS=$'\t' read -r src dst; do
     actual_src=$(fuzzy_match_binary "$src" "$dir" "$matched_asset") || actual_src="$src"
     chmod +x "$dir/$actual_src"
@@ -384,6 +686,9 @@ restore_all() {
     return
   }
 
+  # Worst case is one request per tool in phase 1 plus one more per outdated tool.
+  ensure_quota $((total * 2))
+
   [ -z "$quiet" ] && echo "Restoring $total tools from manifest..." && echo ""
 
   local tmpdir
@@ -394,7 +699,7 @@ restore_all() {
   while [ "$i" -lt "$total" ]; do
     {
       read -r repo links_json < <(echo "$manifest" | jq -r ".[$i] | [.repo, (.links | tojson)] | @tsv")
-      remote_ver=$(curl -sf "$API/$repo/releases/latest" | jq -r '.tag_name' 2>/dev/null)
+      remote_ver=$(gh_api "$repo/releases/latest" | jq -r '.tag_name' 2>/dev/null)
       if [ -z "$remote_ver" ] || [ "$remote_ver" = "null" ]; then
         echo "fail" >"$tmpdir/check.$i"
       else
@@ -505,6 +810,8 @@ update_repo() {
     return 1
   }
 
+  ensure_quota 1
+
   local asset links_json
   asset=$(echo "$entry" | jq -r '.asset')
   links_json=$(echo "$entry" | jq -c '.links')
@@ -556,6 +863,11 @@ list_all() {
   local symlink_map=""
   [ -f "$MANIFEST" ] && symlink_map=$(jq -r '.[] | "\(.repo)\t\(.links | values | join(", "))"' "$MANIFEST")
 
+  # Every cached tool costs up to three requests, thanks to the retry loop below.
+  local cached
+  cached=$(find "$CACHE_DIR" -maxdepth 2 -name .repo -type f | wc -l)
+  ensure_quota $((cached * 3))
+
   # shellcheck disable=SC2016
   (
     printf '%s\n' "$CACHE_DIR"/* | xargs -P3 -I{} bash -c '
@@ -566,7 +878,7 @@ list_all() {
       local_ver=$(cat "$dir/.version")
       remote_ver=""
       for attempt in 1 2 3; do
-        remote_ver=$(curl -sf "'"$API"'/$repo/releases/latest" | jq -r ".tag_name")
+        remote_ver=$(gh_api "$repo/releases/latest" | jq -r ".tag_name")
         [ -n "$remote_ver" ] && [ "$remote_ver" != "null" ] && break
         [ "$attempt" -lt 3 ] && sleep $((attempt * 2))
       done
