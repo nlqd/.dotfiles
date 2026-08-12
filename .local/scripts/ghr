@@ -170,6 +170,49 @@ is_sidecar() {
   esac
 }
 
+# extract_asset unpacks tarballs, zips and gzips, and marks anything else
+# executable. That last case is right for an AppImage and wrong for a distro
+# package, which needs a package manager ghr does not drive.
+is_package() {
+  case "$1" in
+  *.deb | *.rpm | *.apk | *.pkg | *.msi | *.dmg) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+
+# How installable an asset is on this host, best first. Used to order the
+# install menu so the default lands on something that runs and unpacks.
+asset_rank() {
+  is_sidecar "$1" && {
+    echo 4
+    return
+  }
+  host_compatible "$1" || {
+    echo 3
+    return
+  }
+  is_package "$1" && {
+    echo 2
+    return
+  }
+  echo 1
+}
+
+# Renders the numbered install menu from ranked "rank\tname\turl" lines.
+render_asset_menu() {
+  awk -F'\t' '
+    { rank[NR] = $1; name[NR] = $2; if (length($2) > w) w = length($2) }
+    END {
+      for (i = 1; i <= NR; i++) {
+        note = rank[i] == "2" ? "(needs a package manager)" :
+               rank[i] == "3" ? "(other platform)" :
+               rank[i] == "4" ? "(checksum or signature)" : ""
+        if (note == "") printf "  %2d  %s\n", i, name[i]
+        else printf "  %2d  %-*s   %s\n", i, w, name[i], note
+      }
+    }'
+}
+
 # Query for the similarity ranking. Version tokens come out because they
 # changed; platform tokens come out because host_compatible already guaranteed
 # them, and a stale arch token from a poisoned record can only prevent a match.
@@ -496,9 +539,22 @@ install_repo() {
     return 1
   }
 
+  # Order by how installable each asset is here, so [1] is a real default rather
+  # than whatever the release happens to list first. A stable sort keeps
+  # upstream's order inside each tier. Nothing is hidden: a deliberate
+  # cross-platform pick is still one number away.
+  assets=$(while IFS=$'\t' read -r name url; do
+    printf '%s\t%s\t%s\n' "$(asset_rank "$name")" "$name" "$url"
+  done <<<"$assets" | sort -s -t$'\t' -k1,1n)
+
   local asset_count
   asset_count=$(echo "$assets" | wc -l)
-  echo "$assets" | cut -f1 | nl
+
+  echo "$assets" | render_asset_menu
+
+  [ "$(echo "$assets" | head -1 | cut -f1)" != "1" ] &&
+    echo "note: nothing here both runs on this host and unpacks with ghr" >&2
+
   printf "Select [1]: "
   read -r n
   n="${n:-1}"
@@ -509,8 +565,8 @@ install_repo() {
   fi
 
   local url name
-  url=$(echo "$assets" | sed -n "${n}p" | cut -f2)
-  name=$(echo "$assets" | sed -n "${n}p" | cut -f1)
+  url=$(echo "$assets" | sed -n "${n}p" | cut -f3)
+  name=$(echo "$assets" | sed -n "${n}p" | cut -f2)
 
   echo "Downloading $name..."
   curl -L --progress-bar -o "$dir/$name" "$url"
