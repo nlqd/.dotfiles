@@ -106,12 +106,16 @@ paginate() {
   jq -cn --argjson items "$acc" '{items: $items}'
 }
 
-# Resolve a human story_ref / short_ref to a numeric story_id (digits pass through).
+# Resolve a human story_ref to a numeric story_id (digits pass through). Goes
+# through search, not a stories list page: the list caps out and silently misses
+# any ref past the cap, while search indexes the whole project. Search is
+# full-text, so the exact-ref match is re-applied here on the results.
 resolve_story() {
   local pid="$1" ref="$2"
   [[ $ref =~ ^[0-9]+$ ]] && { echo "$ref"; return; }
-  api GET "/projects/${pid}/stories?fields=story_id,story_ref,short_ref&limit=200" \
-    | jq -r --arg r "$ref" '.items[] | select((.story_ref|ascii_downcase)==($r|ascii_downcase) or (.short_ref|ascii_downcase)==($r|ascii_downcase)) | .story_id' \
+  local q; q=$(jq -rn --arg v "$ref" '$v|@uri')
+  api GET "/projects/${pid}/search?q=${q}&limit=25" \
+    | jq -r --arg r "$ref" '.results[]? | select((.story_ref | ascii_downcase) == ($r | ascii_downcase)) | .story_id' \
     | head -1
 }
 
@@ -126,6 +130,11 @@ resolve_story() {
 #:[values list_scale_values] GET /effort_scales/{scale_id}/values
 #:[activity my_activity] GET /me/activity
 #:[activity my_activity] query: event_type limit before
+#:[api_keys list_user_keys] GET /me/api_keys
+#:[api_keys create_user_key] POST /me/api_keys
+#:[api_keys create_user_key] body: name*
+#:[api_keys delete_user_key] DELETE /me/api_keys/{key_id}
+#:[deletion-impact deletion_impact] GET /me/deletion-impact
 #:[mentions list_my_mentions] GET /me/mentions
 #:[mentions list_my_mentions] query: limit cursor since_id unacked
 #:[ack ack_mention] POST /me/mentions/{mention_id}/ack
@@ -141,10 +150,24 @@ resolve_story() {
 #:[stories my_stories] GET /me/stories
 #:[stories my_stories] query: role state cursor limit
 #:[meta get] GET /meta
+#:[priority_scales list_priority_scales] GET /priority_scales
+#:[values list_priority_values] GET /priority_scales/{scale_id}/values
+#:[project list] GET /projects
+#:[project list] query: cursor limit fields organization_id
+#:[project create] POST /projects
+#:[project create] body: description initial_velocity iteration_length_weeks iteration_start_day manual_velocity name* organization_id velocity_strategy
 #:[project get] GET /projects/{project_id}
 #:[project update] PUT /projects/{project_id}
-#:[project update] body: agent_key_creator_roles[] auto_plan description effort_scale_id enable_tasks initial_velocity iteration_length_weeks iteration_start_day manual_velocity name points_for_bugs_chores public_access velocity_done_state velocity_strategy
+#:[project update] body: agent_key_creator_roles[] auto_plan description effort_scale_id enable_tasks initial_velocity iteration_length_weeks iteration_start_day manual_velocity name points_for_bugs_chores public_access slack_notify_prefs slack_webhook_url velocity_done_state velocity_strategy
 #:[addable-members list_addable_members] GET /projects/{project_id}/addable-members
+#:[agent_keys list_agent_keys] GET /projects/{project_id}/agent_keys
+#:[agent_keys create_agent_key] POST /projects/{project_id}/agent_keys
+#:[agent_keys create_agent_key] body: name* role
+#:[onboarding agent_onboarding] GET /projects/{project_id}/agent_keys/onboarding
+#:[onboarding agent_onboarding] query: vendor
+#:[agent_keys update_agent_key] PUT /projects/{project_id}/agent_keys/{key_id}
+#:[agent_keys update_agent_key] body: hints_enabled name role
+#:[agent_keys delete_agent_key] DELETE /projects/{project_id}/agent_keys/{key_id}
 #:[audit-log project_audit_log] GET /projects/{project_id}/audit-log
 #:[epics list] GET /projects/{project_id}/epics
 #:[epics create] POST /projects/{project_id}/epics
@@ -158,6 +181,7 @@ resolve_story() {
 #:[json upload_epic_json] body: content_type* file_base64* file_name*
 #:[attachments delete_epic] DELETE /projects/{project_id}/epics/{epic_id}/attachments/{attachment_id}
 #:[comments list_comments] GET /projects/{project_id}/epics/{epic_id}/comments
+#:[comments list_comments] query: cursor limit order
 #:[comments create_comment] POST /projects/{project_id}/epics/{epic_id}/comments
 #:[comments create_comment] body: comment_emoji comment_text* mentioned_agent_ids[] mentioned_member_ids[]
 #:[comments update_comment] PUT /projects/{project_id}/epics/{epic_id}/comments/{comment_id}
@@ -177,8 +201,10 @@ resolve_story() {
 #:[events list] query: since_id since types cursor limit
 #:[formats list_formats] GET /projects/{project_id}/export/formats
 #:[export export_format] GET /projects/{project_id}/export/{format}
+#:[export export_format] query: page_size
 #:[json import_json] POST /projects/{project_id}/import/json
-#:[json import_json] body: dry_run file_base64 file_name include_milestones include_pull_requests include_releases owner repo source* token
+#:[json import_json] body: dry_run file_base64 file_name include_dependencies include_milestones include_pull_requests include_releases owner repo source* token
+#:[imports get_import_job] GET /projects/{project_id}/imports/{import_id}
 #:[iterations list] GET /projects/{project_id}/iterations
 #:[iterations create] POST /projects/{project_id}/iterations
 #:[iterations create] body: end* start*
@@ -197,6 +223,7 @@ resolve_story() {
 #:[label_archive archive] POST /projects/{project_id}/labels/{label_id}/archive
 #:[add-existing add_existing_org_member] POST /projects/{project_id}/members/add-existing
 #:[add-existing add_existing_org_member] body: member_id* role
+#:[join self_join] POST /projects/{project_id}/members/join
 #:[memberships list] GET /projects/{project_id}/memberships
 #:[memberships create] POST /projects/{project_id}/memberships
 #:[memberships create] body: email person_id role
@@ -210,15 +237,17 @@ resolve_story() {
 #:[preferences update_preferences] PUT /projects/{project_id}/preferences
 #:[preferences update_preferences] body: display_density panel_config*
 #:[search search] GET /projects/{project_id}/search
+#:[showcase_claim claim_showcase_project] POST /projects/{project_id}/showcase_claim
+#:[showcase_claim_eligibility claim_eligibility] GET /projects/{project_id}/showcase_claim_eligibility
 #:[stories list] GET /projects/{project_id}/stories
-#:[stories list] query: state label story_type cursor limit fields include_archived
+#:[stories list] query: state label story_type cursor limit offset fields include_archived import_source import_external_id
 #:[stories create] POST /projects/{project_id}/stories
-#:[stories create] body: current_state description estimate icebox labels[] move_to name* owners[] priority_id story_type
+#:[stories create] body: completed_at created_at current_state description estimate icebox import_external_id import_source labels[] move_to name* owners[] priority_id requestor started_at story_type
 #:[stories bulk_transition] POST /projects/{project_id}/stories/bulk_transition
 #:[stories bulk_transition] body: reason story_ids[]* to*
 #:[stories get] GET /projects/{project_id}/stories/{story_id}
 #:[stories update] PUT /projects/{project_id}/stories/{story_id}
-#:[stories update] body: current_state description estimate force_state_change icebox labels[] move_to name owners[] position priority_id reorder story_type
+#:[stories update] body: current_state description estimate expected_updated_at force_state_change icebox labels[] move_to name owners[] position priority_id reorder story_type
 #:[stories delete] DELETE /projects/{project_id}/stories/{story_id}
 #:[story_archive archive] POST /projects/{project_id}/stories/{story_id}/archive
 #:[attachments list] GET /projects/{project_id}/stories/{story_id}/attachments
@@ -233,9 +262,9 @@ resolve_story() {
 #:[blockers update] body: blocker_desc resolved
 #:[blockers delete] DELETE /projects/{project_id}/stories/{story_id}/blockers/{blocker_id}
 #:[comments list] GET /projects/{project_id}/stories/{story_id}/comments
-#:[comments list] query: cursor limit
+#:[comments list] query: cursor limit order
 #:[comments create] POST /projects/{project_id}/stories/{story_id}/comments
-#:[comments create] body: comment_emoji comment_text mentioned_agent_ids[] mentioned_member_ids[] text
+#:[comments create] body: author comment_emoji comment_text created_at mentioned_agent_ids[] mentioned_member_ids[] text
 #:[comments get] GET /projects/{project_id}/stories/{story_id}/comments/{comment_id}
 #:[comments update] PUT /projects/{project_id}/stories/{story_id}/comments/{comment_id}
 #:[comments update] body: comment_emoji comment_text mentioned_agent_ids[] mentioned_member_ids[] text
@@ -299,9 +328,12 @@ build_body() {
 }
 
 # Pretty renderers keyed by "entity action"; default dumps JSON for piping.
+# estimate is an effort-scale object ({label,value,order,allow_points}) once a
+# story is estimated, and null otherwise; older scales sent a bare scalar.
 story_line() {
   jq -r '(.items? // .) | .[]? |
-    "[\(.story_id)]\t\(.story_ref)\t\(.current_state)\t\(.story_type[0:4])\t\(.estimate // "-")\t" +
+    "[\(.story_id)]\t\(.story_ref)\t\(.current_state)\t\(.story_type[0:4])\t" +
+    "\((.estimate | if type == "object" then (.label // .value) else . end) // "-")\t" +
     "\((.owners // []) | map(.actor.initials // .actor.name) | join(",") | if .=="" then "-" else . end)\t" +
     "\(.title)" +
     (if (.blocker_count // 0) > 0 then "  blocked:\(.blocker_count)" else "" end) +
@@ -309,9 +341,9 @@ story_line() {
 }
 render_story_detail() {
   jq -r '
-    "Ref:        \(.story_ref)  (id \(.story_id), short \(.short_ref))",
+    "Ref:        \(.story_ref)  (id \(.story_id), link \(.short_link_code // "-"))",
     "Title:      \(.title)",
-    "Type:       \(.story_type)   State: \(.current_state)   Estimate: \(.estimate // "-")",
+    "Type:       \(.story_type)   State: \(.current_state)   Estimate: \((.estimate | if type == "object" then (.label // .value) else . end) // "-")",
     "Priority:   \(.priority_name // "-")   Icebox: \(.icebox)   Labels: \((.labels // []) | map(.label_name) | join(", "))",
     "Owners:     \((.owners // []) | map(.actor.name) | join(", ") | if .=="" then "-" else . end)",
     "",
@@ -326,6 +358,17 @@ render_story_detail() {
 }
 events_tsv() {
   jq -r '(.items? // .) | .[]? | "\(.created_at)\t\(.actor.name // .actor // "?")\t\(.event_type)\t\(.target_type) \(.target_id)"'
+}
+# One notification per line: unread marker, feed id (nt-N, usable as a path arg
+# for `ea ack ack_notification`), time, actor, kind, story ref, title.
+notif_line() {
+  jq -r '(.items? // .) | .[]? |
+    "\(if .read_at then " " else "*" end)\t\(.id)\t\((.created_at // "")[0:16] | sub("T"; " "))\t" +
+    "\(.payload.actor.initials // .payload.actor.name // "?")\t" +
+    "\(.kind)\(if .payload.to_state then " ->\(.payload.to_state)" else "" end)\t" +
+    "\(.payload.story.ref // "-")\t" +
+    "\(.payload.story.title // .payload.project.title // "")" +
+    (if .payload.comment.preview then "  \"\(.payload.comment.preview[0:60])\"" else "" end)'
 }
 render() {
   case "$1 $2" in
@@ -343,6 +386,15 @@ render() {
     "links create")
       jq -r '"linked [\(.id // .link_id)] \(.url)"' ;;
     "events list")       events_tsv | tab 4 ;;
+    "notifications list_my_notifications") notif_line | tab 7 ;;
+    "search search")
+      # Search returns {results, total, limit, offset}, not the {items} every
+      # other list endpoint returns, so story_line needs the key renamed.
+      local body; body=$(cat)
+      jq -c '{items: .results}' <<<"$body" | story_line | tab 7
+      jq -r 'if (.total // 0) > ((.results | length) + (.offset // 0))
+             then "  \((.results|length)) of \(.total) - page with --offset \((.results|length) + (.offset // 0))"
+             else empty end' <<<"$body" ;;
     *)                   jq . ;;
   esac
 }
@@ -368,6 +420,7 @@ dispatch() {
   # generated API surface and falls through to the generic dispatch below.
   [[ $entity == stories && $action == owner ]] && { cmd_owner "$pid" "$@"; return; }
   [[ $entity == labels && ($action == list || $action == recolor) ]] && { cmd_labels "$pid" "$action" "$@"; return; }
+  [[ $entity == search && $action != search ]] && { cmd_search "$action" "$@"; return; }
 
   local a
   for a in "$@"; do [[ $a == --help || $a == -h || $a == help ]] && { op_help "$entity" "$action"; return; }; done
@@ -395,7 +448,10 @@ dispatch() {
     else
       val="${pos[$pi]:-}"; pi=$((pi + 1))
       [[ -n $val ]] || { echo "Missing path arg: $tok" >&2; op_help "$entity" "$action"; return 1; }
-      [[ $tok == story_id ]] && val=$(resolve_story "$pid" "$val")
+      if [[ $tok == story_id ]]; then
+        local raw="$val"; val=$(resolve_story "$pid" "$raw")
+        [[ -n $val ]] || { echo "Could not resolve story: $raw" >&2; return 1; }
+      fi
     fi
     path="${path/\{$tok\}/$val}"
   done
@@ -443,7 +499,9 @@ Raw JSON: ea stories list|get ... --json   skip the renderer, emit raw JSON for 
 
 Curated commands:
   dash            Overview: non-icebox stories grouped by state
+  inbox [all]     Unread notification feed; 'all' includes already-read rows
   projects        List your projects
+  search <text> [--limit N] [--offset N]        Full-text story search
   stories owner add|rm <ref> [--member <id>]    Add/remove a story owner
   labels list                                   List project labels
   labels recolor <id> --bg <hex> --text <hex>   Recolor a label (color only)
@@ -477,6 +535,36 @@ cmd_dash() {
   done
 }
 
+
+# The notification feed is unified: mentions, reviews, stories and invitations
+# are categories of it, so /me/mentions is not consulted here. Clear the feed
+# with `ea read-all read_all`, ack one row with `ea ack ack_notification <nt-N>`.
+cmd_inbox() {
+  local mode="${1:-unread}"
+  case "$mode" in
+    unread|all) ;;
+    *) echo "Usage: ea inbox [all]" >&2; return 1 ;;
+  esac
+  bar; echo "Inbox"; bar
+  api GET "/me/notifications/unread-count" \
+    | jq -r '"unread \(.unread_count)   " + ((.by_category // {}) | to_entries | map("\(.key) \(.value)") | join("  "))'
+  echo
+  local path="/me/notifications?limit=50"
+  [[ $mode == unread ]] && path="${path}&unread=true"
+  local body; body=$(api GET "$path") || return 1
+  local n; n=$(jq '(.items // []) | length' <<<"$body")
+  [[ $n -gt 0 ]] || { echo "  (nothing to read)"; return; }
+  notif_line <<<"$body" | tab 7
+}
+
+#@:[search search] search <text> [--limit N] [--offset N]  Full-text story search
+# The spec declares no query params for /search, but the endpoint reads q, limit
+# and offset (verified live), so this stays a hand-written note. The shortcut
+# re-enters dispatch so --json and any future param keep working unchanged.
+cmd_search() {
+  local q="$1"; shift
+  dispatch search search --q "$q" "$@"
+}
 
 #@:[stories owner] owner add|rm <ref> [--member <id>]  Add/remove a story owner
 # Owners: POST/DELETE /projects/{pid}/stories/{sid}/owners[/{member_id}] (now also
@@ -620,6 +708,7 @@ main() {
     help)     cmd_help ;;
     api)      shift; cmd_api "$@" ;;
     dash|d)   cmd_dash "$(project_id)" ;;
+    inbox)    shift; cmd_inbox "$@" ;;
     projects) cmd_projects ;;
     *)        dispatch "$@" ;;
   esac

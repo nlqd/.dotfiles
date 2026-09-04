@@ -17,6 +17,11 @@ Run it:
     cd examples
     vale --config=.vale.ini .
 
-The original flags real violations (semicolons, a modal verb, a
-26-word sentence, three passive-voice constructions). The rewrite passes
-clean.
+The original flags real violations: three semicolons, three
+passive-voice constructions, a phrasal verb, and a contraction. The rewrite
+passes clean.
+
+The rewrite did not always pass clean. Two rules added later, `PhrasalVerbs`
+and `ConditionBeforeCommand`, caught real violations the hand-rewrite had
+missed ("turns off", "turns on", and a trailing "when" in a heading), and the
+rewrite was corrected rather than the rules loosened.

@@ -48,6 +48,14 @@ length, passive voice). STE requires classifying text as one or the other
 before applying these, so pick the style variant per file glob rather than
 relying on the tool to guess.
 
+A fourth package, `STE100Unverified`, is opt-in and off by default. It holds
+rulings taken from a third-party summary of the standard rather than from the
+standard itself: the modal ladder, a set of verb swaps, and `and/or`. Every
+rule in it is pinned to `suggestion`. Add it to `BasedOnStyles` when you want
+those flags for human review, and read
+[`docs/RULE-COVERAGE.md`](docs/RULE-COVERAGE.md) first for why they are kept
+separate.
+
 Vale has no native LaTeX format, `tex = md` is a crude extension-level
 substitution it documents itself: `.tex` files get linted as if they were
 Markdown. Structural rules (sentence length, noun clusters, passive voice)

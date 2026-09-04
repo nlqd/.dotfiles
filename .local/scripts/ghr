@@ -359,11 +359,14 @@ list_extracted_files() {
 
 fuzzy_match_binary() {
   local stored="$1" dir="$2" archive_name="$3"
-  local available
-  available=$(list_extracted_files "$dir" "$archive_name" | while read -r f; do
-    [ -x "$dir/$f" ] && echo "$f"
+  local all executable
+  all=$(list_extracted_files "$dir" "$archive_name")
+  executable=$(echo "$all" | while read -r f; do
+    [ -n "$f" ] && [ -x "$dir/$f" ] && echo "$f"
   done)
-  fuzzy_match_name "$stored" "$available"
+  # Some archives don't preserve the exec bit (zip in particular), so an empty
+  # executable set does not mean an empty candidate set. Mirrors pick_executable.
+  fuzzy_match_name "$stored" "${executable:-$all}"
 }
 
 extract_asset() {

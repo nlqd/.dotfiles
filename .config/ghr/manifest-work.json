@@ -1,16 +1,16 @@
 [
   {
     "repo": "CircleCI-Public/circleci-cli",
-    "asset": "circleci-cli_0.1.38646_checksums.txt",
-    "version": "v0.1.38646",
+    "asset": "circleci-cli_1.0.49536_linux_amd64.tar.gz",
+    "version": "v1.0.49536",
     "links": {
-      "circleci-cli_0.1.36202_linux_amd64/circleci": "/home/dungngo/.local/bin/circleci"
+      "circleci": "/home/dungngo/.local/bin/circleci"
     }
   },
   {
     "repo": "LuaLS/lua-language-server",
-    "asset": "lua-language-server-3.18.2-darwin-arm64.tar.gz",
-    "version": "3.18.2",
+    "asset": "lua-language-server-3.19.1-linux-x64.tar.gz",
+    "version": "3.19.1",
     "links": {
       "bin/lua-language-server": "/home/dungngo/.local/bin/lua-language-server"
     }
@@ -25,10 +25,10 @@
   },
   {
     "repo": "altsem/gitu",
-    "asset": "gitu-v0.43.0-aarch64-apple-darwin.zip",
+    "asset": "gitu-v0.43.0-x86_64-unknown-linux-gnu.zip",
     "version": "v0.43.0",
     "links": {
-      "gitu-v0.42.0-x86_64-unknown-linux-gnu/gitu": "/home/dungngo/.local/bin/gitu"
+      "gitu-v0.43.0-x86_64-unknown-linux-gnu/gitu": "/home/dungngo/.local/bin/gitu"
     }
   },
   {
@@ -50,15 +50,15 @@
   {
     "repo": "neovim/neovim",
     "asset": "nvim-linux-x86_64.tar.gz",
-    "version": "v0.12.4",
+    "version": "v0.12.5",
     "links": {
       "nvim-linux-x86_64/bin/nvim": "/usr/local/bin/nvim"
     }
   },
   {
     "repo": "neurosnap/zmx",
-    "asset": "zmx-0.7.0-linux-aarch64.tar.gz",
-    "version": "v0.7.0",
+    "asset": "zmx-0.8.0-linux-x86_64.tar.gz",
+    "version": "v0.8.0",
     "links": {
       "zmx": "/home/dungngo/.local/bin/zmx"
     }
@@ -73,8 +73,8 @@
   },
   {
     "repo": "tmux/tmux-builds",
-    "asset": "tmux-3.7b-linux-x86_64.tar.gz",
-    "version": "v3.7b",
+    "asset": "tmux-3.7c-linux-x86_64.tar.gz",
+    "version": "v3.7c",
     "links": {
       "tmux": "/usr/local/bin/tmux"
     }
@@ -82,7 +82,7 @@
   {
     "repo": "tomasz-tomczyk/crit",
     "asset": "crit-linux-amd64",
-    "version": "v0.18.1",
+    "version": "v0.19.1",
     "links": {
       "crit-linux-amd64": "/home/dungngo/.local/bin/crit"
     }
@@ -90,7 +90,7 @@
   {
     "repo": "yt-dlp/yt-dlp",
     "asset": "yt-dlp",
-    "version": "2026.07.04",
+    "version": "2026.08.19",
     "links": {
       "yt-dlp": "/home/dungngo/.local/bin/yt-dlp"
     }

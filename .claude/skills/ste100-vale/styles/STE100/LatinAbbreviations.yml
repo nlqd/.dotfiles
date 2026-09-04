@@ -1,0 +1,12 @@
+# General recommendation GR-6: a non-native reader cannot be assumed to know
+# Latin abbreviations. `nonword` is required because these tokens end in a
+# period, so Vale's default word-boundary wrapping would never match them.
+extends: substitution
+message: "Do not use Latin abbreviations: use '%s' instead of '%s' (STE GR-6)."
+level: error
+ignorecase: true
+nonword: true
+swap:
+  'e\.g\.': for example
+  'i\.e\.': that is
+  'etc\.': and more

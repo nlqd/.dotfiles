@@ -2,7 +2,7 @@
   "cleanupPeriodDays": 99999999,
   "env": {
     "__SCHEMA__": "https://code.claude.com/docs/en/env-vars",
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "__CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
     "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR": "1",
     "BASH_DEFAULT_TIMEOUT_MS": "30000",
     "BASH_MAX_TIMEOUT_MS": "6000000",
@@ -24,6 +24,7 @@
       "mcp__claude_ai_Slack__slack_read_thread"
     ]
   },
+  "model": "opus",
   "hooks": {
     "SessionStart": [
       {
@@ -46,6 +47,27 @@
           }
         ]
       }
+    ],
+    "MessageDisplay": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=\"$(cat)\"; i=\"$(printf \"%s\" \"$p\" | jq -r \".index // 0\")\"; s=$(printf '\\001'); d=\"$(printf \"%s\" \"$p\" | jq -r --arg s \"$s\" '(.delta // \"\") + $s')\"; d=\"${d%\"$s\"}\"; [ \"$i\" = \"0\" ] && c=\"[$(date +%H:%M)] $d\" || c=\"$d\"; jq -nc --arg c \"$c\" '{hookSpecificOutput:{hookEventName:\"MessageDisplay\",displayContent:$c}}'"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=\"$(cat)\"; s=\"$(printf \"%s\" \"$p\" | jq -r \".session_id // empty\")\"; [ -n \"$s\" ] && { mkdir -p \"$HOME/.cache/claude-timing\"; date +%s > \"$HOME/.cache/claude-timing/$s\"; }; exit 0"
+          }
+        ]
+      }
     ]
   },
   "statusLine": {
@@ -64,7 +86,10 @@
     "security-guidance@claude-plugins-official": true,
     "remember@claude-plugins-official": true,
     "rust@east-agile": true,
-    "ast-grep@ast-grep-marketplace": true
+    "ast-grep@ast-grep-marketplace": true,
+    "impeccable@impeccable": true,
+    "academic-research-skills@academic-research-skills": true,
+    "cloudflare@cloudflare": true
   },
   "extraKnownMarketplaces": {
     "crit": {
@@ -83,6 +108,18 @@
       "source": {
         "source": "github",
         "repo": "ast-grep/agent-skill"
+      }
+    },
+    "impeccable": {
+      "source": {
+        "source": "github",
+        "repo": "pbakaus/impeccable"
+      }
+    },
+    "cloudflare": {
+      "source": {
+        "source": "github",
+        "repo": "cloudflare/skills"
       }
     }
   },

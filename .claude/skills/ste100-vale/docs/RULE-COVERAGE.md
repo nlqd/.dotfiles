@@ -18,13 +18,18 @@ examples, or dictionary entries from the spec.
 Rows below marked with a specific rule ID (STE-x.y) have been checked
 against the real Issue 9 table of contents and rule titles. Rows without a
 specific ID are described by concept only, we either haven't located the
-exact rule yet or the concept spans parts of several rules. Two IDs in this
-document, STE-6.7 and STE-8.11, were inherited from `stilist/text_linter`,
-which targets an older edition (Issue 6). Rule numbers move between issues
+exact rule yet or the concept spans parts of several rules.
+
+Six IDs in this document are cited but not confirmed, and each is flagged
+that way in its own row. STE-6.7 and STE-8.11 were inherited from
+`stilist/text_linter`, which targets an older edition (Issue 6). STE-4.2,
+STE-5.4, STE-8.5/8.6/8.7, and GR-6 came from a third-party summary of the
+standard (the `simple-english` skill at github.com/AminBlg/SimpleEnglish);
+the rules they describe are checkable and the checks are sound, but the
+sub-numbers are that project's, not ours. Rule numbers move between issues
 (confirmed directly: Issue 9's own changelog notes "Rule 2.3 removed from
-section 2, moved to section 4 to become rule 4.5"), so those two are flagged
-below as unverified against Issue 9 specifically, not confirmed like the
-others.
+section 2, moved to section 4 to become rule 4.5"), so treat any unconfirmed
+number as a pointer, not a citation.
 
 **A real correction already made from this cross-check**: this project
 initially shipped a rule banning the words "can, could, may, might, should,
@@ -83,7 +88,7 @@ domain) triggered none in testing.
 | Use only infinitive, imperative, simple present/past/future, or past participle as adjective (STE-3.2) | Heuristic | Partially covered by `NoProgressiveTense` and `NoPerfectTense` below, which each catch one disallowed construction | Partial |
 | Use the past participle form as an adjective (STE-3.3) | No | Distinguishing correct adjectival use from other uses needs sentence-level grammatical judgment beyond tag-matching | Not automatable |
 | Do not use auxiliary verbs to make complex verb constructions (STE-3.4) | Heuristic | `NoPerfectTense`, `sequence`: have/has/had + past participle, matches the rule's own explicit example ("has adjusted" flagged). The modal+passive example in the same rule ("can be adjusted") is already caught by `PassiveVoice` below, since the modal is incidental to that pattern | **Implemented** |
-| Use the "-ing" form of a verb only as a technical noun or modifier, never as a verb (STE-3.5) | Heuristic | Depends entirely on the tagger distinguishing VBG-as-verb from VBG/NN-as-noun in context; real false-positive risk | Planned, low confidence |
+| Use the "-ing" form of a verb only as a technical noun or modifier, never as a verb (STE-3.5) | Heuristic | `IngClauseAfterComma`, `existence`. The general case does need the tagger to separate VBG-as-verb from VBG-as-noun, which it does not do reliably. One shape is checkable without it: a comma followed by a participle ("the valve closes the line, preventing a flow"), which is almost always the banned verbal use. Matches a curated verb list, since a general `\w+ing` pattern flags ordinary nouns like "nothing" | **Implemented** for the comma-tail case only |
 | Use active voice; passive only in descriptions when the agent is unknown (STE-3.6) | Heuristic | `sequence`: be-form + past participle. Detecting passive voice is reliable; judging whether "the agent is genuinely unknown" is not, see the Procedure/Description split below | **Implemented** |
 | Use an approved verb to describe an action, not a noun or other part of speech (STE-3.7) | Heuristic | Overlaps with STE-1.2's noun/verb confusion check above | Covered by STE-1.2 |
 
@@ -97,9 +102,9 @@ of this document.
 | Rule | Automatable | Mechanism | Status |
 |---|---|---|---|
 | Short sentences (word limits are set per Section 5/6 below) | Yes | See Sections 5 and 6 | **Implemented** |
-| Do not omit the subject, verb, or articles | No | Requires grammatical completeness judgment | Not automatable |
+| Do not omit words or shorten a sentence with contractions (STE-4.2) | Partial | `NoContractions`, `substitution`, covers the contraction half. A bare `'s` is left alone: it is ambiguous with the possessive, which GR-8 permits. Judging whether a sentence has dropped a subject, verb, or article still needs grammatical judgment and is not automatable | **Implemented** for contractions, citation unverified |
 | Use vertical lists for complex sequences | No | "Complex" is a judgment call, not a text property | Not automatable |
-| State conditions before commands ("If X, do Y") | Heuristic | Depends on reliably detecting the sentence-initial imperative verb in "do Y"; blocked, see Section 5 | Blocked on tagger accuracy |
+| State conditions before commands ("If X, do Y", STE-5.4) | Heuristic | `STE100Procedure.ConditionBeforeCommand`, `existence`. Previously recorded here as blocked on the tagger, which was the wrong framing: the rule does not need the imperative verb tagged at all. A trailing condition is an "if" or "when" that is not at the start of its sentence, and lowercase is a good enough proxy. Known false positive: "if" also introduces a noun clause ("determine if the file exists"), so this warns rather than errors | **Implemented**, citation unverified |
 | Articles and demonstrative adjectives (moved here from old rule 2.3 in Issue 9) | No | Haven't located the exact current rule text; likely requires grammatical judgment similar to omitted articles above | Not yet reviewed |
 
 ## Section 5: Procedural writing (5 rules)
@@ -127,7 +132,7 @@ of this document.
 | Rule | Automatable | Mechanism | Status |
 |---|---|---|---|
 | WARNING/CAUTION/NOTE must open with a clear command or condition | Heuristic | Structural check on the block's first sentence | Planned |
-| Three levels with defined formatting | Yes | `existence`/format check that the label is present and styled correctly | Planned |
+| Three levels with defined formatting | Yes | `SafetyLabelFormat`, `existence`, flags a lowercase or title-case label at the start of a line. Anchored to line start, because an unanchored match also fires on the ordinary noun in "the log shows a warning: the disk is full" | **Implemented** |
 | Safety text may need legal review | No | Organizational process, not a text property | Not automatable |
 
 ## Section 8: Punctuation and word count (7 rules)
@@ -137,6 +142,7 @@ of this document.
 | No semicolons | Yes | `NoSemicolons`, `existence`. Cited as STE-8.11 by `text_linter` (Issue 6); Issue 9's Section 8 only has 7 rules per its table of contents, so 8.11 is very likely stale, not yet re-confirmed against the real Issue 9 number | **Implemented**, citation unverified |
 | Other punctuation restrictions (colons, dashes, parentheses, list punctuation) | Partial | Each specific restriction can be its own `existence` check once we confirm the exact rule; not yet reviewed against Issue 9 text | Needs review |
 | Word-count limits | Yes | Covered under Sections 5/6 above | **Implemented** |
+| How to count words: parenthetical text, quoted text, a number with its unit, and a hyphenated word each count as one (STE-8.5, STE-8.6, STE-8.7) | Yes | Token alternation inside both `SentenceLength` rules. A naive `\b\w+\b` token over-counts all four and makes the 20/25-word budgets artificially tight on technical prose. Not covered: inline code, which Vale strips before a check sees it, so a backticked command contributes 0 words rather than the 1 the rule wants. That errs lenient | **Implemented** except inline code, citation unverified |
 
 ## Section 9: Writing practices (4 rules)
 
@@ -145,15 +151,43 @@ of this document.
 | The conjunction "that" (general recommendation, not a numbered rule) | No | Stylistic preference, not a detectable violation | Not automatable |
 | When you select terminology or wording, use a consistent style (STE-9.4) | Heuristic | Related to `ConsistentTerminology` (STE-1.11) above; STE-9.4 is broader (wording/phrasing patterns for repeated instructions, not just object naming) and isn't separately implemented | Partially covered by STE-1.11 |
 | Simple, parallel sentence constructions | No | Structural elegance is a judgment call | Not automatable |
+| Do not build phrasal verbs | Heuristic | `PhrasalVerbs`, `existence` over a curated list of two-word verbs with their common inflections. The rule names the violation and leaves the replacement to the writer, because which single verb is approved is a dictionary question. Section 9 of Issue 9 has 4 rules and we have not confirmed which number this is, so the message cites the section only. "back up" is deliberately absent: "move back up the list" uses an adverbial "back", and Go's regexp engine has no lookbehind to separate the two | **Implemented**, citation unnumbered |
 | Avoid recurring error patterns | Partial | Specific known patterns can become `existence` checks; the general instruction is not automatable | Case-by-case |
+| Latin abbreviations (GR-6) | Yes | `LatinAbbreviations`, `substitution`, for "e.g.", "i.e.", and "etc." A non-native reader cannot be assumed to know them | **Implemented**, citation unverified |
+
+## The STE100Unverified package
+
+`styles/STE100Unverified/` is a separate, opt-in package for rulings this
+project cannot check against the standard. Its contents come from a
+third-party summary of ASD-STE100, the `simple-english` skill at
+github.com/AminBlg/SimpleEnglish, and not from Issue 9 or the dictionary.
+Every rule in it is pinned to `suggestion`, and none of it is reachable
+through `BasedOnStyles = STE100`.
+
+The separation is not bureaucratic. This project already shipped one modal
+rule sourced from a third-party summary and it was wrong (see the correction
+note at the top of this document). The same class of claim now lives behind
+its own package name so that a clean `STE100` run continues to mean "clean
+against the rules we could check", not "clean against somebody's summary".
+
+| Rule | Claim | Status |
+|---|---|---|
+| `ModalVerbs` | should, would, may, might, could are unapproved; can, will, must are the approved set | Unverified. "can" is confirmed approved and is deliberately not flagged; the other five are the summary's claim |
+| `DictionaryWordRulings` | ensure/verify/confirm/validate/check become "make sure that"; display/render become "show"; execute becomes "do"; destroy becomes "remove"; drop becomes "erase" | Unverified. Every pair is a claim about the ~900-word dictionary, which is copyrighted and not in this repo. "present" was dropped from the source's list: "the file is present" is an adjective and a swap check cannot tell |
+| `AndOr` | "and/or" is ambiguous and should be written out | Unverified. Section 8 has 7 rules and we have not confirmed which, if any, covers the solidus |
+
+Rulings from the same source that need a part-of-speech decision rather than
+a swap ("test" and "work" as noun-only, "above" and "below" for limits rather
+than positions, "follow" as "come after" and never "obey") are not implemented
+here. They belong to the generated `WordPartOfSpeech` rules, which need the
+real dictionary, and to the prose guidance in `SKILL.md`.
 
 ## Summary
 
-Of the concepts tracked above, 9 are implemented and confirmed against real
-Issue 9 rule numbers, 2 more are implemented but carry a citation inherited
-from `text_linter`'s older edition that still needs re-checking (STE-6.7,
-STE-8.11), and a handful are implemented against a correctly-identified rule
-but without a specific sub-number yet. 3 are blocked on a concrete, tested
+Of the concepts tracked above, 10 are implemented and confirmed against real
+Issue 9 rule numbers, 6 more are implemented but carry a citation this project
+has not confirmed, and a handful are implemented against a
+correctly-identified rule but without a specific sub-number yet. 2 are blocked on a concrete, tested
 tagger limitation (Vale mistags sentence-initial imperative verbs, confirmed
 empirically: "Install" opening a sentence gets tagged `DT`, not `VB`), and
 several sections still have rules we haven't located in the real text yet

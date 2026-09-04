@@ -9,11 +9,16 @@ const { spawn } = require('child_process');
 const HOME = os.homedir();
 const COOKIE_FILE = path.join(HOME, '.sdai', 'cookies');
 const TOKEN_FILE = path.join(HOME, '.sdai', 'proxy-token');
+const REQUEST_LOG_FILE = path.join(HOME, '.sdai', 'proxy-requests.log');
 const BASE_URL = 'https://admin.skydeck.ai/api/v1';
 const REFERER = 'Referer: https://eastagile.skydeck.ai/';
 const PORT = Number(process.env.SKYDECK_PROXY_PORT || 8788);
 const MCP_SERVER_ID = '4331da01-91fb-414e-9a94-8671425989d0';
-const MAX_SESSIONS = 20;
+// Shared across every pi/dirge session on the machine that routes through this one proxy
+// instance, not per-project - a small cap here means an idle session (overnight, or just
+// while other projects stay active) gets silently LRU-evicted and loses its conversation on
+// the next message. Entries are lightweight (message text arrays), so keep a lot of them.
+const MAX_SESSIONS = 500;
 
 function getOrCreateToken() {
   try {
@@ -52,8 +57,7 @@ async function fetchLiveModels() {
 }
 
 async function resolveModelId(alias) {
-  const name = MODEL_ALIASES[alias];
-  if (!name) return null;
+  const name = MODEL_ALIASES[alias] || alias; // fall back to treating it as a live model name directly
   const byName = await fetchLiveModels();
   const entry = byName.get(name);
   return entry ? entry.id : null;
@@ -95,7 +99,12 @@ function runCurl(args, onChunk) {
 }
 
 async function refreshIfNeeded() {
-  const exp = jwtExp(getAccessToken());
+  let exp;
+  try {
+    exp = jwtExp(getAccessToken());
+  } catch {
+    exp = 0; // access-token cookie missing — force a refresh attempt off the refresh cookie
+  }
   if (Math.floor(Date.now() / 1000) > exp) {
     await runCurl([
       '-X', 'POST', '-o', '/dev/null', `${BASE_URL}/authentication/token/refresh/`,
@@ -204,7 +213,14 @@ function makeThinkStripper() {
 // --- OpenAI-compatible message translation ---
 
 function extractText(msg) {
-  if (msg.tool_calls) return JSON.stringify(msg.tool_calls);
+  if (msg.tool_calls) {
+    // Compare only the semantically meaningful fields, in a fixed order - not a raw
+    // JSON.stringify of the whole array. A client's reconstruction of a streamed tool call
+    // can carry extra fields we don't (e.g. the per-chunk `index` our own streaming delta
+    // adds for reassembly), which would otherwise make an identical tool call compare
+    // unequal and silently sever the conversation on the very next turn.
+    return JSON.stringify(msg.tool_calls.map((tc) => ({ id: tc.id, name: tc.function?.name, arguments: tc.function?.arguments })));
+  }
   if (typeof msg.content === 'string') return msg.content;
   if (Array.isArray(msg.content)) return msg.content.map((p) => p.text || '').join('');
   return '';
@@ -233,9 +249,22 @@ function firstBalancedJson(text) {
   const start = text.indexOf('{');
   if (start === -1) return null;
   let depth = 0;
+  // JSON-string-aware: raw braces inside string values (regex patterns, LaTeX
+  // source, code snippets - all common in tool-call arguments) don't affect
+  // nesting depth here, only unescaped structural braces outside a string do.
+  let inString = false;
+  let escaped = false;
   for (let i = start; i < text.length; i++) {
-    if (text[i] === '{') depth++;
-    else if (text[i] === '}') {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}') {
       depth--;
       if (depth === 0) {
         try {
@@ -250,14 +279,16 @@ function firstBalancedJson(text) {
 }
 
 function extractToolCall(text) {
-  const ownMatch = text.match(/```pi-tool-call\s*\n([\s\S]*?)\n```\s*$/);
+  // Not end-anchored: despite being told to emit nothing after the closing fence, models
+  // sometimes tack on stray trailing commentary anyway ("...I'm unable to continue until
+  // the tool result is provided"). Take the first complete fenced block and discard
+  // whatever follows it, same as the mcp-header fallback already does below.
+  const ownMatch = text.match(/```pi-tool-call\s*\n([\s\S]*?)\n```/);
   if (ownMatch) {
-    let obj;
-    try {
-      obj = JSON.parse(ownMatch[1]);
-    } catch {
-      obj = null;
-    }
+    // balance-scan instead of strict JSON.parse: models occasionally emit one
+    // stray trailing brace on long/heavily-escaped arguments, which otherwise
+    // sinks the whole tool call and leaks the raw block into the chat.
+    const obj = firstBalancedJson(ownMatch[1]);
     if (obj && typeof obj.name === 'string') {
       return { name: obj.name, arguments: obj.arguments || {}, prefixText: text.slice(0, ownMatch.index).trim() };
     }
@@ -284,6 +315,50 @@ function extractToolCall(text) {
   return null;
 }
 
+// Skydeck exposes real per-message $ cost (conversations/{id}/cost) but never exposes
+// token counts anywhere in its API. OpenAI-compatible `usage` wants token counts, and pi
+// derives its own displayed $ cost as completion_tokens * a per-model rate from its config
+// - it never reads a $ figure off the wire. So: report an honest prompt_tokens estimate
+// (this feeds pi's context-window/compaction tracking, so it has to be realistic), and
+// back-solve completion_tokens from the real $ cost against a fixed, made-up conversion
+// constant (COST_UNIT) rather than a real per-model vendor rate we don't actually know -
+// pi's config uses the same constant as its "rate", so completion_tokens * COST_UNIT lands
+// back on the exact real dollar figure regardless of what the constant's value is.
+const COST_UNIT = 0.00001; // $ per synthetic completion token; must match models.json cost.output
+
+function estimateTokens(text) {
+  return Math.max(1, Math.ceil((text || '').length / 4));
+}
+
+async function getLastMessageCost(conversationId) {
+  if (!conversationId) return 0;
+  try {
+    const out = await call([`${BASE_URL}/conversations/${conversationId}/cost`]);
+    const parsed = JSON.parse(out.toString());
+    return Number(parsed.conversation_last_message_cost) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function buildUsage(messages, conversationId) {
+  const promptTokens = estimateTokens(messages.map((m) => extractText(m)).join('\n'));
+  const cost = await getLastMessageCost(conversationId);
+  const completionTokens = Math.max(1, Math.round(cost / COST_UNIT));
+  return { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens };
+}
+
+// One jsonl line per request: whether it matched an existing skydeck conversation or
+// silently started a new one (losing history), plus enough to correlate against a client's
+// own session file when diagnosing a context-loss report after the fact.
+function logRequest(entry) {
+  try {
+    fs.appendFileSync(REQUEST_LOG_FILE, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n');
+  } catch {
+    // logging must never break a live request
+  }
+}
+
 function randomCallId() {
   return `call_${require('crypto').randomBytes(12).toString('hex')}`;
 }
@@ -307,9 +382,24 @@ function normalizeForMatch(messages) {
   return messages.filter((m) => !isEphemeralScaffold(m));
 }
 
+// A failed request (network blip, proxy restart) never reaches saveSession, but the
+// client still appends an empty placeholder assistant turn to its own local history before
+// retrying — so the next request's prefix has an extra trailing message no saved session
+// ever saw. Strip a run of these before matching so a transient failure doesn't sever the
+// conversation and silently start a brand-new one with skydeck.
+function isErrorStub(m) {
+  return m.role === 'assistant' && !m.tool_calls && extractText(m) === '';
+}
+
+function stripTrailingErrorStubs(msgs) {
+  let end = msgs.length;
+  while (end > 0 && isErrorStub(msgs[end - 1])) end--;
+  return msgs.slice(0, end);
+}
+
 function resolveConversation(messages) {
   const normalized = normalizeForMatch(messages);
-  const prefix = normalized.slice(0, -1);
+  const prefix = stripTrailingErrorStubs(normalized.slice(0, -1));
 
   let idx = sessions.findIndex((s) => messagesEqual(prefix, normalizeForMatch(s.messages)));
   if (idx === -1) {
@@ -322,7 +412,30 @@ function resolveConversation(messages) {
       return messagesEqual(prefix, sNorm.slice(0, -1));
     });
   }
-  if (idx === -1) return null;
+  if (idx === -1) {
+    const mru = sessions[sessions.length - 1];
+    const mruNorm = mru ? normalizeForMatch(mru.messages) : null;
+    let firstDiff = null;
+    if (mruNorm) {
+      const len = Math.max(prefix.length, mruNorm.length);
+      for (let i = 0; i < len; i++) {
+        const a = prefix[i];
+        const b = mruNorm[i];
+        const same = a && b && a.role === b.role && extractText(a) === extractText(b);
+        if (!same) {
+          firstDiff = { index: i, incoming: a ? { role: a.role, text: extractText(a).slice(0, 200) } : '<missing>', saved: b ? { role: b.role, text: extractText(b).slice(0, 200) } : '<missing>' };
+          break;
+        }
+      }
+    }
+    logRequest({
+      debugMismatch: true,
+      incomingPrefixLen: prefix.length,
+      savedLen: mruNorm ? mruNorm.length : null,
+      firstDiff,
+    });
+    return null;
+  }
   const [session] = sessions.splice(idx, 1);
   sessions.push(session);
   return session.conversationId;
@@ -335,8 +448,15 @@ function saveSession(messages, conversationId) {
 
 // --- HTTP server ---
 
-function handleModels(res) {
-  const data = Object.keys(MODEL_ALIASES).map((id) => ({ id, object: 'model', created: 0, owned_by: 'skydeck' }));
+async function handleModels(res) {
+  let byName;
+  try {
+    byName = await fetchLiveModels();
+  } catch (e) {
+    res.writeHead(502, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: `skydeck error: ${e.message}`, type: 'api_error' } }));
+    return;
+  }
+  const data = [...byName.keys()].sort().map((id) => ({ id, object: 'model', created: 0, owned_by: 'skydeck' }));
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ object: 'list', data }));
 }
@@ -392,6 +512,15 @@ async function handleChatCompletions(req, res) {
     const msgs = postResult.data.messages;
     const messageId = msgs[msgs.length - 1].id;
 
+    logRequest({
+      model,
+      modelId,
+      matched: conversationId != null,
+      conversationId: newConversationId,
+      incomingMessageCount: messages.length,
+      lastUserPreview: extractText(messages[messages.length - 1]).slice(0, 100),
+    });
+
     const created = Math.floor(Date.now() / 1000);
     const id = `chatcmpl-${created}-${Math.random().toString(36).slice(2)}`;
 
@@ -415,6 +544,10 @@ async function handleChatCompletions(req, res) {
       res.write(`data: ${JSON.stringify({
         id, object: 'chat.completion.chunk', created, model,
         choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+      })}\n\n`);
+      res.write(`data: ${JSON.stringify({
+        id, object: 'chat.completion.chunk', created, model,
+        choices: [], usage: await buildUsage(messages, newConversationId),
       })}\n\n`);
       res.write('data: [DONE]\n\n');
       res.end();
@@ -458,6 +591,10 @@ async function handleChatCompletions(req, res) {
         id, object: 'chat.completion.chunk', created, model,
         choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
       })}\n\n`);
+      res.write(`data: ${JSON.stringify({
+        id, object: 'chat.completion.chunk', created, model,
+        choices: [], usage: await buildUsage(messages, newConversationId),
+      })}\n\n`);
       res.write('data: [DONE]\n\n');
       res.end();
     } else {
@@ -465,7 +602,7 @@ async function handleChatCompletions(req, res) {
       res.end(JSON.stringify({
         id, object: 'chat.completion', created, model,
         choices: [{ index: 0, message: assistantMessage, finish_reason: finishReason }],
-        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+        usage: await buildUsage(messages, newConversationId),
       }));
     }
 

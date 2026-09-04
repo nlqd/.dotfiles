@@ -1,0 +1,16 @@
+# STE-5.4 puts the condition first: "If the build fails, read the log", never
+# "Read the log if the build fails". docs/RULE-COVERAGE.md recorded this rule as
+# blocked, because detecting it seemed to need the sentence-initial imperative
+# verb that Vale's tagger mistags. It does not: a trailing condition is simply an
+# "if" or "when" that is not at the start of its sentence, and lowercase is a
+# good enough proxy for that, with no tagger involved.
+#
+# Known false positives: "if" also introduces a noun clause ("determine if the
+# file exists"), which is not a condition and needs no reordering. That is why
+# this warns rather than errors.
+extends: existence
+message: "Trailing condition '%s'. Put the condition before the command, divided by a comma (STE-5.4)."
+level: warning
+nonword: true
+raw:
+  - '\b[a-z]+\s+(if|when)\b'

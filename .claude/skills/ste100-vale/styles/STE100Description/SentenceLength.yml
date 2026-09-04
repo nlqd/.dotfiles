@@ -1,6 +1,9 @@
+# Same STE word-counting rules as STE100Procedure/SentenceLength.yml, which
+# carries the full explanation of the token alternation (STE-8.5, STE-8.6,
+# STE-8.7) and of the inline-code limitation.
 extends: occurrence
 message: "Description sentences must not exceed 25 words (found %d) (STE Section 6: Descriptive writing)."
 level: error
 scope: sentence
 max: 25
-token: '\b\w+\b'
+token: '\([^)]*\)|"[^"]+"|\b\d+(?:[.,]\d+)*\s*(?:ms|s|min|h|km|m|cm|mm|kg|g|lb|ft|in|MB|GB|KB|TB|Hz|kHz|MHz|GHz|V|A|W|px|rpm|psi|bar|%)\b|\b\w+(?:-\w+)+\b|\b\w+\b'

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Claude Code status line. Order: model+effort ctx rate dir branch version
+# Claude Code status line. Order: model+effort ctx rate elapsed dir branch version
 # Sections are joined by two spaces. ctx renders as a flat 5-cell bar (no
 # color; +/-/· glyphs alone carry fill vs track); the 7-day rate is prefixed
 # with the account label (dng/rem/ops, from its reset weekday) and bolded
 # when budget lags time by more than 10 points. 5h hidden unless >95%. PR is
 # omitted (Claude Code renders it natively); commented block kept to restore.
+# elapsed reads the same ~/.cache/claude-timing/<session_id> state the Stop
+# hook writes on every reply (also used by the UserPromptSubmit idle note).
 
 input=$(cat)
 
@@ -23,14 +25,15 @@ readarray -t fields < <(
       (.rate_limits.seven_day.used_percentage // "" | if type == "number" then round else . end),
       (.rate_limits.seven_day.resets_at // 0),
       .version // "",
-      (.workspace.current_dir // .cwd // "")
+      (.workspace.current_dir // .cwd // ""),
+      .session_id // ""
     ] | .[] | tostring'
 )
 model=${fields[0]} effort=${fields[1]} used=${fields[2]}
 pr_num=${fields[3]} pr_state=${fields[4]} pr_url=${fields[5]}
 five_h=${fields[6]} five_h_reset=${fields[7]}
 seven_d=${fields[8]} seven_d_reset=${fields[9]}
-version=${fields[10]} dir=${fields[11]}
+version=${fields[10]} dir=${fields[11]} session_id=${fields[12]}
 
 dir_name="${dir##*/}"
 # One git call: git-dir, common-dir, branch. A linked worktree's git-dir lives
@@ -165,6 +168,20 @@ if [ -n "$seven_d" ] && [ -n "$seven_d_reset" ] && [ "$seven_d_reset" -gt 0 ]; t
   fi
 fi
 [ ${#rl_pieces[@]} -gt 0 ] && push 40 "$(join " " "${rl_pieces[@]}")"
+
+# Elapsed since the last reply, from the Stop hook's per-session state file.
+# Least essential segment (dropped first when the line is too wide) and
+# reads as blank rather than "0s" until the first reply lands.
+if [ -n "$session_id" ]; then
+  tf="$HOME/.cache/claude-timing/$session_id"
+  if [ -f "$tf" ]; then
+    last=$(<"$tf")
+    case "$last" in
+      ''|*[!0-9]*) : ;;
+      *) push 65 "$(fmt_dur $(( now_ts - last > 0 ? now_ts - last : 0 )))" ;;
+    esac
+  fi
+fi
 
 # In a worktree the dir is per-branch scratch named after the branch, so show
 # the dir only when not in a worktree.

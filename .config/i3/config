@@ -39,7 +39,6 @@ bindsym  $mod+v        exec  --no-startup-id  clipmenu -fn "JetBrainsMono NF"
 bindsym  $mod+t        exec  --no-startup-id  alacritty
 bindsym  $mod+b        exec  --no-startup-id  google-chrome
 bindsym  $mod+Shift+b  exec  --no-startup-id  firefox
-bindsym  $mod+s        exec  --no-startup-id  slack
 bindsym  $mod+space    exec  --no-startup-id  ibus-toggle, exec --no-startup-id xi3status-poke
 bindsym  Print         exec  --no-startup-id  xscreenshot
 bindsym  Shift+Print   exec  --no-startup-id  xrecord, exec --no-startup-id xi3status-poke

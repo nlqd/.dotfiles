@@ -97,3 +97,66 @@ Feature: Rules
             """
             test.md:1:11:STE100Description.PassiveVoice:Passive voice ('was installed'). Allowed only when the agent is genuinely unknown, review this usage (STE Section 6: Descriptive writing).
             """
+
+    Scenario: No contractions
+        When I test "NoContractions"
+        Then the output should contain exactly:
+            """
+            test.md:3:10:STE100.NoContractions:Do not use contractions: use 'is not' instead of 'isn't' (STE-4.2).
+            """
+
+    Scenario: No Latin abbreviations
+        When I test "LatinAbbreviations"
+        Then the output should contain exactly:
+            """
+            test.md:3:28:STE100.LatinAbbreviations:Do not use Latin abbreviations: use 'for example' instead of 'e.g.' (STE GR-6).
+            """
+
+    Scenario: No phrasal verbs
+        When I test "PhrasalVerbs"
+        Then the output should contain exactly:
+            """
+            test.md:3:1:STE100.PhrasalVerbs:Phrasal verb 'Shut down'. Use a single approved verb instead (STE Section 9: Writing practices).
+            """
+
+    Scenario: No "-ing" clause after a comma
+        When I test "IngClauseAfterComma"
+        Then the output should contain exactly:
+            """
+            test.md:3:26:STE100.IngClauseAfterComma:An "-ing" form after a comma acts as a verb. Write a new sentence with a real subject (STE-3.5).
+            """
+
+    Scenario: Safety labels are uppercase
+        When I test "SafetyLabelFormat"
+        Then the output should contain exactly:
+            """
+            test.md:3:1:STE100.SafetyLabelFormat:Safety label 'Warning:' must be uppercase: WARNING, CAUTION, or NOTE (STE Section 7: Safety instructions).
+            """
+
+    Scenario: Conditions come before commands
+        When I test "ConditionBeforeCommand"
+        Then the output should contain exactly:
+            """
+            test.md:3:22:STE100Procedure.ConditionBeforeCommand:Trailing condition 'value if'. Put the condition before the command, divided by a comma (STE-5.4).
+            """
+
+    Scenario: Unverified modal ruling
+        When I test "ModalVerbs"
+        Then the output should contain exactly:
+            """
+            test.md:3:10:STE100Unverified.ModalVerbs:Unverified ruling: 'should' may not be an approved modal. STE approves can, will, and must (STE-3.2).
+            """
+
+    Scenario: Unverified dictionary word ruling
+        When I test "DictionaryWordRulings"
+        Then the output should contain exactly:
+            """
+            test.md:3:1:STE100Unverified.DictionaryWordRulings:Unverified ruling: use 'make sure that' instead of 'Ensure' (STE-1.3).
+            """
+
+    Scenario: Unverified and/or ruling
+        When I test "AndOr"
+        Then the output should contain exactly:
+            """
+            test.md:3:14:STE100Unverified.AndOr:Unverified ruling: 'and/or' is ambiguous. Write 'X, or Y, or both', or pick one (STE Section 8: Punctuation).
+            """

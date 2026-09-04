@@ -1,0 +1,12 @@
+# STE-3.5 allows an "-ing" form only as a technical noun or a modifier, never as
+# a verb. Tagging that reliably is out of reach (see docs/RULE-COVERAGE.md), but
+# the comma-plus-participle tail clause is the one shape that is almost always
+# the banned use, so this rule matches a curated verb list rather than a general
+# `\w+ing` pattern, which would flag ordinary nouns like "nothing".
+extends: existence
+message: 'An "-ing" form after a comma acts as a verb. Write a new sentence with a real subject (STE-3.5).'
+level: error
+ignorecase: true
+nonword: true
+tokens:
+  - ',\s+(making|allowing|enabling|ensuring|providing|creating|resulting|leading|offering|causing|giving|helping|showing|highlighting|reflecting|improving|reducing|increasing|preventing|supporting|removing|adding)\b'

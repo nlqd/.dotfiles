@@ -40,6 +40,18 @@ GITMODE[jen]=rw
 BLOCK[jen]=
 FEAT[jen]="git_push podman bind_parent"
 
+JSON[sys]=$HOME/.claude-sys/.claude.json
+CREDS[sys]=$HOME/.claude-sys/.credentials.json
+GITMODE[sys]=rw
+BLOCK[sys]=
+FEAT[sys]="git_push podman bind_parent"
+
+JSON[sysdng]=$HOME/.claude-sysdng/.claude.json
+CREDS[sysdng]=$HOME/.claude-sysdng/.credentials.json
+GITMODE[sysdng]=rw
+BLOCK[sysdng]=
+FEAT[sysdng]="git_push podman bind_parent"
+
 read -ra block <<<"${BLOCK[$p]-${BLOCK[default]}}"
 read -ra feat  <<<"${FEAT[$p]-${FEAT[default]}}"
 

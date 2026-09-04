@@ -1,0 +1,12 @@
+# STE Section 7 gives safety text three levels, each with a fixed label. The
+# level word is the part a reader scans for, so it is written in full uppercase.
+# Anchored to the start of a line, because an unanchored match also fires on the
+# ordinary noun in prose like "the log shows a warning: the disk is full".
+# This checks the label's form only; whether the block puts the command before
+# the risk (STE-7.2, STE-7.3) needs reading comprehension and is out of scope.
+extends: existence
+message: "Safety label '%s' must be uppercase: WARNING, CAUTION, or NOTE (STE Section 7: Safety instructions)."
+level: error
+nonword: true
+raw:
+  - '(?m)^\s*(Warning|warning|Caution|caution|Note|note)\s*:'

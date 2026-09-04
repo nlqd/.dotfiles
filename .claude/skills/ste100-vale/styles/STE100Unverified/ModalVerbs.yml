@@ -1,0 +1,21 @@
+# PROVENANCE: unverified. This package holds rulings taken from a third-party
+# summary of ASD-STE100 (the `simple-english` skill at
+# github.com/AminBlg/SimpleEnglish), not from the standard itself. It is kept
+# out of the STE100 package and pinned to `suggestion` for a reason: this repo
+# already shipped a modal rule from a third-party summary once, and it was
+# wrong, see the correction note in docs/RULE-COVERAGE.md. Enable this package
+# only when you want the flags for human review, never as proof of compliance.
+#
+# "can" is deliberately absent. Rule 3.4 uses "You can adjust the volume
+# control" as an example of correct STE, and the dictionary lists CAN (v) as
+# approved. That much is confirmed; the status of the five words below is not.
+extends: existence
+message: "Unverified ruling: '%s' may not be an approved modal. STE approves can, will, and must (STE-3.2)."
+level: suggestion
+ignorecase: true
+tokens:
+  - should
+  - would
+  - may
+  - might
+  - could

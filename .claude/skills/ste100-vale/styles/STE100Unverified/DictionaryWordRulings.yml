@@ -1,0 +1,27 @@
+# PROVENANCE: unverified, see the header of ModalVerbs.yml in this package.
+# The ~900-word approved dictionary is copyrighted by STEMG and this repo does
+# not have it, so every pair below is a third-party claim about which verb the
+# dictionary approves. Confirm each one against your own copy of the standard
+# before you act on it.
+#
+# "present" is left out although the source lists it: "the file is present" is
+# an adjective, not the verb, and a swap check cannot tell the two apart.
+#
+# Rulings that need a part-of-speech decision rather than a swap ("test" and
+# "work" as noun-only, "above"/"below" for limits) are left to the generated
+# WordPartOfSpeech rules and to the prose guidance in SKILL.md.
+extends: substitution
+message: "Unverified ruling: use '%s' instead of '%s' (STE-1.3)."
+level: suggestion
+ignorecase: true
+swap:
+  ensure: make sure that
+  verify: make sure that
+  confirm: make sure that
+  validate: make sure that
+  check: make sure that
+  display: show
+  render: show
+  execute: do
+  destroy: remove
+  drop: erase

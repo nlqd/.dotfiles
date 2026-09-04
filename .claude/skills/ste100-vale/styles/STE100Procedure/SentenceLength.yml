@@ -1,6 +1,15 @@
+# STE counts words its own way (STE-8.5, STE-8.6, STE-8.7): text inside
+# parentheses, quoted text, a number with its unit, and a hyphenated word each
+# count as one word. A naive `\b\w+\b` token over-counts all four and makes the
+# 20-word budget artificially tight on technical prose, so the token alternation
+# below matches each of those spans once before falling back to plain words.
+#
+# Not covered: inline code. Vale strips code spans before a check sees them, so
+# `--config app.yaml` contributes 0 words rather than the 1 that STE-8.6 wants.
+# That errs lenient, unlike the over-count this regex fixes.
 extends: occurrence
 message: "Procedure sentences must not exceed 20 words (found %d) (STE Section 5: Procedural writing)."
 level: error
 scope: sentence
 max: 20
-token: '\b\w+\b'
+token: '\([^)]*\)|"[^"]+"|\b\d+(?:[.,]\d+)*\s*(?:ms|s|min|h|km|m|cm|mm|kg|g|lb|ft|in|MB|GB|KB|TB|Hz|kHz|MHz|GHz|V|A|W|px|rpm|psi|bar|%)\b|\b\w+(?:-\w+)+\b|\b\w+\b'

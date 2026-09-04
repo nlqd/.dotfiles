@@ -1,0 +1,9 @@
+# PROVENANCE: unverified, see the header of ModalVerbs.yml in this package.
+# Section 8 of Issue 9 has 7 rules and this repo has not confirmed which of
+# them, if any, covers the solidus.
+extends: existence
+message: "Unverified ruling: 'and/or' is ambiguous. Write 'X, or Y, or both', or pick one (STE Section 8: Punctuation)."
+level: suggestion
+ignorecase: true
+tokens:
+  - 'and/or'

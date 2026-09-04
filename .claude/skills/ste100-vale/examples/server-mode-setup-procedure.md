@@ -2,7 +2,7 @@
 
 Do these steps one time on each new machine.
 
-## Step 1: Stop the system from sleeping when you close the lid
+## Step 1: Keep the system awake on lid close
 
 Open /etc/systemd/logind.conf. Set this value:
 

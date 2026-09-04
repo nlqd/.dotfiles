@@ -1,0 +1,22 @@
+# A phrasal verb carries a meaning that neither of its words carries alone,
+# which is exactly what a non-native reader cannot look up (STE Section 9:
+# Writing practices). The replacement depends on the approved dictionary, so
+# this rule names the violation and leaves the choice of verb to the writer.
+# Common cases only, this list is not exhaustive. "back up" is deliberately
+# absent: "move back up the list" uses an adverbial "back", and Go's regexp
+# engine has no lookbehind to tell the two apart without a tagger.
+extends: existence
+message: "Phrasal verb '%s'. Use a single approved verb instead (STE Section 9: Writing practices)."
+level: error
+ignorecase: true
+tokens:
+  - '(set|sets|setting) up'
+  - '(shut|shuts|shutting) down'
+  - '(turn|turns|turned|turning) (on|off)'
+  - '(go|goes|went|going) (up|down)'
+  - '(carry|carries|carried|carrying) out'
+  - '(find|finds|found|finding) out'
+  - '(take|takes|took|taking) off'
+  - '(put|puts|putting) in'
+  - '(break|breaks|broke|breaking) down'
+  - '(bring|brings|brought|bringing) up'
