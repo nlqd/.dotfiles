@@ -32,6 +32,14 @@
     }
   },
   {
+    "repo": "boyter/scc",
+    "asset": "scc_Linux_x86_64.tar.gz",
+    "version": "v4.1.0",
+    "links": {
+      "scc": "/home/dungngo/.local/bin/scc"
+    }
+  },
+  {
     "repo": "derailed/k9s",
     "asset": "k9s_Linux_amd64.tar.gz",
     "version": "v0.51.0",

@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+MODEL="${HOME}/models/Qwen3.8-27B-UD-IQ3_XXS.gguf"
+PORT=8080
+CTX=40960
+LOG="${XDG_CACHE_HOME:-$HOME/.cache}/pi-qwen.log"
+
+# f16 on both cache sides is load-bearing: quantizing either one drops llama.cpp
+# off the flash-attention kernel and costs ~14x on prompt processing.
+start_server() {
+  echo "starting llama-server (ctx ${CTX})..." >&2
+  nohup llama-server \
+    --model "$MODEL" \
+    --n-gpu-layers all \
+    --flash-attn on \
+    --cache-type-k f16 --cache-type-v f16 \
+    --ctx-size "$CTX" \
+    --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 \
+    --host 127.0.0.1 --port "$PORT" \
+    >"$LOG" 2>&1 &
+}
+
+wait_for_server() {
+  local deadline=$((SECONDS + 120))
+  until curl --silent --max-time 2 "http://127.0.0.1:${PORT}/health" 2>/dev/null | grep --quiet ok; do
+    if [ "$SECONDS" -gt "$deadline" ]; then
+      echo "llama-server did not come up in time; see $LOG" >&2
+      exit 1
+    fi
+    sleep 2
+  done
+}
+
+server_up() {
+  curl --silent --max-time 2 "http://127.0.0.1:${PORT}/health" 2>/dev/null | grep --quiet ok
+}
+
+[ -f "$MODEL" ] || { echo "model not found: $MODEL" >&2; exit 1; }
+
+if ! server_up; then
+  start_server
+  wait_for_server
+fi
+
+# Isolated config dir: pi's compaction defaults (keepRecentTokens 20000,
+# reserveTokens 16384) assume a 100k+ token cloud window. Against this
+# model's 40960, those two reservations alone eat 89% of it before
+# compaction has anything to work with, so it "compacts" without ever
+# shrinking the resent context. ~/.pi-qwen/agent overrides both, scoped
+# here so it doesn't touch skydeck/cloud sessions in ~/.pi.
+export PI_CODING_AGENT_DIR="${HOME}/.pi-qwen/agent"
+
+exec pi --provider llamacpp --model "$MODEL" "$@"

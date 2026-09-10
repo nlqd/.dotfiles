@@ -24,7 +24,6 @@
       "mcp__claude_ai_Slack__slack_read_thread"
     ]
   },
-  "model": "opus",
   "hooks": {
     "SessionStart": [
       {

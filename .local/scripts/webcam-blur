@@ -1,0 +1,226 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["mediapipe", "opencv-python", "opencv-contrib-python", "numpy", "pyvirtualcam"]
+# ///
+"""Blur the background of a webcam and republish it on a v4l2loopback device.
+
+Producer half of the pair: this writes to the loopback node, and anything
+that reads a camera (webcam, Meet, Zoom, OBS) consumes it without knowing
+the blur exists.
+
+    webcam-blur &            # /dev/video0 -> /dev/video10
+    webcam -d /dev/video10   # watch it
+
+Load the loopback with exclusive_caps=0. Under exclusive_caps=1 the node stops
+advertising VIDEO_OUTPUT once a producer detaches, so the blur can only be
+started once per module load and restarting it needs a root modprobe.
+"""
+
+import argparse
+import os
+import signal
+import subprocess
+import sys
+import urllib.request
+from pathlib import Path
+
+import cv2
+import numpy as np
+import pyvirtualcam
+from mediapipe.tasks.python import BaseOptions
+from mediapipe.tasks.python.vision import (
+    ImageSegmenter,
+    ImageSegmenterOptions,
+    RunningMode,
+)
+from mediapipe.tasks.python.vision.core.image import Image, ImageFormat
+
+MODEL_URL = "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite"
+CACHE = Path.home() / ".cache" / "webcam-blur"
+LOOPBACK_LABEL = "BlurCam"
+
+
+def model_path() -> Path:
+    path = CACHE / "selfie_segmenter.tflite"
+    if not path.exists():
+        print(f"fetching segmentation model -> {path}", file=sys.stderr)
+        CACHE.mkdir(parents=True, exist_ok=True)
+        urllib.request.urlretrieve(MODEL_URL, path)
+    return path
+
+
+def find_loopback(label: str) -> str | None:
+    for name in Path("/sys/devices/virtual/video4linux").glob("video*/name"):
+        if label in name.read_text():
+            return f"/dev/{name.parent.name}"
+    return None
+
+
+def person_channel(segmenter: ImageSegmenter) -> int:
+    """The selfie model emits background and person masks; ask which is which
+    rather than assuming an order that a model update could flip."""
+    for i, label in enumerate(segmenter.labels):
+        if "background" not in label.lower():
+            return i
+    return 1
+
+
+def open_capture(device: str, size: str, fps: int) -> cv2.VideoCapture:
+    width, height = (int(n) for n in size.split("x"))
+    # OpenCV reports a failed open without a reason, and the reason is usually
+    # that another instance already holds the camera. Ask the kernel first.
+    try:
+        os.close(os.open(device, os.O_RDWR))
+    except OSError as err:
+        sys.exit(f"cannot open {device}: {err.strerror}")
+
+    cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
+    if not cap.isOpened():
+        sys.exit(f"cannot open {device}")
+    # Same reason as the webcam script: raw YUYV at 720p exceeds the USB
+    # bandwidth and the driver silently drops to ~5fps.
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc(*"MJPG"))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    cap.set(cv2.CAP_PROP_FPS, fps)
+    return cap
+
+
+def blurred(frame: np.ndarray, strength: int, bloom: float) -> np.ndarray:
+    """Blur at quarter size, then bloom the highlights. Real defocus spreads
+    bright points into discs, and without that the result reads as a smear
+    rather than as depth."""
+    height, width = frame.shape[:2]
+    ksize = strength | 1
+    small = cv2.resize(frame, (width // 4, height // 4), interpolation=cv2.INTER_AREA)
+    base = cv2.GaussianBlur(small, (ksize, ksize), 0)
+    if bloom > 0:
+        highlights = cv2.threshold(small, 200, 0, cv2.THRESH_TOZERO)[1]
+        base = cv2.addWeighted(base, 1.0, cv2.GaussianBlur(highlights, (ksize, ksize), 0), bloom, 0)
+    return cv2.resize(base, (width, height), interpolation=cv2.INTER_CUBIC)
+
+
+def refine(mask: np.ndarray, frame: np.ndarray, cutoff: float) -> np.ndarray:
+    """Snap the mask to real image edges, then commit to a decision.
+
+    The model emits a 256x256 mask, so upscaling it alone gives a blocky
+    boundary. A guided filter run against the frame recovers detail as fine as
+    hair. eps is in squared guide units, hence the normalised guide: against a
+    0-255 guide the same value collapses the mask entirely. The smoothstep
+    afterwards resolves the mid-confidence regions the filter deliberately
+    leaves alone, which is what stops background clutter staying half sharp.
+    """
+    height, width = frame.shape[:2]
+    small = (width // 2, height // 2)
+    guide = cv2.cvtColor(cv2.resize(frame, small, interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY)
+    refined = cv2.ximgproc.guidedFilter(
+        guide.astype(np.float32) / 255.0,
+        cv2.resize(mask, small, interpolation=cv2.INTER_LINEAR),
+        radius=8,
+        eps=1e-5,
+    )
+    refined = np.nan_to_num(refined, nan=0.0, posinf=1.0, neginf=0.0)
+    full = cv2.resize(refined, (width, height), interpolation=cv2.INTER_LINEAR)
+
+    lo, hi = cutoff - 0.15, cutoff + 0.15
+    t = np.clip((full - lo) / (hi - lo), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def composite(frame: np.ndarray, background: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Blend in uint8. The obvious float version costs 15ms at 720p against
+    about 1ms here, which is the whole difference between 24 and 30fps."""
+    alpha = cv2.cvtColor((mask * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
+    return cv2.add(
+        cv2.multiply(frame, alpha, scale=1 / 255),
+        cv2.multiply(background, cv2.bitwise_not(alpha), scale=1 / 255),
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("-d", "--device", default="/dev/video0", help="input camera")
+    parser.add_argument("-o", "--output", help=f"loopback device (default: the one labelled {LOOPBACK_LABEL})")
+    parser.add_argument("-s", "--size", default="1280x720")
+    parser.add_argument("-r", "--fps", type=int, default=30)
+    parser.add_argument("--view", action="store_true", help="open a viewfinder, and quit when it closes")
+    parser.add_argument("--strength", type=int, default=31, help="blur kernel, larger is blurrier")
+    parser.add_argument("--bloom", type=float, default=0.3, help="highlight bloom in the background, 0 disables")
+    parser.add_argument("--cutoff", type=float, default=0.6, help="mask decision point, raise it to blur more of a busy room")
+    parser.add_argument("--smooth", type=float, default=0.6, help="mask EMA weight for the new frame, lower is steadier")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    output = args.output or find_loopback(LOOPBACK_LABEL)
+    if output is None:
+        sys.exit(
+            f"no loopback device labelled {LOOPBACK_LABEL}. Create one with:\n"
+            f"  sudo modprobe v4l2loopback exclusive_caps=0 video_nr=10 card_label={LOOPBACK_LABEL}\n"
+            f"or pass --output /dev/videoN"
+        )
+
+    cap = open_capture(args.device, args.size, args.fps)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    options = ImageSegmenterOptions(
+        base_options=BaseOptions(model_asset_path=str(model_path())),
+        running_mode=RunningMode.VIDEO,
+        output_confidence_masks=True,
+    )
+
+    with ImageSegmenter.create_from_options(options) as segmenter, pyvirtualcam.Camera(
+        width, height, args.fps, device=output, fmt=pyvirtualcam.PixelFormat.BGR
+    ) as cam:
+        channel = person_channel(segmenter)
+        smoothed = None
+        frames = 0
+        viewer = None
+        try:
+            while True:
+                if viewer is not None and viewer.poll() is not None:
+                    break
+
+                ok, frame = cap.read()
+                if not ok:
+                    sys.exit("capture ended")
+
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                timestamp = int(frames * 1000 / args.fps)
+                result = segmenter.segment_for_video(Image(ImageFormat.SRGB, rgb), timestamp)
+                # numpy_view() borrows MediaPipe's buffer, which it recycles on
+                # the next call. The EMA below outlives that, so copy it.
+                mask = np.array(result.confidence_masks[channel].numpy_view(), dtype=np.float32, copy=True)
+
+                # Per-frame masks jitter at the silhouette; the EMA is what
+                # stops the edge from crawling and reading as obviously fake.
+                smoothed = mask if smoothed is None else args.smooth * mask + (1 - args.smooth) * smoothed
+
+                alpha = refine(smoothed, frame, args.cutoff)
+                cam.send(composite(frame, blurred(frame, args.strength, args.bloom), alpha))
+                if frames == 0:
+                    # Announce, and start the viewfinder, only once frames are
+                    # actually flowing: a consumer that opens the node before
+                    # the first write gets an error.
+                    print(f"{args.device} -> {cam.device} at {width}x{height}@{args.fps}", file=sys.stderr)
+                    if args.view:
+                        viewer = subprocess.Popen(["webcam", "-d", cam.device])
+                frames += 1
+        finally:
+            if viewer is not None and viewer.poll() is None:
+                viewer.terminate()
+
+
+if __name__ == "__main__":
+    # A killed producer leaves the loopback advertising neither output nor
+    # capture, and only a module reload clears that. Turn SIGTERM into a normal
+    # unwind so the device always closes properly.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

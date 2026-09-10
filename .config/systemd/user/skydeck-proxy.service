@@ -1,0 +1,12 @@
+[Unit]
+Description=Skydeck OpenAI-compatible proxy (Pi/dirge tool integration)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/home/dungngo/.asdf/shims/node /home/dungngo/dotfiles/.local/scripts/skydeck-proxy
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

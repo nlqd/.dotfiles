@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Live webcam preview through mpv.
+#
+# Plain `mpv /dev/video0` is unwatchable for two reasons. UVC cameras
+# advertise raw YUYV first, and uncompressed 720p does not fit in the USB
+# bandwidth, so the driver falls back to ~5fps; forcing MJPEG gets the full
+# rate. On top of that mpv buffers and clocks the stream like a file, which
+# --profile=low-latency and --untimed turn off.
+set -euo pipefail
+
+device=/dev/video0
+size=1280x720
+fps=30
+mpv_extra=()
+
+usage() {
+  cat <<EOF
+usage: webcam [-d DEVICE] [-s WxH] [-r FPS] [--flip] [--list] [-- MPV_ARGS...]
+
+  -d DEVICE  v4l2 device (default: $device)
+  -s WxH     capture size (default: $size)
+  -r FPS     capture rate (default: $fps)
+  --flip     mirror horizontally, selfie view
+  --list     print the device's formats and sizes, then exit
+
+Anything after -- is passed to mpv untouched.
+EOF
+  exit "${1:-0}"
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage 0 ;;
+    -d) device="$2"; shift 2 ;;
+    -s) size="$2"; shift 2 ;;
+    -r) fps="$2"; shift 2 ;;
+    --flip) mpv_extra+=(--vf=hflip); shift ;;
+    --list)
+      ffmpeg -hide_banner -f v4l2 -list_formats all -i "$device" 2>&1 \
+        | grep -E 'Raw|Compressed'
+      exit 0
+      ;;
+    --) shift; mpv_extra+=("$@"); break ;;
+    *) echo "unknown argument: $1" >&2; usage 1 ;;
+  esac
+done
+
+if [ ! -c "$device" ]; then
+  echo "no such video device: $device" >&2
+  exit 1
+fi
+
+# Forcing MJPEG is a USB bandwidth workaround, so it only applies to real
+# cameras. v4l2loopback nodes live on the virtual bus and carry whatever
+# format their producer writes, so let those negotiate themselves.
+demuxer_opts=()
+if [ ! -d "/sys/devices/virtual/video4linux/$(basename "$device")" ]; then
+  demuxer_opts+=(--demuxer-lavf-o="input_format=mjpeg,video_size=$size,framerate=$fps")
+fi
+
+# Logitech cameras emit a nonstandard JPEG APP marker that ffmpeg complains
+# about on every frame. Harmless, so keep it out of the terminal.
+exec mpv "av://v4l2:$device" \
+  "${demuxer_opts[@]}" \
+  --profile=low-latency \
+  --untimed \
+  --title="webcam $device" \
+  --msg-level=ffmpeg/video=error \
+  "${mpv_extra[@]}"

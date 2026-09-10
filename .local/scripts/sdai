@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# require: fzf jq nvim gum node
+# require: fzf jq nvim node
 # require(custom): richify
 
 set -o pipefail
@@ -26,6 +26,7 @@ MODELS["gem-31-pro"]=8545
 MODELS["gem-36-flash"]=9784
 MODELS["gpt-56-terra"]=9699
 MODELS["gpt-56-luna"]=9631
+MODELS["gpt-6-astra"]=9956
 MODELS["gpt-oss"]=7357
 
 # global context
@@ -288,14 +289,12 @@ start_chat_session() {
   while true; do
     dash
 
-    MESSAGE=$(gum write --char-limit=0 --width=0 --no-show-help --prompt="") || return
+    read -e -r MESSAGE || return
 
     if [[ -z "$MESSAGE" ]]; then
       # or: https://github.com/jake-stewart/inline
       nvim $(QUERY_FILE)
       MESSAGE=$(cat $(QUERY_FILE))
-    else
-      echo "$MESSAGE"
     fi
 
     # shell execute

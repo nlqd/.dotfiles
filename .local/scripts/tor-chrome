@@ -1,0 +1,16 @@
+#!/bin/bash
+
+if ! ss -tln 2>/dev/null | grep -q '127.0.0.1:9050'; then
+  echo "tor SOCKS proxy not listening on 127.0.0.1:9050 (is tor@default.service running?)" >&2
+  exit 1
+fi
+
+PROFILE="$HOME/.cache/tor-chrome-profile"
+mkdir -p "$PROFILE"
+
+google-chrome-stable \
+  --user-data-dir="$PROFILE" \
+  --proxy-server="socks5://127.0.0.1:9050" \
+  --new-window \
+  "${1:-https://web.archive.org/}" &
+disown
