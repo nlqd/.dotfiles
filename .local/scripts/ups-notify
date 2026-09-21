@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# upsmon runs this as user nut with no HOME, so state lives in a nut-owned, world-readable dir.
+STATE_DIR="/var/lib/ups-status"
+LOG_FILE="$STATE_DIR/events.jsonl"
+ONBATT_SINCE="$STATE_DIR/onbatt-since"
+REPORT_EVERY_S=600
+SAMPLE_EVERY_S=30
+# From the 2026-09-17 partial discharge test: healthy pack at ~13% load (~200W) => ~25-35 min.
+# Runtime is treated as inversely proportional to load, which is optimistic at high load.
+ANCHOR_LOAD=13
+ANCHOR_RUNTIME_S=1800
+
+: "${SLACK_WEBHOOK_URL:=}"   # empty = log-only, same fallback as disk-reaper.sh's notify()
+
+msg="${1:-}"
+type="${NOTIFYTYPE:-UNKNOWN}"
+ups="${UPSNAME:-prolink}"
+host=$(hostname -s)
+
+post() {
+    [[ -n "$SLACK_WEBHOOK_URL" ]] || return 0
+    local payload
+    payload=$(jq -nc --arg title "$1" --arg desc "$2" '{title: $title, description: $desc}')
+    curl -fsS -m 10 -X POST -H 'Content-Type: application/json' \
+        --data "$payload" "$SLACK_WEBHOOK_URL" > /dev/null || true
+}
+
+ups_var() {
+    upsc "$ups" "$1" 2>/dev/null || true
+}
+
+minutes_left() {  # $1 = fraction of the battery already used
+    local load
+    load=$(ups_var ups.load)
+    awk -v used="$1" -v pct="${load:-$ANCHOR_LOAD}" -v al="$ANCHOR_LOAD" -v ar="$ANCHOR_RUNTIME_S" \
+        'BEGIN { if (pct < 5) pct = 5; left = (1 - used) * ar * al / pct / 60; printf "%d", (left > 0 ? left : 0) }'
+}
+
+fmt_duration() {
+    if (( $1 < 60 )); then echo "${1}s"; else echo "$(( $1 / 60 ))m$(( $1 % 60 ))s"; fi
+}
+
+report_while_on_battery() {
+    exec 9> "$STATE_DIR/reporter.lock"
+    flock -n 9 || return 0
+    local used=0 elapsed=0 since_post=0 st load
+    while sleep "$SAMPLE_EVERY_S"; do
+        st=$(ups_var ups.status)
+        if [[ -n "$st" && "$st" != *OB* ]]; then
+            return 0
+        fi
+        elapsed=$(( elapsed + SAMPLE_EVERY_S ))
+        since_post=$(( since_post + SAMPLE_EVERY_S ))
+        load=$(ups_var ups.load)
+        used=$(awk -v used="$used" -v dt="$SAMPLE_EVERY_S" -v pct="${load:-$ANCHOR_LOAD}" -v al="$ANCHOR_LOAD" -v ar="$ANCHOR_RUNTIME_S" \
+            'BEGIN { if (pct < 5) pct = 5; printf "%.4f", used + dt * pct / (ar * al) }')
+        if (( since_post >= REPORT_EVERY_S )); then
+            since_post=0
+            post "🔋⏳ ${host}: still on battery, ~$(minutes_left "$used") min left" \
+                "On battery for $(fmt_duration "$elapsed"), load ${load:-?}%, battery $(ups_var battery.voltage)V (cuts off near 21V). Estimate assumes a healthy pack, roughly +/-30%."
+        fi
+    done
+}
+
+case "$type" in
+    ONBATT)
+        date +%s > "$ONBATT_SINCE"
+        title="🔋⚠️ ${host}: power out, UPS on battery"
+        desc="Load $(ups_var ups.load)%, battery $(ups_var battery.voltage)V. About $(minutes_left 0) min of runtime at this load. Updates every $(( REPORT_EVERY_S / 60 )) min while on battery."
+        ;;
+    ONLINE)
+        title="✅🔌 ${host}: power restored, UPS back on mains"
+        desc="$msg"
+        if [[ -f "$ONBATT_SINCE" ]]; then
+            desc="Back on mains after $(fmt_duration $(( $(date +%s) - $(cat "$ONBATT_SINCE") ))) on battery."
+            rm -f "$ONBATT_SINCE"
+        fi
+        ;;
+    LOWBATT) title="🪫🚨 ${host}: UPS battery LOW, shutdown imminent"; desc="$msg" ;;
+    FSD)     title="🛑 ${host}: forced shutdown started"; desc="$msg" ;;
+    COMMBAD) title="📡❌ ${host}: lost contact with UPS"; desc="$msg" ;;
+    COMMOK)  title="📡✅ ${host}: contact with UPS restored"; desc="$msg" ;;
+    *)       title="⚡ ${host}: UPS ${type}"; desc="$msg" ;;
+esac
+
+jq -nc \
+    --arg ts "$(date -Iseconds)" \
+    --arg type "$type" \
+    --arg ups "$ups" \
+    --arg msg "$msg" \
+    '{ts: $ts, type: $type, ups: $ups, message: $msg}' >> "$LOG_FILE"
+
+post "$title" "$desc"
+
+if [[ "$type" == ONBATT ]]; then
+    report_while_on_battery < /dev/null > /dev/null &
+fi
