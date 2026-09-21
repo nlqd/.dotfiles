@@ -205,15 +205,56 @@ pick_pod_id() {
 # MAIN OPS
 ###
 
+setup_mesh() {
+  local name="$1" member_ids
+  member_ids=$(get_pods | jq -c '[.results[] | select(.is_owner or .can_manage) | .id]')
+  [[ "$(jq 'length' <<<"$member_ids")" -lt 2 ]] && return
+  call "$BASE_URL/pods/meshes/" -X POST -d "$(jq -c --arg name "$name" '{name: $name, member_ids: .}' <<<"$member_ids")" |
+    jq -r '.id // empty'
+}
+
+teardown_mesh() {
+  [[ -z "$1" ]] && return
+  call "$BASE_URL/pods/meshes/$1/" -X DELETE -o /dev/null
+}
+
+close_terminal() {
+  [[ -z "$2" ]] && return
+  call "$BASE_URL/pods/instances/$1/terminals/$2/" -X DELETE -o /dev/null
+}
+
+# Most recent terminal nobody's currently attached to (empty driver_name), if any -
+# reattaching to a live-but-detached session beats always spawning a fresh one.
+pick_existing_terminal() {
+  call "$BASE_URL/pods/instances/$1/terminals/" |
+    jq -r '[.results[] | select(.driver_name == "")] | sort_by(.created_at) | last | .id // empty'
+}
+
+teardown_mesh_bg() {
+  local pid="$1" id_file="$2"
+  wait "$pid" 2>/dev/null
+  teardown_mesh "$(cat "$id_file" 2>/dev/null)"
+  rm -f "$id_file"
+}
+
 pod_shell() {
-  local pod_id term_json term_id attach_json token ws_url cookie
+  local pod_id term_json term_id attach_json token ws_url cookie mesh_pid mesh_id_file
 
   pod_id=$(pick_pod_id "$1")
   [[ -z "$pod_id" ]] && abort "No pod selected"
 
-  term_json=$(call -X POST -d '{}' "$BASE_URL/pods/instances/$pod_id/terminals/")
-  term_id=$(jq -r '.session.id // empty' <<<"$term_json")
-  [[ -z "$term_id" ]] && abort "Failed to create terminal: $term_json"
+  mesh_id_file=$(mktemp)
+  setup_mesh "sdai-auto-$$" >"$mesh_id_file" &
+  mesh_pid=$!
+  trap "teardown_mesh_bg '$mesh_pid' '$mesh_id_file'" EXIT
+
+  term_id=$(pick_existing_terminal "$pod_id")
+  if [[ -z "$term_id" ]]; then
+    term_json=$(call -X POST -d '{}' "$BASE_URL/pods/instances/$pod_id/terminals/")
+    term_id=$(jq -r '.session.id // empty' <<<"$term_json")
+    [[ -z "$term_id" ]] && abort "Failed to create terminal: $term_json"
+  fi
+  trap "close_terminal '$pod_id' '$term_id'; teardown_mesh_bg '$mesh_pid' '$mesh_id_file'" EXIT
 
   attach_json=$(call -X POST -d '{"role":"driver"}' "$BASE_URL/pods/instances/$pod_id/terminals/$term_id/attach/")
   token=$(jq -r '.token // empty' <<<"$attach_json")
@@ -275,12 +316,14 @@ require("https").get({
       if (!detach) return;
       process.stderr.write("\r\n[detached]\r\n");
       socket.end(frame(0x8, Buffer.alloc(0)));
-      process.exit(0);
+      process.exit(42); //
     });
 
     pump();
   });
 '
+  # exit 42 = detached (Ctrl-])
+  [[ $? -eq 42 ]] && trap "teardown_mesh_bg '$mesh_pid' '$mesh_id_file'" EXIT
 }
 
 start_chat_session() {

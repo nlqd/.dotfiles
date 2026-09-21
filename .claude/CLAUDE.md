@@ -137,6 +137,7 @@ PR descriptions should read smoothly to a human reviewer. Three rules:
 - Default to flowing prose over dense bullet lists. Bullets are for genuinely list-shaped content (test plans, file inventories)
 - Code spans (`like_this`) only for real identifiers: file paths, function/symbol names, exact strings being matched. Don't use them for emphasis or topic markers.
 - A comma or colon is strongly suggested to be used in place of emdash. Try to maintain a ratio of 100 comma/colon/other symbols to 1 emdash.
+- But, colon should not be overused as well.
 
 ### Other QOL improvement
 
