@@ -1,0 +1,280 @@
+#!/usr/bin/env bash
+
+# require: jq
+
+# A generic, tool-agnostic way for a process inside a bwrap sandbox (dbox/dclaude:
+# same uid and network as the host, but an isolated mount namespace) to invoke a
+# specific host-side binary without the box ever holding whatever credential that
+# binary needs. The box gets capability, never credential.
+#
+# Client (runs wherever, typically inside a box):
+#   hostrelay call <service> -- <argv...>
+# writes a request into a directory that only this box can see (bind-mounted by
+# the launcher, one directory per box, so isolation is a mount-namespace property,
+# not something this script has to enforce against other boxes), tails the
+# response as it is written, and exits with the remote command's real exit code.
+#
+# Server (host only, long-lived, e.g. under `systemctl --user`):
+#   hostrelay serve <service> <binary> [--timeout S] [--long-running VERB[,VERB...]] [--long-timeout S]
+# polls every box's request directory, execs <binary> with exactly the request's
+# argv (never a shell), and streams the result back. There is no semantic
+# allowlist here: the whole safety argument is that <binary> is unconditionally
+# safe to run with fully adversarial argv. That is a claim about <binary>, not
+# about this script, and it must be re-checked whenever <binary> changes.
+
+set -o pipefail
+
+ROOT="${HOSTRELAY_ROOT:-$HOME/.cache/hostrelay}"
+HEARTBEAT_MAX_AGE=15 # seconds; older than this and a caller assumes the server is dead
+POLL_INTERVAL=0.2
+DEFAULT_TIMEOUT=120 # seconds; hard backstop for an ordinary (bounded) command
+KILL_GRACE=5        # seconds between SIGTERM and SIGKILL on timeout
+REAP_AFTER=30       # minutes; how long a finished (.rc present) response may sit unread
+ORPHAN_AFTER=180    # minutes; how long an unclaimed/unfinished leftover may sit before it is given up on
+
+abort() {
+  echo "hostrelay: $1" >&2
+  exit 1
+}
+
+# A service or request id becomes part of a filesystem path, so it is restricted
+# to characters that can never mean anything else to a shell or a path walker.
+valid_name() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
+}
+
+heartbeat_fresh() {
+  local hb="$1" now mtime
+  now=$(date +%s)
+  mtime=$(stat --format=%Y "$hb" 2>/dev/null) || return 1
+  ((now - mtime <= HEARTBEAT_MAX_AGE))
+}
+
+# Set by client_call before installing the trap; a top-level handler (rather
+# than one nested and closed over locals) so it is unambiguously reachable.
+CLIENT_STOP_FILE=""
+CLIENT_STOPPED=""
+request_stop() {
+  [[ -n "$CLIENT_STOPPED" ]] && return
+  CLIENT_STOPPED=1
+  [[ -n "$CLIENT_STOP_FILE" ]] && : >"$CLIENT_STOP_FILE" 2>/dev/null
+}
+
+###
+# CLIENT
+###
+
+client_call() {
+  local service="$1" dir reqdir respdir heartbeat id tmp rc
+  shift
+  valid_name "$service" || abort "'$service' is not a valid service name"
+  [[ "${1:-}" == "--" ]] || abort "usage: hostrelay call <service> -- <argv...>"
+  shift
+
+  dir="$ROOT/$service"
+  reqdir="$dir/requests"
+  respdir="$dir/responses"
+  heartbeat="$dir/heartbeat"
+
+  [[ -d "$reqdir" ]] || abort "no relay directory for '$service' ($reqdir), is this box wired to one?"
+  # A box just launched can beat the server's poll loop to its first
+  # heartbeat touch (the loop discovers boxes/* fresh each cycle, it does
+  # not know about a box the instant its directory appears). Give that
+  # cold start the same grace window as a live heartbeat going stale,
+  # rather than aborting on a race that has nothing to do with the server
+  # actually being down.
+  local wait_start
+  wait_start=$(date +%s)
+  until heartbeat_fresh "$heartbeat"; do
+    (($(date +%s) - wait_start <= HEARTBEAT_MAX_AGE)) ||
+      abort "no live 'hostrelay serve $service' answering (stale or missing heartbeat), is it running on the host?"
+    sleep "$POLL_INTERVAL"
+  done
+
+  # mktemp actually creates+reserves the name, atomically: no dry-run race with another call
+  tmp=$(mktemp "$reqdir/XXXXXXXXXXXX.json.tmp") || abort "could not reserve a request id in $reqdir"
+  id=$(basename "$tmp" .json.tmp)
+  jq --null-input --compact-output --args '{argv: $ARGS.positional}' -- "$@" >"$tmp" || {
+    rm --force "$tmp"
+    abort "could not build the request"
+  }
+  mv --force "$tmp" "$reqdir/$id.json"
+
+  CLIENT_STOP_FILE="$reqdir/$id.stop"
+  # Both are trapped, but only one is reliable for a client run in the background
+  # (the common case for something like `slapi watch`): bash unconditionally sets
+  # SIGINT (and SIGQUIT) to ignored for an asynchronous job, and a script's own
+  # `trap ... INT` cannot override that inherited disposition, only SIGTERM's
+  # trap actually installs. INT still works normally for a foreground run, where
+  # a real terminal's Ctrl-C is the common case and this quirk does not apply.
+  trap request_stop EXIT INT TERM
+
+  : >>"$respdir/$id.stdout" # tail --retry needs somewhere to look before the server creates it
+  tail --follow=name --retry --sleep-interval="$POLL_INTERVAL" "$respdir/$id.stdout" &
+  local tail_pid=$!
+  while [[ ! -f "$respdir/$id.rc" ]]; do
+    if ! heartbeat_fresh "$heartbeat"; then
+      kill "$tail_pid" 2>/dev/null
+      abort "the host relay for '$service' went quiet mid-request (stale heartbeat), it may have crashed or restarted"
+    fi
+    sleep "$POLL_INTERVAL"
+  done
+  sleep 0.3 # let tail flush whatever just landed before it is killed
+  kill "$tail_pid" 2>/dev/null
+
+  cat "$respdir/$id.stderr" >&2 2>/dev/null
+  rc=$(<"$respdir/$id.rc")
+  rm --force "$respdir/$id.stdout" "$respdir/$id.stderr" "$respdir/$id.rc"
+  trap - EXIT INT TERM
+  exit "${rc:-1}"
+}
+
+###
+# SERVER
+###
+
+# One already-claimed request (moved out of requests/ into processing/ by the
+# poll loop, so the loop itself is never blocked by it). Runs as a background job.
+serve_one() {
+  local service="$1" binary="$2" max_time="$3" claimed="$4" respdir="$5"
+  local id argv_json child stop_at
+  id=$(basename "$claimed" .json)
+  respdir="${respdir%/}"
+
+  argv_json=$(jq --compact-output '.argv' <"$claimed" 2>/dev/null)
+  if ! jq --exit-status 'type == "array" and all(.[]; type == "string")' <<<"$argv_json" >/dev/null 2>&1; then
+    mv --force "$claimed" "$(dirname "$claimed")/../requests/$id.bad" 2>/dev/null
+    printf '1' >"$respdir/$id.rc.tmp"
+    mv --force "$respdir/$id.rc.tmp" "$respdir/$id.rc"
+    rm --force "$claimed"
+    return
+  fi
+  mapfile -t argv < <(jq --raw-output '.[]' <<<"$argv_json")
+
+  # timeout's own SIGTERM->SIGKILL escalation is the hard backstop; the .stop
+  # file below is the cooperative one the client uses when it is still alive.
+  # HOSTRELAY_SERVICE tells the target it is being run through the relay with
+  # fully adversarial argv, not typed by a human at a keyboard: a binary that
+  # is normally safe to invoke locally may still need to behave more
+  # defensively here (slapi, for one, ignores --out under this and always
+  # downloads to its own fixed directory).
+  HOSTRELAY_SERVICE="$service" timeout --kill-after="$KILL_GRACE" "$max_time" "$binary" "${argv[@]}" \
+    >"$respdir/$id.stdout" 2>"$respdir/$id.stderr" &
+  child=$!
+
+  stop_at="$(dirname "$claimed")/../requests/$id.stop"
+  while kill -0 "$child" 2>/dev/null; do
+    if [[ -f "$stop_at" ]]; then
+      kill -TERM "$child" 2>/dev/null
+      sleep "$KILL_GRACE"
+      kill -KILL "$child" 2>/dev/null
+      rm --force "$stop_at"
+      break
+    fi
+    sleep "$POLL_INTERVAL"
+  done
+  wait "$child" 2>/dev/null
+  printf '%s' "$?" >"$respdir/$id.rc.tmp"
+  mv --force "$respdir/$id.rc.tmp" "$respdir/$id.rc"
+  rm --force "$claimed"
+}
+
+# Reaps only what is provably safe to remove: a finished (.rc present) response
+# old enough that any client should have already read it, and requests/claims/
+# bad-files old enough that they are clearly abandoned. Deliberately never
+# touches a .stdout/.stderr with no .rc yet: that is exactly the file a live
+# `tail --follow` on a long `watch` session is still reading, quiet periods
+# included, and deleting it out from under that read would break the stream.
+sweep_box() {
+  local box="$1" rc id
+  for rc in "$box"/responses/*.rc; do
+    [[ -e "$rc" ]] || continue
+    find "$rc" -mmin "+$REAP_AFTER" -print0 2>/dev/null | while IFS= read -r -d '' f; do
+      id="${f%.rc}"
+      rm --force "$id.stdout" "$id.stderr" "$f"
+    done
+  done
+  find "$box/requests" "$box/processing" -maxdepth 1 -type f \
+    \( -name '*.json' -o -name '*.stop' -o -name '*.bad' \) -mmin "+$ORPHAN_AFTER" -delete 2>/dev/null
+}
+
+server_serve() {
+  local service="$1" binary="$2" max_time="$DEFAULT_TIMEOUT" long_verbs="" long_time=21600
+  shift 2
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    --timeout) max_time="$2" && shift ;;
+    --long-running) long_verbs="$2" && shift ;;
+    --long-timeout) long_time="$2" && shift ;;
+    *) abort "unknown serve option $1" ;;
+    esac
+    shift
+  done
+  valid_name "$service" || abort "'$service' is not a valid service name"
+  [[ -x "$binary" ]] || abort "$binary is not an executable file"
+
+  local dir="$ROOT/$service"
+  mkdir --parents "$dir/requests" "$dir/processing" "$dir/responses"
+  umask 077
+
+  # A .claimed request left over from a previous, now-dead server instance can
+  # never get a response (that instance's serve_one died with it): give it back
+  # to the queue so this instance picks it up fresh, rather than leaving the
+  # client waiting on a response that will never come.
+  local box
+  for box in "$dir" "$dir"/boxes/*; do
+    [[ -d "$box/processing" ]] || continue
+    for f in "$box"/processing/*.json; do
+      [[ -e "$f" ]] || continue
+      mv --force "$f" "$box/requests/$(basename "$f")" 2>/dev/null
+    done
+  done
+
+  echo "hostrelay: serving '$service' -> $binary, watching $dir" >&2
+  local req id verb this_max audit="$dir/audit.log"
+  while :; do
+    touch "$dir/heartbeat"
+    for box in "$dir" "$dir"/boxes/*; do
+      [[ -d "$box/requests" ]] || continue
+      [[ "$box" == "$dir" ]] || touch "$box/heartbeat" 2>/dev/null
+      mkdir --parents "$box/processing" "$box/responses"
+      for req in "$box"/requests/*.json; do
+        [[ -e "$req" ]] || continue
+        id=$(basename "$req" .json)
+        if [[ -z "$id" ]] || ! valid_name "$id"; then
+          mv --force "$req" "$box/requests/malformed.bad" 2>/dev/null
+          continue
+        fi
+        this_max="$max_time"
+        verb=$(jq --raw-output '.argv[0] // ""' <"$req" 2>/dev/null)
+        [[ -n "$long_verbs" && ",$long_verbs," == *",$verb,"* ]] && this_max="$long_time"
+        printf '%s\t%s\t%s\n' "$(date --iso-8601=seconds)" "$box" "$(jq --compact-output '.argv' <"$req" 2>/dev/null)" >>"$audit"
+        # atomically moved out of requests/ before it is touched again, so this loop never re-dispatches it
+        mv --force "$req" "$box/processing/$id.json" 2>/dev/null || continue
+        serve_one "$service" "$binary" "$this_max" "$box/processing/$id.json" "$box/responses" &
+      done
+      sweep_box "$box"
+    done
+    sleep "$POLL_INTERVAL"
+  done
+}
+
+main() {
+  local cmd="${1:-}"
+  case "$cmd" in
+  call)
+    shift
+    client_call "$@"
+    ;;
+  serve)
+    shift
+    [[ $# -ge 2 ]] || abort "usage: hostrelay serve <service> <binary> [--timeout S] [--long-running VERB,...] [--long-timeout S]"
+    server_serve "$@"
+    ;;
+  *)
+    abort "usage: hostrelay call <service> -- <argv...> | hostrelay serve <service> <binary> [flags]"
+    ;;
+  esac
+}
+
+main "$@"

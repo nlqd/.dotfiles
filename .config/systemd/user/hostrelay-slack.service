@@ -1,0 +1,12 @@
+[Unit]
+Description=hostrelay: read-only Slack access for sandboxed Claude Code sessions
+Documentation=file:///home/dungngo/.local/scripts/hostrelay
+
+[Service]
+Type=simple
+ExecStart=/home/dungngo/.local/scripts/hostrelay serve slack /home/dungngo/.local/scripts/slapi --long-running watch --long-timeout 21600
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

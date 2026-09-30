@@ -1,8 +1,8 @@
 [
   {
     "repo": "CircleCI-Public/circleci-cli",
-    "asset": "circleci-cli_1.0.50694_linux_amd64.tar.gz",
-    "version": "v1.0.50694",
+    "asset": "circleci-cli_1.0.51648_linux_amd64.tar.gz",
+    "version": "v1.0.51648",
     "links": {
       "circleci": "/home/dungngo/.local/bin/circleci"
     }
@@ -58,9 +58,17 @@
   {
     "repo": "hetznercloud/cli",
     "asset": "hcloud-linux-amd64.tar.gz",
-    "version": "v1.68.0",
+    "version": "v1.69.0",
     "links": {
       "hcloud": "/home/dungngo/.local/bin/hcloud"
+    }
+  },
+  {
+    "repo": "huseyinbabal/taws",
+    "asset": "taws-x86_64-unknown-linux-musl.tar.gz",
+    "version": "v1.3.0-rc.8",
+    "links": {
+      "taws": "/home/dungngo/.local/bin/taws"
     }
   },
   {
@@ -98,7 +106,7 @@
   {
     "repo": "tomasz-tomczyk/crit",
     "asset": "crit-linux-amd64",
-    "version": "v0.20.1",
+    "version": "v0.21.0",
     "links": {
       "crit-linux-amd64": "/home/dungngo/.local/bin/crit"
     }

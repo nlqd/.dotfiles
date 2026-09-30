@@ -12,6 +12,7 @@ When you understand the rules, please start with "I UNDERSTAND THE GLOBAL ORDER"
 - **Learning from existing code** - Study and plan before implementing
 - **Pragmatic over dogmatic** - Adapt to project reality
 - **Clear intent over clever code** - Be boring and obvious
+- **Always verify** - Assumptions are shortcuts but will bite
 
 ### Simplicity Means
 

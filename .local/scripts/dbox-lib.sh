@@ -25,6 +25,17 @@ dbox_namespaces() {
         --hostname bubblewrap --unshare-uts \
         --unshare-pid \
         --die-with-parent
+    # GPU: `--dev /dev` above gives the box a fresh minimal /dev, so the host's
+    # NVIDIA character devices are absent and nvidia-smi cannot reach the driver
+    # even though it is loaded (DN 2026-09-25, B0 GPU gate). Bind the nodes back.
+    # `--dev-bind-try` is a no-op when a node is missing, so this stays correct on
+    # a machine with no card. The nodes are mode 0666 on the host, so this grants
+    # the box what any local user already has, not more.
+    local _gpu_node
+    for _gpu_node in /dev/nvidia0 /dev/nvidiactl /dev/nvidia-modeset \
+                     /dev/nvidia-uvm /dev/nvidia-uvm-tools; do
+        dbox_add --dev-bind-try "$_gpu_node" "$_gpu_node"
+    done
     # The claude-bus mailbox: bind the host bus root into the box at the same path
     # so an agent in one box can message an agent in another (file mailbox; see the
     # claude-bus skill). Default matches claude-bus (~/.cache/claude-bus), which the
@@ -166,6 +177,35 @@ dbox_dotfiles() {
         --bind-try "$HOME/.R" "$HOME/.R"
 }
 
+# hostrelay lets a box invoke one specific host binary (e.g. slapi) without ever
+# holding the credential that binary needs; see .local/scripts/hostrelay. Call
+# once per service this box should reach, after dbox_dotfiles (it must land
+# after that call, since it overrides one path under the .cache bind above).
+#
+# A fresh directory is allocated on every call, unlike the claude-bus bind this
+# mirrors: that binds one already-shared mailbox, this creates the box's own
+# private slice. So it is opt-in per profile, not part of dbox_namespaces,
+# a profile that never calls it does not pay for one on every launch. The
+# bind lands at the exact path the box's own $HOME/.cache/hostrelay/$service
+# resolves to, so it fully shadows the broader .cache bind for that one
+# subtree: this box cannot see any other box's directory, because no path
+# inside its mount namespace reaches it, not because anything checks who is
+# asking. That guarantee holds only for a service actually wired this way;
+# a second hostrelay service with no dbox_hostrelay call of its own would
+# still be visible workspace-wide through the plain .cache bind, same as
+# before this existed.
+dbox_hostrelay() {
+    local service="$1" root box
+    root="${XDG_CACHE_HOME:-$HOME/.cache}/hostrelay/$service/boxes"
+    mkdir -p "$root"
+    box=$(mktemp -d "$root/XXXXXXXX")
+    # requests/ existing is both how the box's own slapi decides whether to even
+    # try delegating, and how the server's poll loop discovers this box at all:
+    # neither side creates it first, so it has to exist before either looks.
+    mkdir -p "$box/requests" "$box/responses"
+    dbox_add --bind "$box" "$HOME/.cache/hostrelay/$service"
+}
+
 # Claude config and credentials. Sources default to the standard layout; pass
 # alternates for a separate identity (the -rem profile's ~/.claude-rem). The
 # destinations inside the box are always the standard paths, so claude finds
@@ -236,10 +276,13 @@ dbox_feat_git_push() {
     else
         token=$(gh auth token)
     fi
+    # export, not --setenv: bwrap inherits the launcher env (no --clearenv), so
+    # this keeps the token out of argv (no ps / proc-cmdline leak). Same pattern
+    # as CLAUDE_CODE_OAUTH_TOKEN above.
+    export GH_TOKEN="$token"
     dbox_add \
         --ro-bind-try "$HOME/.gitconfig" "$HOME/.gitconfig" \
         "${gh_cfg[@]}" \
-        --setenv GH_TOKEN "$token" \
         --setenv GIT_CONFIG_COUNT 2 \
         --setenv GIT_CONFIG_KEY_0 "credential.https://github.com.helper" \
         --setenv GIT_CONFIG_VALUE_0 "!gh auth git-credential" \
