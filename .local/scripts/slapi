@@ -1,0 +1,1913 @@
+#!/usr/bin/env bash
+
+# require: jq fzf curl column pandoc perl gawk node
+# require(custom): chrome-cookies-linux
+#
+# Read-only Slack CLI riding on the Slack session already logged in to Chrome.
+# Mirrors the read tools of the claude.ai Slack connector (same output layout),
+# minus sending, and adds what the connector cannot do: download images and
+# attached files, and read canvases.
+#
+# The credentials are never stored, both are re-read from Chrome on every run
+# (lists and downloads are cached, see slapi refresh):
+#   d cookie <- Chrome's cookie DB (chrome-cookies-linux)
+#   xoxc-*   <- Chrome's localStorage LevelDB. Unlike cookies it is not
+#               encrypted, and the token is random so it survives LevelDB's
+#               block compression as a literal: a plain byte scan finds it.
+
+set -o pipefail
+
+# column prints non-ASCII as \xNN escapes and awk cannot fold case under the C locale
+# The effective charmap is what counts: a LANG naming a locale that is not installed means C.
+[[ "$(locale charmap 2>/dev/null)" == "UTF-8" ]] || export LC_ALL=C.UTF-8
+
+BASE_URL="${SLAPI_BASE_URL:-https://slack.com/api}"
+CHROME_DIR="$HOME/.config/google-chrome/Default"
+CACHE_ROOT="$HOME/.cache/slapi"
+FILES_DIR="$CACHE_ROOT/files"
+CACHE_TIMEOUT=600 # 10 minutes
+# a stalled connection must not hang an agent's tool call forever
+CONNECT_TIMEOUT=10
+API_MAX_TIME="${SLAPI_MAX_TIME:-60}"
+DOWNLOAD_MAX_TIME="${SLAPI_DOWNLOAD_MAX_TIME:-300}"
+
+# global context
+XOXC=""
+D_COOKIE=""
+CACHE_DIR="$CACHE_ROOT" # becomes a per-token subdirectory once the token is known
+RUN_TMP="" FETCH_TMP="" # scratch that cleanup() removes however the run ends
+ARGS=() GIVEN=() PARAMS=()
+LIMIT="" PAGE="" SKIP="" CURSOR="" OLDEST="" LATEST="" AFTER="" BEFORE=""
+TYPES="" SORT="" CONTEXT="" OUT=""
+CONCISE="false" ASC="false" MINE="false" FILES="false" BOTS="false"
+ARCHIVED="false" PRIVATE="false" LOCALE="false" ONLY_ME="false" OTHERS="false" JSON="false" EVENTS=""
+UNREAD="false" CHANGED="false"
+PL_CHANNEL="" PL_TS="" PL_THREAD=""
+
+# shared by every jq renderer, expects --slurpfile users <file holding {"U123":"name"}>
+# The map goes in by file: on Linux argv is capped at 128 KiB per argument and a
+# big workspace's user map is bigger than that.
+# shellcheck disable=SC2016
+JQ_DEFS='
+  def name_of($id): if $id == null then null else ((($users[0] // {})[$id]) | if . == null then null else (tostring | gsub("[\r\n]+"; " ")) end) end;
+  # Mentions come last but for entity decoding, so a display name like <!channel>
+  # or <https://x|Admin> stays the plain text it is.
+  def body:
+    gsub("<#(?<id>[CG][A-Z0-9]+)\\|(?<n>[^>]{0,256})>"; "#" + (if .n == "" then .id else .n end))
+    | gsub("<#(?<id>[CG][A-Z0-9]+)>"; "#" + .id)
+    | gsub("<!subteam\\^[A-Z0-9]+\\|(?<n>[^>]{0,256})>"; .n)
+    | gsub("<!subteam\\^(?<id>[A-Z0-9]+)>"; "@" + .id)
+    | gsub("<!(?<w>here|channel|everyone)(?:\\|[^>]{0,256})?>"; "@" + .w)
+    | gsub("<!date\\^[^|>]{0,256}\\|(?<f>[^>]{0,256})>"; .f)
+    | gsub("<(?<u>(?:https?|mailto|tel|slack|ftp):[^|>]{1,2048})\\|(?<l>[^>]{0,2048})>"; if .l == "" or .l == .u then .u else .l + " (" + .u + ")" end)
+    | gsub("<(?<u>(?:https?|mailto|tel|slack|ftp):[^>]{1,2048})>"; .u)
+    | gsub("<@(?<id>[UWS][A-Z0-9]+)(?:\\|(?<l>[^>]{0,256}))?>"; "@" + (name_of(.id) // .l // .id))
+    | gsub("&lt;"; "<") | gsub("&gt;"; ">") | gsub("&amp;"; "&");
+  # Text comes from other people. Continuation lines are indented so a message
+  # cannot forge a frame line, and one-line fields cannot break the line.
+  def indent($by): gsub("\n"; "\n" + $by);
+  def oneline: tostring | gsub("[\r\n]+"; " ");
+  def flat: walk(if type == "string" then gsub("[\r\n]+"; " ") else . end);
+  def ne: select(. != null and . != "");
+  # the shared shape of every result listing: heading, count, numbered blocks
+  def results($concise; $heading; $noun; items; blk; ln):
+    (items | length) as $n
+    | if $concise then (items[] | ln)
+      else "# Search Results for: \($heading)\n\n## \($noun) (\($n) results)",
+           (items | to_entries[] | "### Result \(.key + 1) of \($n)\n" + (.value | blk) + "\n---\n")
+      end;
+  def two: tostring | if length < 2 then "0" + . else . end;
+  def tzoff:
+    floor as $t
+    | (($t | localtime | mktime) - $t) as $o
+    | ($o | fabs) as $a
+    | (if $o < 0 then "-" else "+" end)
+      + (($a / 3600 | floor) | two)
+      + (if ($a % 3600) > 0 then ":" + ((($a % 3600) / 60 | floor) | two) else "" end);
+  def clock: tonumber | strflocaltime("%Y-%m-%d %H:%M");
+  def clock_s: tonumber | . as $t | ($t | strflocaltime("%Y-%m-%d %H:%M:%S")) + " " + ($t | tzoff);
+  def human:
+    if . >= 1048576 then "\((. / 104857.6 | floor) / 10) MB"
+    elif . >= 1024 then "\(. / 1024 | floor) KB"
+    else "\(.) B" end;
+  # a legacy attachment-only bot post (Grafana, old incoming webhooks) carries its real
+  # name inside the attachment, not at top level: fall back to that before the bare id
+  def author:
+    ((name_of(.user) | ne) // (.username | ne) // (.bot_profile.name | ne)
+     // ((.attachments[0].author_name // null) | ne) // (("via " + (.attachments[0].footer // "")) | ne)
+     // .user // .bot_id // "?") | oneline;
+  def author_id: (.user // .bot_id // "?") | oneline;
+  def is_bot: ((.bot_id // null) != null) or (.subtype == "bot_message");
+  # rich_text is plain text, not Slack-escaped: escape it so body() decodes it back untouched
+  def esc: gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;");
+  def url_safe: gsub("&"; "&amp;") | gsub("\\|"; "%7C") | gsub(">"; "%3E") | gsub("<"; "%3C");
+  def rt_element:
+    if .type == "text" then (.text | esc)
+    elif .type == "link" then "<\(.url | url_safe)|\((.text // .url) | esc)>"
+    elif .type == "date" then ((.fallback // (.timestamp | tostring)) | esc)
+    elif .type == "user" then "<@\(.user_id)>"
+    elif .type == "channel" then "<#\(.channel_id)>"
+    elif .type == "usergroup" then "<!subteam^\(.usergroup_id)>"
+    elif .type == "emoji" then ":\(.name):"
+    elif .type == "broadcast" then "<!\(.range)>"
+    else "" end;
+  def rt_line: [.elements[]? | rt_element] | join("");
+  def block_text:
+    if .type == "rich_text" then
+      ([.elements[]?
+        | if .type == "rich_text_list" then
+            (.style as $st | [.elements | to_entries[] | (if $st == "ordered" then "\(.key + 1). " else "- " end) + (.value | rt_line)] | join("\n"))
+          else rt_line end] | join("\n"))
+    elif .type == "section" then
+      ([.text.text?, ([.fields[]? | .text] | join(" | "))] | map(select(. != null and . != "")) | join("\n"))
+    elif (.text | type) == "object" then .text.text
+    elif .type == "context" then ([.elements[]? | .text // empty] | join(" "))
+    else empty end;
+  def own_text:
+    (if (.text // "") != "" then .text else ([.blocks[]? | block_text] | join("\n")) end) | body;
+  # no dangling blank body line when the message carries no text of its own (an
+  # attachment-only post: the "Attachments:" section is what actually has the content)
+  def own_body_line: own_text as $t | if $t == "" then "" else "\n    " + ($t | indent("    ")) end;
+  def attach_text: ([.attachments[]? | ((.text | ne) // (.pretext | ne) // (.fallback | ne) // (.title | ne) // empty)] | join(" / ")) | body;
+  def full_text: own_text as $t | if $t != "" then $t else attach_text end;
+  def line_text: full_text | gsub("\n"; " / ");
+  def file_desc:
+    "\(.id | oneline) \(.name // .title // "unnamed" | oneline) ("
+    + (if (.mimetype // .filetype) then
+         (((.mimetype // .filetype) | oneline) + ", " + (if .size then (.size | human) else "size unknown" end))
+       else "not shared with you yet, try slapi file" end)
+    + ")";
+  def file_lines: (.files // [])[] | "  - " + file_desc;
+  # .fallback is a squashed, single-line stand-in for .text: showing both duplicates the
+  # content badly, so prefer the real .title and only fall back to .fallback when there
+  # is no .text to show separately. No length cap: Slack itself already caps attachment
+  # text at 8000 characters, and own_text carries no cap either.
+  def attach_header:
+    (.title | ne) // (if (.text | ne) then null else (.fallback | ne) end) // "attachment";
+  def attach_lines:
+    (.attachments // [])[]
+    | ( ("  - \(attach_header | oneline)"
+         + (if (.from_url // .title_link) then " <\(.from_url // .title_link | oneline)>" else "" end)
+         + (if .image_url then " image: \(.image_url | oneline)" else "" end)),
+        ((.text // "") | body as $t | if $t == "" then empty else "    " + ($t | indent("    ")) end),
+        ((.fields // [])[] | "    \(.title // "?"): \((.value // "") | body | oneline)"),
+        ((.files // [])[] | "    - file " + file_desc) );
+  def all_files: [(.files // [])[], ((.attachments // [])[] | (.files // [])[])];
+  def reaction_line:
+    [(.reactions // [])[] | ":\(.name): x\(.count) (\((.users // []) | map(name_of(.) // .) | join(", ")))"] | join(", ");
+  def files_section:
+    if ((.files // []) | length) > 0
+    then "\nFiles (slapi file <id> to download):\n" + ([file_lines] | join("\n")) else "" end;
+  # A message the way read, thread and watch print it. $me tags your own with (you).
+  def you($me): if $me != "" and .user == $me then " (you)" else "" end;
+  def msg_block($chan; $me; $where; $lead):
+    "=== \($lead) \(author)\(you($me)) (\(author_id))\(if $where != "" then " in " + $where else "" end) at \(.ts | clock_s) ===\nMessage TS: \(.ts | oneline)" + own_body_line
+    + (if ((.reactions // []) | length) > 0 then "\nReactions: " + reaction_line else "" end)
+    + (if (.reply_count // 0) > 0 then "\nThread: \(.reply_count) replies, latest \(.latest_reply // .ts | clock_s)\(if $chan != "" then " (slapi thread \($chan) \(.ts))" else "" end)" else "" end)
+    + files_section
+    + (if ((.attachments // []) | length) > 0 then "\nAttachments:\n" + ([attach_lines] | join("\n")) else "" end)
+    + "\n";
+  def msg_line($me; $where):
+    "\(.ts | clock) \(if $where != "" then $where + " " else "" end)\(author)\(you($me)): \(line_text)"
+    + (if (.reply_count // 0) > 0 then "  [\(.reply_count) replies, ts \(.ts)]" else "" end)
+    + (if (all_files | length) > 0 then "  [files: \(all_files | map(.id) | join(", "))]" else "" end)
+    + (if ((.attachments // []) | length) > 0 and own_text != "" then "  [attached: \(attach_text | .[0:200] | gsub("\n"; " / "))]" else "" end);
+'
+
+# jq 1.7 folds ASCII only, so "Ánh" never matched "ánh". Fold by code point for the
+# scripts this workspace's names need: Latin (with Vietnamese), Greek, Cyrillic.
+# shellcheck disable=SC2016
+JQ_FOLD='
+  def fold_cp:
+    if . >= 65 and . <= 90 then . + 32
+    elif . >= 192 and . <= 222 and . != 215 then . + 32
+    elif . == 304 then 105
+    elif (. >= 256 and . <= 311) or (. >= 330 and . <= 375) then (if . % 2 == 0 then . + 1 else . end)
+    elif (. >= 313 and . <= 328) or (. >= 377 and . <= 382) then (if . % 2 == 1 then . + 1 else . end)
+    elif . == 376 then 255
+    elif . == 416 or . == 418 or . == 420 then . + 1
+    elif . == 431 then 432
+    elif . >= 7840 and . <= 7929 then (if . % 2 == 0 then . + 1 else . end)
+    elif . >= 913 and . <= 937 and . != 930 then . + 32
+    elif . >= 1040 and . <= 1071 then . + 32
+    elif . >= 1024 and . <= 1039 then . + 80
+    else . end;
+  def fold: explode | map(fold_cp) | implode;
+'
+
+# The post-filter for search hits, expects --argjson types/bots and --slurpfile mine
+# shellcheck disable=SC2016
+MATCH_FILTER='
+  def channel_type:
+    if .channel.is_im then "im" elif .channel.is_mpim then "mpim"
+    elif .channel.is_private then "private_channel" else "public_channel" end;
+  .messages.matches[]
+  | select(
+      channel_type as $ct
+      | (($types | length) == 0 or ($types | index($ct)) != null)
+        and ($mine[0] == null or (.channel.id as $c | $mine[0] | index($c)) != null)
+        and ($bots or (is_bot | not)))'
+
+###
+# LOCAL OPS
+###
+
+abort() {
+  sanitize <<<"$1" >&2
+  exit 1
+}
+
+need_value() {
+  [[ $# -ge 2 ]] || abort "slapi: $1 needs a value"
+}
+
+# Slack ts or unix seconds (9-10 digits), 0 for the beginning, else anything GNU date parses (2026-09-20)
+to_ts() {
+  if [[ "$1" == "0" || "$1" =~ ^[0-9]{9,10}(\.[0-9]+)?$ ]]; then
+    echo "$1"
+  elif [[ "$1" =~ ^[0-9]+$ && ! "$1" =~ ^[0-9]{8}$ ]]; then
+    return 1 # GNU date would read 2026 as 20:26 today, and 12 as noon
+  else
+    # a 13-digit millisecond epoch is no date either, so it fails here rather than reaching Slack as year 58000
+    date --date "$1" +%s 2>/dev/null || return 1
+  fi
+}
+
+# Slack sends p1790000300000100 in permalinks, the API wants 1790000300.000100
+normalize_ts() {
+  if [[ "$1" =~ ^p([0-9]{10})([0-9]{6})$ ]]; then
+    echo "${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+  else
+    echo "$1"
+  fi
+}
+
+# https://x.slack.com/archives/C123/p1790000300000100[?thread_ts=1790000100.000100]
+parse_permalink() {
+  [[ "$1" =~ /archives/([A-Z0-9]+)/p([0-9]{10})([0-9]{6}) ]] || return 1
+  PL_CHANNEL="${BASH_REMATCH[1]}"
+  PL_TS="${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+  PL_THREAD="$PL_TS"
+  if [[ "$1" =~ thread_ts=([0-9]+\.[0-9]+) ]]; then
+    PL_THREAD="${BASH_REMATCH[1]}"
+  fi
+}
+
+parse_flags() {
+  ARGS=()
+  GIVEN=()
+  while [[ $# -gt 0 ]]; do
+    [[ "$1" == --* && "$1" != "--" ]] && GIVEN+=("$1")
+    case "$1" in
+    --concise) CONCISE="true" ;;
+    --asc) ASC="true" ;;
+    --public) TYPES="public_channel" ;;
+    --mine) MINE="true" ;;
+    --files) FILES="true" ;;
+    --bots) BOTS="true" ;;
+    --archived) ARCHIVED="true" ;;
+    --private) PRIVATE="true" ;;
+    --locale) LOCALE="true" ;;
+    --only-me) ONLY_ME="true" ;;
+    --others) OTHERS="true" ;;
+    --json) JSON="true" ;;
+    --unread) UNREAD="true" ;;
+    --changed) CHANGED="true" ;;
+    --events) need_value "$@" && EVENTS="$2" && shift ;;
+    --limit) need_value "$@" && LIMIT="$2" && shift ;;
+    --page) need_value "$@" && PAGE="$2" && shift ;;
+    --skip) need_value "$@" && SKIP="$2" && shift ;;
+    --cursor) need_value "$@" && CURSOR="$2" && shift ;;
+    --oldest) need_value "$@" && OLDEST="$2" && shift ;;
+    --latest) need_value "$@" && LATEST="$2" && shift ;;
+    --after) need_value "$@" && AFTER="$2" && shift ;;
+    --before) need_value "$@" && BEFORE="$2" && shift ;;
+    --types) need_value "$@" && TYPES="$2" && shift ;;
+    --sort) need_value "$@" && SORT="$2" && shift ;;
+    --context) need_value "$@" && CONTEXT="$2" && shift ;;
+    --out) need_value "$@" && OUT="$2" && shift ;;
+    --)
+      shift
+      ARGS+=("$@")
+      return
+      ;;
+    --*) abort "slapi: unknown flag $1, slapi help <command> lists the flags" ;;
+    *) ARGS+=("$1") ;; # includes -term, so search-users can exclude
+    esac
+    shift
+  done
+}
+
+# The help text is the contract: a flag is valid for a command when its help lists it
+check_flags() {
+  local cmd="$1" flag allowed
+  allowed=$(command_help "$cmd" | grep --only-matching --extended-regexp '^  --[a-z-]+' | tr --delete ' ')
+  for flag in "${GIVEN[@]}"; do
+    grep --quiet --line-regexp --fixed-strings -- "$flag" <<<"$allowed" ||
+      abort "slapi: $cmd does not take $flag, slapi help $cmd lists its flags"
+  done
+}
+
+validate_flags() {
+  local name parsed
+  for name in LIMIT PAGE; do
+    [[ -z "${!name}" || "${!name}" =~ ^[1-9][0-9]{0,5}$ ]] || abort "slapi: --${name,,} must be a positive number below a million"
+  done
+  [[ -z "$CONTEXT" || "$CONTEXT" =~ ^[0-9]{1,3}$ ]] || abort "slapi: --context must be a number, at most 100"
+  [[ -z "$SKIP" || "$SKIP" =~ ^[0-9]{1,5}$ ]] || abort "slapi: --skip must be a number below 100000"
+  [[ -z "$CONTEXT" ]] || CONTEXT=$((10#$CONTEXT))
+  [[ -z "$SKIP" ]] || SKIP=$((10#$SKIP))
+  [[ "${CONTEXT:-0}" -le 100 ]] || abort "slapi: --context is at most 100"
+  [[ -z "$EVENTS" || "$EVENTS" =~ ^(message|reaction|file|marked|typing|all)(,(message|reaction|file|marked|typing|all))*$ ]] ||
+    abort "slapi: --events is a comma list of message, reaction, file, marked, typing, all"
+  [[ "$ONLY_ME" != "true" || "$OTHERS" != "true" ]] || abort "slapi: --only-me and --others exclude each other"
+  [[ " ${GIVEN[*]} " != *" --public "* || " ${GIVEN[*]} " != *" --types "* ]] ||
+    abort "slapi: --public and --types both choose the channel types, use one of them"
+  [[ -z "$SORT" || "$SORT" =~ ^(score|timestamp)$ ]] || abort "slapi: --sort is score or timestamp"
+  [[ -z "$TYPES" || "$TYPES" =~ ^(public_channel|private_channel|mpim|im)(,(public_channel|private_channel|mpim|im))*$ ]] ||
+    abort "slapi: --types is a comma list of public_channel, private_channel, mpim, im"
+
+  for name in OLDEST LATEST AFTER BEFORE; do
+    [[ -z "${!name}" ]] && continue
+    parsed=$(to_ts "${!name}") || abort "slapi: cannot parse time for --${name,,}"
+    printf -v "$name" '%s' "$parsed"
+  done
+}
+
+scan_xoxc() {
+  local dir="$CHROME_DIR/Local Storage/leveldb"
+  {
+    grep --recursive --text --only-matching --no-filename --extended-regexp 'xoxc-[0-9A-Za-z-]+' "$dir"
+    # Chrome writes a localStorage value as UTF-16LE (a NUL after every byte) once it holds
+    # any character above U+00FF, a Vietnamese name in the config is enough
+    grep --recursive --text --only-matching --no-filename --perl-regexp \
+      'x\x00o\x00x\x00c\x00-\x00(?:[0-9A-Za-z-]\x00)+' "$dir" | tr --delete '\000'
+  } | sort --unique || true
+}
+
+# Scratch files can hold message text, so they live in one per-run directory that
+# is removed on any exit, including a failed call or Ctrl-C.
+cleanup() {
+  if [[ -n "$RUN_TMP" ]]; then
+    rm --recursive --force "$RUN_TMP"
+  fi
+  if [[ -n "$FETCH_TMP" ]]; then
+    rm --force "$FETCH_TMP"
+  fi
+  return 0
+}
+
+# Call directly, not in $(...). The directory is made once, but every shell that
+# works in it needs its own trap: a subshell (the dispatch pipeline) does not
+# inherit the parent's, and would leave its FETCH_TMP behind.
+ensure_run_tmp() {
+  if [[ -z "$RUN_TMP" ]]; then
+    RUN_TMP=$(mktemp --directory "$CACHE_DIR/run.XXXXXX") || abort "slapi: cannot create a scratch directory in $CACHE_DIR"
+  fi
+  trap cleanup EXIT
+}
+
+# Every stored candidate, dropping the ones Slack no longer accepts: LevelDB keeps
+# old values around until it compacts, so a re-login leaves stale tokens behind.
+# Prints "token<TAB>team" for each live one.
+live_tokens() {
+  local token res team err
+  while IFS= read -r token; do
+    [[ -n "$token" ]] || continue
+    if res=$(XOXC="$token" call auth.test 2>"$RUN_TMP/probe.err"); then
+      team=$(jq --raw-output '.team // empty' <<<"$res")
+      [[ -z "$team" ]] || printf '%s\t%s\n' "$token" "$team"
+    else
+      err=$(tail --lines 1 "$RUN_TMP/probe.err")
+      # Slack answered and said no (invalid_auth, token_revoked, org_login_required, team_disabled...): this token is out
+      if [[ "$err" =~ auth\.test:\ ([a-z_]+)$ && ! "${BASH_REMATCH[1]}" =~ ^(ratelimited|internal_error|service_unavailable|fatal_error|request_timeout)$ ]]; then
+        continue
+      fi
+      # an outage or a throttle says nothing about the token, and guessing could pick the wrong workspace
+      abort "slapi: could not ask Slack whether a token is live: $err"
+    fi
+  done
+}
+
+sha12() {
+  printf '%s' "$1" | sha256sum | cut --characters 1-12
+}
+
+# Picks the live token out of several candidates. Probing each one costs a round
+# trip per candidate on every run, so the choice is remembered for a while as a
+# hash (never the token itself), keyed on the candidate set.
+choose_token() {
+  local tokens="$1" team="${SLAPI_TEAM:-}" file live token want
+  file="$CACHE_ROOT/live-$(sha12 "$tokens|$team")"
+
+  if fresh "$file"; then
+    want=$(<"$file")
+    while IFS= read -r token; do
+      if [[ "$(sha12 "$token")" == "$want" ]]; then
+        echo "$token"
+        return 0
+      fi
+    done <<<"$tokens"
+  fi
+
+  live=$(live_tokens <<<"$tokens") || return 1
+  [[ -n "$live" ]] ||
+    abort "slapi: Chrome holds $(wc --lines <<<"$tokens") xoxc tokens and Slack accepts none of them, log in to Slack in Chrome again"
+  if [[ -n "$team" ]]; then
+    live=$(WANTED="${team,,}" awk --field-separator='\t' 'tolower($2) == ENVIRON["WANTED"]' <<<"$live")
+    [[ -n "$live" ]] || abort "slapi: no live token in Chrome belongs to a workspace named '$team'"
+  fi
+  # two live tokens for one workspace (an old session, Enterprise Grid) are one choice, not two
+  live=$(awk --field-separator='\t' '!seen[$2]++' <<<"$live")
+  [[ "$(wc --lines <<<"$live")" -eq 1 ]] ||
+    abort "slapi: Chrome holds live tokens for several workspaces ($(cut --fields 2 <<<"$live" | paste --serial --delimiters ,)), set SLAPI_TEAM to one of those names"
+  token=$(cut --fields 1 <<<"$live")
+  sha12 "$token" >"$file"
+  echo "$token"
+}
+
+load_auth() {
+  local tokens
+
+  # The credentials go wherever this points, so it may only be Slack (or loopback, for tests)
+  [[ "$BASE_URL" =~ ^https://([A-Za-z0-9-]+\.)*slack\.com/api$ || "$BASE_URL" =~ ^http://(127\.0\.0\.1|localhost)(:[0-9]+)?/ ]] ||
+    abort "slapi: SLAPI_BASE_URL must be https://<something>.slack.com/api (or a loopback URL for tests), it receives your credentials"
+
+  # Both credentials live in Chrome's profile. Without one (a sandbox has no browser) the cookie
+  # tool would end in a Python traceback, so say what is missing and the way out.
+  if [[ -z "${SLAPI_D_COOKIE:-}" && ! -r "$CHROME_DIR/Cookies" ]]; then
+    abort "slapi: no Chrome profile at $CHROME_DIR (inside a sandbox there is no browser), set SLAPI_D_COOKIE and SLAPI_XOXC, or run slapi outside it"
+  fi
+
+  # chrome-cookies-linux matches the host with LIKE %slack.com%, so take only slack.com itself
+  D_COOKIE="${SLAPI_D_COOKIE:-$(chrome-cookies-linux slack.com d | awk --field-separator='\t' '$1 ~ /^#HttpOnly_\.?slack\.com$/ { print $7; exit }')}"
+  # Both values end up inside curl's stdin config, so refuse anything that could break out of it
+  [[ "$D_COOKIE" =~ ^xoxd-[A-Za-z0-9%._~+/=-]+$ ]] || abort "slapi: no usable Slack d cookie in Chrome, log in to Slack there"
+
+  XOXC="${SLAPI_XOXC:-}"
+  if [[ -z "$XOXC" ]]; then
+    tokens=$(scan_xoxc)
+    [[ -n "$tokens" ]] || abort "slapi: no xoxc token in Chrome localStorage, open Slack in Chrome once"
+    if [[ "$(wc --lines <<<"$tokens")" -eq 1 && -z "${SLAPI_TEAM:-}" ]]; then
+      XOXC="$tokens"
+    else
+      ensure_run_tmp
+      XOXC=$(choose_token "$tokens") || exit 1
+    fi
+  fi
+  [[ "$XOXC" =~ ^xoxc-[0-9A-Za-z-]+$ ]] || abort "slapi: the xoxc token looks malformed"
+
+  # Cached lists belong to one workspace, so key the cache on the token
+  CACHE_DIR="$CACHE_ROOT/t-$(sha12 "$XOXC")"
+  mkdir --parents "$CACHE_DIR"
+  # downloads are kept for a month, then they go
+  if [[ -d "$FILES_DIR" ]]; then
+    find "$FILES_DIR" -type f -mtime +30 -delete 2>/dev/null || true
+  fi
+  # A run that was killed leaves cache temp files (user lists) and run.* directories
+  # (search hits, message text) behind. An hour is long past any live run.
+  # A re-login makes a new token and so a new t-* directory, the old one is dead weight
+  # (names and emails) after a month. The current one is never touched.
+  find "$CACHE_ROOT" -mindepth 1 -maxdepth 2 -path "$FILES_DIR" -prune -o \
+    \( \( \( -name 'run.??????' -o -name '*.??????' \) -mmin +60 \) -o \( -name 't-*' -type d -mtime +30 -not -path "$CACHE_DIR" \) \) \
+    -exec rm --recursive --force {} + 2>/dev/null || true
+}
+
+# Is this cache file younger than CACHE_TIMEOUT? A concurrent refresh may delete it
+# between the check and the stat, which must read as "no", not as a syntax error.
+fresh() {
+  local mtime
+  mtime=$(stat --format=%Y "$1" 2>/dev/null) || return 1
+  (($(date +%s) - mtime < CACHE_TIMEOUT))
+}
+
+# cached <name> <cmd...>: run cmd at most once per CACHE_TIMEOUT, print its output
+cached() {
+  local file="$CACHE_DIR/$1" tmp
+  shift
+
+  if fresh "$file"; then
+    cat "$file"
+    return
+  fi
+
+  # A tmp name per process, so parallel cold-cache runs cannot trample each other.
+  # The command runs in its own subshell: a failing call ends its shell with exit,
+  # and that must not skip the cleanup below.
+  tmp=$(mktemp "$file.XXXXXX") || return 1
+  ("$@") >"$tmp" || {
+    rm --force "$tmp"
+    return 1
+  }
+  mv "$tmp" "$file" && cat "$file"
+}
+
+# jq --args would swallow words like -intern as its own options
+args_json() {
+  if [[ $# -eq 0 ]]; then
+    echo '[]'
+    return
+  fi
+  printf '%s\n' "$@" | jq --raw-input . | jq --slurp --compact-output .
+}
+
+hint_more() {
+  if [[ -n "$2" ]]; then
+    sanitize <<<"More results: $1 $2" >&2
+  fi
+}
+
+###
+# NETWORK CALLS
+###
+
+# curl config on stdin: the credentials never appear in argv
+auth_config() {
+  printf 'header = "Authorization: Bearer %s"\nheader = "Cookie: d=%s"\n' "$XOXC" "$D_COOKIE"
+}
+
+# Slack answers 200 with {"ok":false,"error":...} on failure, so check .ok, and
+# 429 with a Retry-After, which is waited out (bounded) a couple of times.
+# Credentials go through curl's stdin config to keep them out of argv.
+call() {
+  local method="$1" args=() kv out res meta retry attempt err
+  shift
+  for kv in "$@"; do
+    args+=(--data-urlencode "$kv")
+  done
+
+  for attempt in 1 2 3; do
+    out=$(auth_config |
+      curl --disable --silent --show-error --request POST --config - "${args[@]}" \
+        --connect-timeout "$CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
+        --write-out $'\n%{http_code} %header{retry-after}' "$BASE_URL/$method") ||
+      abort "slapi: curl failed on $method"
+    meta="${out##*$'\n'}"
+    res="${out%$'\n'*}"
+    [[ "${meta%% *}" == "429" && "$attempt" -lt 3 ]] || break
+
+    retry="${meta#* }"
+    [[ "$retry" =~ ^[0-9]+$ ]] || retry=5
+    retry=$((retry > 30 ? 30 : retry))
+    echo "slapi: rate limited on $method, waiting ${retry}s" >&2
+    sleep "$retry"
+  done
+
+  jq --exit-status '.ok' <<<"$res" >/dev/null 2>&1 || {
+    err=$(jq --raw-output '.error // "unknown"' <<<"$res" 2>/dev/null) || err="not JSON: ${res:0:200}"
+    [[ -n "$err" ]] || err="HTTP ${meta%% *} with an empty or unreadable answer"
+    abort "slapi: $method: $err"
+  }
+  echo "$res"
+}
+
+# Follows cursors, prints one JSON item per line taken from .$key
+call_all() {
+  local method="$1" key="$2" cursor="" res
+  shift 2
+
+  while :; do
+    res=$(call "$method" "$@" limit=999 ${cursor:+"cursor=$cursor"}) || exit 1
+    jq --compact-output ".${key}[]" <<<"$res" || exit 1
+    cursor=$(jq --raw-output '.response_metadata.next_cursor // empty' <<<"$res")
+    [[ -n "$cursor" ]] || break
+  done
+}
+
+# The credentials only ever go to Slack's file store, never to another *.slack.com
+# path (a GET to slack.com/api/chat.postMessage?... would be a write), and never
+# across a redirect.
+is_slack_file_url() {
+  # dot segments (or their %2e form) would walk out of /files-pri/ into /api/ once the path is normalized
+  [[ "$1" != *"/.."* && "$1" != *%2[eE]* && "$1" != *%2[fF]* && "$1" != *%5[cC]* && "$1" != *\\* ]] &&
+    [[ "$1" =~ ^https://files\.slack\.com/files-(pri|tmb|edge)/ ]]
+}
+
+# fetch_url <url> <dest> [html-ok]
+# Downloads to a temp name first, so an interrupted run never leaves a truncated
+# file that a later run would take for a finished one.
+fetch_url() {
+  local url="$1" dest="$2" tmp meta code ctype
+  [[ ! "$url" =~ [[:cntrl:]] ]] || abort "slapi: refusing a URL with control characters"
+  ensure_run_tmp
+  tmp=$(mktemp "$dest.XXXXXX") || abort "slapi: cannot write next to $dest"
+  FETCH_TMP="$tmp"
+
+  # --url keeps a leading - from being read as a curl option, --globoff stops [1-50] expanding
+  if is_slack_file_url "$url"; then
+    meta=$(auth_config |
+      curl --disable --silent --show-error --globoff --path-as-is --config - --output "$tmp" \
+        --connect-timeout "$CONNECT_TIMEOUT" --max-time "$DOWNLOAD_MAX_TIME" \
+        --write-out '%{http_code} %{content_type}' --url "$url")
+  else
+    meta=$(curl --disable --silent --show-error --globoff --path-as-is --location --proto '=https' --output "$tmp" \
+      --connect-timeout "$CONNECT_TIMEOUT" --max-time "$DOWNLOAD_MAX_TIME" \
+      --write-out '%{http_code} %{content_type}' --url "$url")
+  fi || abort "slapi: curl failed on $url"
+
+  code="${meta%% *}"
+  ctype="${meta#* }"
+  [[ "$code" == "200" ]] || abort "slapi: download failed, HTTP $code for $url"
+  # Slack answers a rejected session with a 200 sign-in page
+  if [[ "$ctype" == text/html* && -z "${3:-}" ]] && is_slack_file_url "$url"; then
+    abort "slapi: got an HTML page instead of a file, is the Slack session still valid?"
+  fi
+  mv "$tmp" "$dest"
+  FETCH_TMP=""
+}
+
+auth_info() {
+  cached auth call auth.test
+}
+
+user_map() {
+  cached users call_all users.list members |
+    jq --slurp --compact-output '
+      map(. as $u | {
+        key: $u.id,
+        value: ([$u.profile.display_name, $u.real_name, $u.name] | map(select(. != null and . != "")) | .[0] // $u.id | gsub("[\r\n]+"; " "))
+      }) | from_entries'
+}
+
+# Path of the cached id-to-name map, for jq --slurpfile
+users_file() {
+  cached users-map user_map >/dev/null || return 1
+  echo "$CACHE_DIR/users-map"
+}
+
+# Ids of every conversation you are in, archived ones too (list_conversations hides those)
+list_my_conversation_ids() {
+  cached conversations-all call_all users.conversations channels \
+    types=public_channel,private_channel,mpim,im |
+    jq --slurp --compact-output 'map(.id)'
+}
+
+# TSV: name, kind, id, user id (dms only)
+list_conversations() {
+  local users
+  users=$(users_file) || exit 1
+
+  cached conversations-all call_all users.conversations channels \
+    types=public_channel,private_channel,mpim,im |
+    jq --raw-output --slurpfile users "$users" '
+      select((.is_archived // false) | not)
+      | [ (if .is_im then (($users[0] // {})[.user] // .user) else .name end),
+        (if .is_im then "dm" elif .is_mpim then "group" elif .is_private then "private" else "channel" end),
+        .id,
+        (.user // "") ] | map(tostring | gsub("[\t\r\n]+"; " ")) | join("\t")'
+}
+
+# Every public channel in the workspace, same TSV shape as list_conversations
+list_workspace_channels() {
+  cached "channels-public_channel-false" call_all conversations.list channels \
+    types=public_channel exclude_archived=true |
+    jq --raw-output '[.name, "channel", .id, ""] | map(tostring | gsub("[\t\r\n]+"; " ")) | join("\t")'
+}
+
+# stdin: TSV rows. $1 query, $2 kind regex. Case-insensitive whole-name match.
+exact_match() {
+  local exact
+  # through ENVIRON: awk --assign would turn a backslash in a name into an escape
+  exact=$(KINDS="$2" QUERY="${1,,}" awk --field-separator='\t' '$2 ~ ENVIRON["KINDS"] && tolower($1) == ENVIRON["QUERY"]')
+  [[ -n "$exact" ]] || return 0
+  if [[ "$(grep --count . <<<"$exact")" -gt 1 ]]; then
+    echo "slapi: several conversations are named $1, using the first" >&2
+  fi
+  head --lines 1 <<<"$exact"
+}
+
+# stdin: TSV rows. Fuzzy on the name column only, so short queries cannot hit ids or kinds.
+# fzf's own operators are stripped from the query, so !gen means gen.
+# -i has no long form: fzf's default smart-case turns case-sensitive on any capital letter
+fuzzy_match() {
+  local query="${1//[\'!^\$|\\]/}"
+  [[ -n "$query" ]] || return 0
+  awk --field-separator='\t' --assign kinds="$2" '$2 ~ kinds' | fzf --filter "$query" -i --delimiter '\t' --nth 1 | head --lines 1
+}
+
+# A leading # or @ narrows to channels or people. Whole-name matches beat fuzzy
+# ones, and your own conversations beat the rest of the workspace.
+# Prints the id. Exit 1: nothing matched. Exit 2: a lookup failed and said why.
+# Each list is fetched once and passed on as text, so a dead session fails on the
+# first call instead of repeating it for every fallback.
+pick_conversation_id() {
+  local raw="${1:-}" query kinds='.' rows workspace="" selected user_shaped="" uid
+  query="${raw#[#@]}"
+  case "$raw" in
+  "#"*) kinds='^(channel|private)$' ;;
+  "@"*) kinds='^(dm|group)$' ;;
+  esac
+
+  if [[ -n "$raw" && -z "$query" ]]; then
+    echo "slapi: nothing after $raw, give a name" >&2
+    return 2
+  fi
+  rows=$(list_conversations) || return 2
+
+  if [[ -z "$query" ]]; then
+    selected=$(fzf --prompt="Select a conversation: " <<<"$rows")
+    [[ -n "$selected" ]] || return 1
+    cut --fields 3 <<<"$selected"
+    return
+  fi
+
+  # A whole name wins even when it is shaped like an id (a channel named DEPLOYMENTS)
+  selected=$(exact_match "$query" "$kinds" <<<"$rows")
+
+  if [[ -z "$selected" && "$query" =~ ^[CDG][A-Z0-9]{8,}$ ]]; then
+    # CONTRIBUTORS has no digit, so it may be a channel you have not joined: look at the names first
+    if [[ "$query" =~ [0-9] ]]; then
+      echo "$query"
+      return
+    fi
+    # a failed listing just means the word is used as the id it looks like
+    workspace=$(list_workspace_channels) || workspace=""
+    selected=$(exact_match "$query" "$kinds" <<<"$workspace")
+    if [[ -z "$selected" ]]; then
+      echo "$query"
+      return
+    fi
+  fi
+
+  if [[ -z "$selected" && "$kinds" != '^(channel|private)$' && "$query" =~ ^[UW][A-Z0-9]{8,}$ ]]; then
+    selected=$(awk --field-separator='\t' --assign user="$query" '$4 == user' <<<"$rows")
+    user_shaped="yes"
+  fi
+
+  if [[ -z "$selected" && "$kinds" != '^(dm|group)$' ]]; then
+    # The workspace list only adds whole-name matches outside your own conversations, so
+    # a throttled or failed fetch must not stop a lookup your own conversations can answer.
+    if workspace=$(list_workspace_channels); then
+      selected=$(exact_match "$query" "$kinds" <<<"$workspace")
+    else
+      echo "slapi: could not list the workspace's channels, matching your own conversations only" >&2
+      workspace=""
+    fi
+  fi
+  if [[ -z "$selected" && "$kinds" != '^(channel|private)$' && ! "$query" =~ ^[UW][A-Z0-9]{8,}$ ]]; then
+    # a DM is named by display name, so @dung.ngo (the handle) needs the user list to find it
+    uid=$(resolve_user_id "$query" 2>/dev/null) || uid=""
+    if [[ -n "$uid" ]]; then
+      selected=$(awk --field-separator='\t' --assign user="$uid" '$4 == user' <<<"$rows")
+      if [[ -z "$selected" && "$kinds" == '^(dm|group)$' ]]; then
+        # @name is exactly a person, so fuzzy-matching it onto a group chat would read the wrong conversation
+        echo "slapi: no open DM with $query" >&2
+        return 2
+      fi
+    fi
+  fi
+  if [[ -z "$selected" ]]; then
+    selected=$(fuzzy_match "$query" "$kinds" <<<"$rows")
+  fi
+  if [[ -z "$selected" && -n "$workspace" ]]; then
+    echo "slapi: nothing among your conversations, trying all public channels" >&2
+    selected=$(fuzzy_match "$query" "$kinds" <<<"$workspace")
+  fi
+  if [[ -z "$selected" ]]; then
+    # WORKSPACES looks like a user id, so only say "no DM" once the names have had their turn
+    if [[ -n "$user_shaped" ]]; then
+      echo "slapi: no open DM with $query" >&2
+      return 2
+    fi
+    return 1
+  fi
+  cut --fields 3 <<<"$selected"
+}
+
+channel_label() {
+  local row kind name
+  row=$(list_conversations | awk --field-separator='\t' --assign id="$1" '$3 == id { print $2 "\t" $1; exit }')
+
+  if [[ -n "$row" ]]; then
+    IFS=$'\t' read -r kind name <<<"$row"
+    case "$kind" in
+    dm) echo "DM with $name" ;;
+    group) echo "$name" ;;
+    *) echo "#$name" ;;
+    esac
+    return
+  fi
+
+  name=$(call conversations.info "channel=$1" 2>/dev/null | jq --raw-output '.channel.name // empty')
+  if [[ -n "$name" ]]; then
+    echo "#$name"
+  else
+    echo "$1"
+  fi
+}
+
+# Exit 1: no such user. Exit 2: the user list could not be fetched, already said so.
+resolve_user_id() {
+  local query="${1#@}" list ids
+  [[ -n "$query" ]] || return 1
+  if [[ "$query" =~ ^[UW][A-Z0-9]{8,}$ ]]; then
+    echo "$query"
+    return
+  fi
+
+  list=$(cached users call_all users.list members) || return 2
+  ids=$(jq --raw-output --arg query "$query" "$JQ_FOLD"'
+    ($query | fold) as $q
+    | select((.deleted | not) and ([.name, .real_name, .profile.display_name] | map(. // "" | fold) | index($q)))
+    | .id' <<<"$list")
+  [[ -n "$ids" ]] || return 1
+  if [[ "$(grep --count . <<<"$ids")" -gt 1 ]]; then
+    echo "slapi: several users match $query, using the first" >&2
+  fi
+  head --lines 1 <<<"$ids"
+}
+
+###
+# RENDERING (stdin JSON -> text). $1 is always the users file.
+###
+
+# .messages as returned by Slack, newest first for history, oldest first for replies
+render_messages() {
+  jq --raw-output --slurpfile users "$1" --arg heading "$2" --argjson asc "$3" \
+    --arg chan "${4:-}" --argjson concise "$CONCISE" "$JQ_DEFS"'
+    (.messages | if $asc then reverse else . end) as $msgs
+    | (if $concise then empty else "Channel: \($heading)\n" end),
+      ($msgs[] | if $concise then msg_line(""; "") else msg_block($chan; ""; ""; "Message from") end)'
+}
+
+render_matches() {
+  jq --raw-output --slurpfile users "$1" --arg query "$2" --argjson concise "$CONCISE" "$JQ_DEFS"'
+    def where:
+      if .channel.is_im then "DM with " + (name_of(.channel.name // .channel.user) // .channel.name // .channel.user // "?")
+      elif .channel.is_mpim then (.channel.name // "group")
+      else "#" + (.channel.name // .channel.id) end;
+    def context_lines:
+      if (has("context") | not) then ""
+      elif .context == null then "\nContext before: unavailable"
+      elif (.context | length) == 0 then ""
+      else "\nContext before:\n" + ([.context[] | "- From: \(author) (ID: \(author_id))\n  Message_ts: \(.ts | oneline)\n  \(full_text | indent("  "))"] | join("\n"))
+      end;
+    def block:
+      "Channel: \(where) (ID: \(.channel.id))\nFrom: \(author) (ID: \(author_id))\(if is_bot then "  [BOT]" else "" end)\nTime: \(.ts | clock_s)\nMessage_ts: \(.ts | oneline)\nPermalink: \(.permalink | oneline)\nText: \(full_text | indent("    "))"
+      + files_section
+      + context_lines;
+    def line: "\(.ts | clock) \(where) \(author): \(line_text)  \(.permalink | oneline)";
+    results($concise; $query; "Messages"; .messages.matches; block; line)'
+}
+
+render_file_matches() {
+  jq --raw-output --slurpfile users "$1" --arg query "$2" --argjson concise "$CONCISE" "$JQ_DEFS"'
+    def who: name_of(.user) // .username // .user // "?";
+    def block:
+      "File: \(.name // .title // "unnamed") (ID: \(.id))\nType: \(.mimetype // .filetype // "?")\nSize: \((.size // 0) | human)\nFrom: \(who)\nTime: \(.timestamp | clock_s)\nPermalink: \(.permalink)\nDownload: slapi file \(.id)";
+    def line: "\(.timestamp | clock) \(.id) \(.name // .title // "unnamed") (\(.mimetype // .filetype // "?"), \((.size // 0) | human)) \(who)";
+    (.files.matches |= map(flat)) | results($concise; $query; "Files"; .files.matches; block; line)'
+}
+
+render_channels() {
+  jq --raw-output --slurpfile users "$1" --arg team "$2" --argjson concise "$CONCISE" "$JQ_DEFS"'
+    def block:
+      "Name: #\(.name)\nCreator: \(name_of(.creator) // .creator // "?") (\(.creator // "?"))\nCreated: \(.created | clock_s)\nTopic: \(.topic.value // "")\nPurpose: \(.purpose.value // "")\nPermalink: \($team)archives/\(.id)\nIs Archived: \(.is_archived // false)\nChannel Type: \(if .is_private then "private_channel" else "public_channel" end)";
+    def line: "#\(.name)  \(.id)  \([.topic.value, .purpose.value] | map(select(. != null and . != "")) | (.[0] // "") | gsub("\n"; " "))";
+    map(flat) | results($concise; "channels"; "Channels"; .; block; line)'
+}
+
+render_users() {
+  jq --raw-output --slurpfile users /dev/null --arg team "$1" --argjson concise "$CONCISE" "$JQ_DEFS"'
+    def block:
+      "Name: \(.name)\nUser ID: \(.id)\nTitle: \(.profile.title // "")\nEmail: \(.profile.email // "")\nTimezone: \(.tz // "")\nProfile Pic: [Photo](\(.profile.image_original // .profile.image_192 // ""))\nPermalink: [link](\($team)team/\(.id))";
+    def line: "\(.id)  \(.name)  \(.real_name // "")  \(.profile.title // "")  \(.profile.email // "")";
+    map(flat) | results($concise; "users"; "Users"; .; block; line)'
+}
+
+render_profile() {
+  jq --raw-output --arg org "$1" --argjson concise "$CONCISE" --argjson locale "$LOCALE" '
+    def yn: if . then "Yes" else "No" end;
+    (.user |= walk(if type == "string" then gsub("[\r\n]+"; " ") else . end)) | .user as $u
+    | if $concise then
+        "\($u.id)  \($u.name)  \($u.real_name // "")  \($u.profile.title // "")  \($u.profile.email // "")  \($u.tz // "")"
+      else
+        "User ID: \($u.id)",
+        "Username: \($u.name)",
+        "Display Name: \($u.profile.display_name // "")",
+        "Real Name: \($u.real_name // "")",
+        "Pronouns: \($u.profile.pronouns // "")",
+        "Title: \($u.profile.title // "")",
+        "Email: \($u.profile.email // "")",
+        "Organization Name: \($org)",
+        "Phone: \($u.profile.phone // "")",
+        "Status: \($u.profile.status_emoji // "") \($u.profile.status_text // "")",
+        "Timezone: \($u.tz // "")",
+        "Admin: \($u.is_admin | yn)",
+        "Owner: \($u.is_owner | yn)",
+        "Bot: \($u.is_bot | yn)",
+        "Restricted: \($u.is_restricted | yn)",
+        (if $locale then "Locale: \($u.locale // "")" else empty end)
+      end'
+}
+
+###
+# MAIN OPS
+###
+
+# $1 is pick_conversation_id's exit code: 2 means it already said what went wrong.
+# An empty query means the fzf picker was cancelled, which needs no explaining.
+no_conversation() {
+  [[ "$1" -ne 2 ]] || exit 1
+  if [[ -n "$2" ]]; then
+    abort "slapi: no conversation matches '$2', find one with slapi channels, slapi dms or slapi search-channels <words>, or slapi refresh if it is new to you"
+  fi
+  abort "slapi: no conversation selected"
+}
+
+# Adds limit, oldest, latest and cursor to PARAMS, for the two message readers
+paging_params() {
+  [[ "${LIMIT:-100}" -le 999 ]] || abort "slapi: Slack serves at most 999 messages per call, use --cursor for more"
+  PARAMS+=("limit=${LIMIT:-100}")
+  if [[ -n "$OLDEST" ]]; then PARAMS+=("oldest=$OLDEST"); fi
+  if [[ -n "$LATEST" ]]; then PARAMS+=("latest=$LATEST"); fi
+  if [[ -n "$CURSOR" ]]; then PARAMS+=("cursor=$CURSOR"); fi
+}
+
+# Words past the last argument a command takes are a mistake (an unquoted name with a space), not noise
+max_args() {
+  [[ ${#ARGS[@]} -le "$2" ]] || abort "slapi: $1 takes $2 argument(s) here, quote a name that contains spaces"
+}
+
+show_history() {
+  local channel users res at=""
+  max_args read 1
+  if parse_permalink "${ARGS[0]:-}"; then
+    channel="$PL_CHANNEL"
+    at="$PL_TS"
+    if [[ "$PL_THREAD" != "$PL_TS" ]]; then
+      echo "slapi: that message is a thread reply, showing its thread" >&2
+      show_thread
+      return
+    fi
+  else
+    channel=$(pick_conversation_id "${ARGS[0]:-}") || no_conversation "$?" "${ARGS[0]:-}"
+  fi
+  users=$(users_file) || exit 1
+
+  PARAMS=("channel=$channel")
+  paging_params
+  # a permalink means that message, so start the page at it (an explicit --latest wins)
+  if [[ -n "$at" && -z "$LATEST" ]]; then PARAMS+=("latest=$at" "inclusive=true"); fi
+
+  res=$(call conversations.history "${PARAMS[@]}") || exit 1
+  render_messages "$users" "$(channel_label "$channel") ($channel)" "$ASC" "$channel" <<<"$res" || return 1
+  hint_more "--cursor" "$(jq --raw-output '.response_metadata.next_cursor // empty' <<<"$res")"
+}
+
+show_thread() {
+  local channel ts users res
+  max_args thread 2
+  if parse_permalink "${ARGS[0]:-}"; then
+    channel="$PL_CHANNEL"
+    ts="$PL_THREAD"
+  else
+    [[ -n "${ARGS[1]:-}" ]] || abort "Usage: slapi thread <channel> <ts> | slapi thread <message permalink>"
+    channel=$(pick_conversation_id "${ARGS[0]}") || no_conversation "$?" "${ARGS[0]}"
+    ts=$(normalize_ts "${ARGS[1]}")
+  fi
+  users=$(users_file) || exit 1
+
+  PARAMS=("channel=$channel" "ts=$ts")
+  paging_params
+
+  res=$(call conversations.replies "${PARAMS[@]}") || exit 1
+  render_messages "$users" "$(channel_label "$channel") ($channel) thread $ts" false <<<"$res" || return 1
+  hint_more "--cursor" "$(jq --raw-output '.response_metadata.next_cursor // empty' <<<"$res")"
+}
+
+# stdin: one match per line. stdout: the same, plus .context (the N messages
+# before it, oldest first), or .context null when they could not be fetched.
+# A hit inside a thread needs conversations.replies, history never returns replies.
+# Expects RUN_TMP to exist.
+thread_context() {
+  local channel="$1" thread="$2" before="$3" n="$4" cursor="" res pages=0 file="$RUN_TMP/thread"
+  : >"$file"
+  while :; do
+    res=$(call conversations.replies "channel=$channel" "ts=$thread" "latest=$before" limit=200 ${cursor:+"cursor=$cursor"}) || return 1
+    jq --compact-output '.messages[]' <<<"$res" >>"$file"
+    cursor=$(jq --raw-output '.response_metadata.next_cursor // empty' <<<"$res")
+    [[ -n "$cursor" ]] || break
+    pages=$((pages + 1))
+    [[ "$pages" -lt 10 ]] || return 1
+  done
+  tail --lines "$n" "$file" | jq --slurp --compact-output '{messages: .}'
+}
+
+with_context() {
+  local n="$1" match channel ts thread ctx
+  while IFS= read -r match; do
+    read -r channel ts thread < <(jq --raw-output '
+      "\(.channel.id) \(.ts) \(((.permalink // "") | capture("thread_ts=(?<t>[0-9.]+)")? | .t) // "-")"' <<<"$match")
+
+    if [[ "$thread" != "-" && "$thread" != "$ts" ]]; then
+      ctx=$(thread_context "$channel" "$thread" "$ts" "$n") || ctx=""
+    else
+      ctx=$(call conversations.history "channel=$channel" "latest=$ts" "limit=$n" |
+        jq --compact-output '{messages: (.messages | reverse)}') || ctx=""
+    fi
+    # by file, a few huge messages would blow the 128 KiB argv limit
+    jq --compact-output --slurpfile ctx <(printf '%s' "${ctx:-null}") '. + {context: ($ctx[0].messages // null)}' <<<"$match"
+  done
+}
+
+# $1 unix time, $2 like "-1" or "+1": the local date that many calendar days away.
+# Adding 86400 seconds instead lands an hour off across a DST change.
+date_of() {
+  date --date "$(date --date "@${1%%.*}" +%F) $2 day" +%F
+}
+
+run_search() {
+  local query="${ARGS[*]}" params method users res types work mine page pages next="" fetched=0 limit="${LIMIT:-20}"
+  local start skip="${SKIP:-0}" target kept
+
+  [[ -n "$query" ]] || abort "Usage: slapi search <query> [--public] [--types T] [--mine] [--files] [--bots] [--after D] [--before D] [--context N] [--sort score|timestamp] [--asc] [--limit N] [--page N] [--concise]"
+  [[ "$limit" -le 100 ]] || abort "slapi: Slack searches serve at most 100 hits per page"
+  [[ "$CONCISE" != "true" || "${CONTEXT:-0}" -eq 0 ]] ||
+    abort "slapi: --concise has no room for --context, and each context costs an API call per hit"
+  # Slack's after:/before: are exclusive of the day, widen by one to match the connector's inclusive range
+  [[ -n "$AFTER" ]] && query+=" after:$(date_of "$AFTER" -1)"
+  [[ -n "$BEFORE" ]] && query+=" before:$(date_of "$BEFORE" +1)"
+
+  method="search.messages"
+  if [[ "$FILES" == "true" ]]; then
+    method="search.files"
+    [[ -z "$TYPES" && "$MINE" != "true" && "$BOTS" != "true" && -z "$CONTEXT" && -z "$SKIP" ]] ||
+      abort "slapi: --public, --types, --mine, --bots, --context and --skip work on messages, they do nothing with --files"
+  fi
+
+  params=("query=$query" "count=$limit" "sort=${SORT:-score}" "sort_dir=$([[ "$ASC" == "true" ]] && echo asc || echo desc)")
+  users=$(users_file) || exit 1
+  page="${PAGE:-1}"
+  start="$page"
+  target=$((skip + limit))
+
+  if [[ "$FILES" == "true" ]]; then
+    res=$(call "$method" "${params[@]}" "page=$page") || exit 1
+    render_file_matches "$users" "$query" <<<"$res" || return 1
+    next=$(jq --raw-output 'if .files.paging.page < .files.paging.pages then .files.paging.page + 1 else empty end' <<<"$res")
+    if [[ -n "$next" ]]; then hint_more "--page" "$next${LIMIT:+ --limit $LIMIT}"; fi
+    return
+  fi
+
+  types=$(jq --raw-input --compact-output 'split(",") | map(select(. != ""))' <<<"$TYPES")
+  ensure_run_tmp
+  work="$RUN_TMP/hits"
+  mine="$RUN_TMP/mine"
+  : >"$mine"
+  if [[ "$MINE" == "true" ]]; then
+    list_my_conversation_ids >"$mine" || exit 1
+  fi
+
+  # Slack pages the raw hits and the filters run here afterwards, so keep pulling
+  # pages until skip+limit hits survive (or the hits run out, or 5 pages), then
+  # show exactly the slice asked for. The hint resumes right after it.
+  : >"$work"
+  while :; do
+    res=$(call "$method" "${params[@]}" "page=$page") || exit 1
+    jq --compact-output --slurpfile users "$users" --argjson types "$types" --slurpfile mine "$mine" \
+      --argjson bots "$BOTS" "$JQ_DEFS$MATCH_FILTER" <<<"$res" >>"$work" || exit 1
+    fetched=$((fetched + 1))
+    # coerced in jq: this number goes into bash arithmetic, where a string would be evaluated
+    pages=$(jq --raw-output '(.messages.paging.pages // 1 | tonumber? // 1 | floor)' <<<"$res")
+    if ((page >= pages)); then
+      next=""
+      break
+    fi
+    next=$((page + 1))
+    if (($(wc --lines <"$work") >= target || fetched >= 5)); then
+      break
+    fi
+    page="$next"
+  done
+
+  kept=$(wc --lines <"$work")
+  tail --lines "+$((skip + 1))" "$work" | head --lines "$limit" >"$RUN_TMP/slice"
+  mv "$RUN_TMP/slice" "$work"
+
+  if [[ -n "$CONTEXT" && "$CONTEXT" -gt 0 ]]; then
+    with_context "$CONTEXT" <"$work" >"$RUN_TMP/ctx" && mv "$RUN_TMP/ctx" "$work"
+  fi
+
+  jq --slurp '{messages: {matches: .}}' "$work" | render_matches "$users" "$query" || return 1
+  if ((kept > target)); then
+    hint_more "--page" "$start --skip $target${LIMIT:+ --limit $LIMIT}"
+  elif [[ -n "$next" ]]; then
+    hint_more "--page" "$next --skip 0${LIMIT:+ --limit $LIMIT}"
+  fi
+}
+
+# render_page <json array> <render function> [its args...]: one page of a local
+# result list, then the hint for the next
+render_page() {
+  local all="$1" render="$2" limit="${LIMIT:-20}" page="${PAGE:-1}" total
+  shift 2
+  total=$(jq 'length' <<<"$all")
+  jq --compact-output --argjson limit "$limit" --argjson page "$page" '.[($page - 1) * $limit : $page * $limit]' <<<"$all" |
+    "$render" "$@" || return 1
+  if ((total > page * limit)); then
+    hint_more "--page" "$((page + 1))${LIMIT:+ --limit $LIMIT}"
+  fi
+}
+
+search_channels() {
+  local types="public_channel" users team terms all
+
+  [[ ${#ARGS[@]} -gt 0 ]] || abort "Usage: slapi search-channels <words...>"
+  [[ "$PRIVATE" == "true" ]] && types+=",private_channel"
+  terms=$(args_json "${ARGS[@]}")
+  users=$(users_file) || exit 1
+  team=$(auth_info | jq --raw-output '.url') || exit 1
+
+  all=$(cached "channels-$types-$ARCHIVED" call_all conversations.list channels \
+    "types=$types" "exclude_archived=$([[ "$ARCHIVED" == "true" ]] && echo false || echo true)" |
+    jq --slurp --compact-output --argjson terms "$terms" "$JQ_FOLD"'
+      map(select(
+        ([.name, .topic.value, .purpose.value] | map(. // "") | join(" ") | fold) as $hay
+        | all($terms[]; . as $t | $hay | contains($t | fold))))') || exit 1
+
+  render_page "$all" render_channels "$users" "$team"
+}
+
+search_users() {
+  local terms team all
+
+  [[ ${#ARGS[@]} -gt 0 ]] || abort "Usage: slapi search-users <terms...> (a leading - excludes a term)"
+  terms=$(args_json "${ARGS[@]}")
+  team=$(auth_info | jq --raw-output '.url') || exit 1
+
+  all=$(cached users call_all users.list members |
+    jq --slurp --compact-output --argjson terms "$terms" "$JQ_FOLD"'
+      def hay:
+        [.name, .real_name, .profile.display_name, .profile.email, .profile.title,
+         ((.profile.fields // {}) | [.[]?.value] | join(" "))]
+        | map(. // "") | join(" ") | fold;
+      ($terms | map(fold)) as $t
+      | ($t | map(select(startswith("-") | not))) as $inc
+      | ($t | map(select(startswith("-") and length > 1) | .[1:])) as $exc
+      | map(select((.deleted | not) and (hay as $h | all($inc[]; . as $x | $h | contains($x)) and all($exc[]; . as $x | $h | contains($x) | not))))') || exit 1
+
+  render_page "$all" render_users "$team"
+}
+
+show_profile() {
+  local target org res auth
+  max_args profile 1
+  auth=$(auth_info) || exit 1
+  if [[ -n "${ARGS[0]:-}" ]]; then
+    target=$(resolve_user_id "${ARGS[0]}")
+    case $? in
+    0) ;;
+    2) exit 1 ;;
+    *) abort "slapi: no user matches ${ARGS[0]}" ;;
+    esac
+  else
+    target=$(jq --raw-output '.user_id' <<<"$auth")
+  fi
+  org=$(jq --raw-output '.team' <<<"$auth")
+
+  res=$(call users.info "user=$target" include_locale=true) || exit 1
+  render_profile "$org" <<<"$res"
+}
+
+# download_file <F-id | url> <dir>, prints the local path
+download_file() {
+  local ref="$1" dir="$2" info id name url mime dest html=""
+
+  if [[ "$ref" =~ ^F[A-Z0-9]{8,}$ ]]; then
+    info=$(call files.info "file=$ref") || exit 1
+    id="$ref"
+    name=$(jq --raw-output '.file.name // .file.title // .file.id' <<<"$info")
+    url=$(jq --raw-output '.file.url_private_download // .file.url_private // empty' <<<"$info")
+    mime=$(jq --raw-output '.file.mimetype // ""' <<<"$info")
+    [[ -n "$url" ]] || abort "slapi: $ref has no download URL, open $(jq --raw-output '.file.permalink' <<<"$info")"
+    # An external file's URL is whatever its creator typed, possibly an internal address
+    is_slack_file_url "$url" ||
+      abort "slapi: $ref lives outside Slack's file store ($url), pass that URL to slapi file yourself if you mean to fetch it"
+    # an uploaded .html file is a legitimate HTML download
+    [[ "$mime" == text/html* ]] && html="html-ok"
+  else
+    url="$ref"
+    id="url-$(printf '%s' "$ref" | sha256sum | cut --characters 1-8)"
+    name="${url%%[?#]*}"
+    name="${name##*/}"
+    # an original in Slack's file store may be an uploaded .html file, which files.info can tell from a sign-in page
+    if is_slack_file_url "$url" && [[ "$url" =~ /files-pri/T[A-Z0-9]+-(F[A-Z0-9]+)/ ]]; then
+      mime=$(call files.info "file=${BASH_REMATCH[1]}" 2>/dev/null | jq --raw-output '.file.mimetype // ""') || mime=""
+      [[ "$mime" == text/html* ]] && html="html-ok"
+    fi
+  fi
+
+  name="${name//[^A-Za-z0-9._-]/_}"
+  dest="$dir/$id-${name:0:100}"
+  if [[ ! -s "$dest" ]]; then
+    fetch_url "$url" "$dest" $html
+  fi
+  echo "$dest"
+}
+
+show_files() {
+  local ref dir="${OUT:-$FILES_DIR}"
+  # Under the relay, argv is fully adversarial (see hostrelay): a caller could
+  # point --out at any path this process can write to. Ignore it there and
+  # always use the fixed download directory, as if --out were never given.
+  [[ -n "${HOSTRELAY_SERVICE:-}" ]] && dir="$FILES_DIR"
+  [[ ${#ARGS[@]} -gt 0 ]] || abort "Usage: slapi file <F... | url>... [--out DIR]"
+
+  mkdir --parents "$dir"
+  for ref in "${ARGS[@]}"; do
+    download_file "$ref" "$dir"
+  done
+}
+
+show_canvas() {
+  local id="${ARGS[0]:-}" info url tmp filetype
+  max_args canvas 1
+  [[ "$id" =~ ^F[A-Z0-9]{8,}$ ]] || abort "Usage: slapi canvas <canvas id, F...>"
+
+  info=$(call files.info "file=$id") || exit 1
+  filetype=$(jq --raw-output '.file.filetype // ""' <<<"$info")
+  [[ "$filetype" == "quip" || "$filetype" == "canvas" ]] ||
+    abort "slapi: $id is not a canvas (its type is ${filetype:-unknown}), slapi file $id downloads it"
+  url=$(jq --raw-output '.file.url_private // empty' <<<"$info")
+  [[ -n "$url" ]] || abort "slapi: canvas $id has no content URL"
+  # off Slack's file store there would be no credentials, and the answer would be a login page
+  is_slack_file_url "$url" || abort "slapi: canvas $id lives outside Slack's file store ($url)"
+
+  ensure_run_tmp
+  tmp="$RUN_TMP/canvas.html"
+  fetch_url "$url" "$tmp" html-ok
+  # --sandbox: a canvas is user HTML, and an <iframe src> would otherwise make pandoc fetch it
+  # --quiet: the sandbox cannot load pandoc's translation files and warns once per element
+  pandoc --sandbox --quiet --from html --to gfm --wrap=none "$tmp" || abort "slapi: pandoc could not convert canvas $id"
+}
+
+# Escape hatch for exploring, read-only methods only
+raw_api() {
+  local method="${ARGS[0]:-}" arg allowed='^(auth\.test|search\.(messages|files|all)|[a-z]+(\.[a-zA-Z]+)*\.(list|info|get|history|replies|members|lookup))$'
+  [[ -n "$method" ]] || abort "Usage: slapi api <method> [key=value...]"
+  [[ "$method" =~ $allowed ]] || abort "slapi: api is read-only, refusing $method"
+  # curl reads a local file for name@file, so every argument must be key=value
+  for arg in "${ARGS[@]:1}"; do
+    [[ "$arg" =~ ^[A-Za-z_.]+= ]] || abort "slapi: api arguments are key=value, got $arg"
+  done
+
+  call "$method" "${ARGS[@]:1}" | jq .
+}
+
+# The socket end of watch. A WebSocket client is not something bash can be, so a small
+# node script (sdai does the same for its pod shell) takes {url, cookie} on stdin and
+# prints every frame as one line. Exit 10 means the connection is gone: reconnect.
+# shellcheck disable=SC2016
+PUMP_JS='
+let buf = "";
+// the reader went away (Ctrl-C, or the shell was killed): leave quietly instead of a stack trace
+process.stdout.on("error", () => process.exit(0));
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (d) => {
+  buf += d;
+  const i = buf.indexOf("\n");
+  if (i >= 0) {
+    process.stdin.pause();
+    start(JSON.parse(buf.slice(0, i)));
+  }
+});
+function start(cfg) {
+  // if the shell that started this dies (it was killed, not stopped), do not linger on Slack
+  const parent = process.ppid;
+  setInterval(() => {
+    if (process.ppid !== parent) process.exit(0);
+  }, 2000);
+  const ws = new WebSocket(cfg.url, { headers: { Cookie: `d=${cfg.cookie}`, Origin: "https://app.slack.com" } });
+  let seq = 0;
+  let last = Date.now();
+  setInterval(() => {
+    if (Date.now() - last > 90000) {
+      console.error("slapi watch: no word from Slack for 90 s");
+      process.exit(10);
+    }
+    if (ws.readyState === 1) ws.send(JSON.stringify({ id: ++seq, type: "ping" }));
+  }, 25000);
+  ws.addEventListener("message", (m) => {
+    last = Date.now();
+    process.stdout.write(String(m.data).replace(/\n/g, " ") + "\n");
+  });
+  ws.addEventListener("close", () => process.exit(10));
+  ws.addEventListener("error", (e) => {
+    console.error(`slapi watch: socket error: ${e.message || e.type}`);
+    process.exit(10);
+  });
+}
+process.on("SIGTERM", () => process.exit(0));
+'
+
+# How one event reads. $me is your user id, $where the channel label, $extra the
+# message or file the event points at, when there is one.
+# shellcheck disable=SC2016
+WATCH_JQ='
+  def actor: .user // .user_id // .message.user // .previous_message.user // "";
+  def marker: (.type | test("_marked$"));
+  def who:
+    (if actor == "" then (if marker then "you" else "someone" end) else ((name_of(actor) // actor) | oneline) end)
+    + (if actor != "" and actor == $me then " (you)" else "" end);
+  def stamp: ((.event_ts // .ts // "0") | clock_s);
+  # a reaction names its message by ts alone; history returns the ts before it for a thread reply, so check
+  def held: ($extra[0].messages[0]? // null) | if . and .ts == $item_ts then . else null end;
+  def about: held | if . then " on a message by \(author): \(line_text | .[0:100])" else "" end;
+  def thread_note: if (.thread_ts // .ts) != .ts then "\n    (a reply in a thread, slapi thread \(.channel) \(.thread_ts))" else "" end;
+  if .type == "message" and .subtype == "message_changed" then
+    (.message | if $concise then msg_line($me; $where) + " (edited)" else msg_block(""; $me; $where; "Edited message from") end)
+  elif .type == "message" and .subtype == "message_deleted" then
+    "\(stamp)  message deleted in \($where)" + (.previous_message | if . then " (was from \(author)\(you($me)): \(line_text | .[0:100]))" else "" end)
+  elif .type == "message" then
+    (if $concise then msg_line($me; $where) else msg_block(.channel // ""; $me; $where; "Message from") + thread_note end)
+  elif .type == "reaction_added" or .type == "reaction_removed" then
+    "\(stamp)  \(who) \(if .type == "reaction_added" then "added" else "removed" end) :\(.reaction): in \($where)\(about)"
+  elif .type == "file_shared" then
+    ($extra[0].file // null) as $f
+    | "\(stamp)  \(who) shared file \(.file_id)\(if $f then " \($f.name // "unnamed" | oneline) (\($f.mimetype // $f.filetype // "?"), \(($f.size // 0) | human))" else "" end) in \($where)  [slapi file \(.file_id)]"
+  elif marker then
+    "\(stamp)  \(who) read up to \((.ts // "0") | clock_s) in \($where)"
+  elif .type == "user_typing" then
+    "\(stamp)  \(who) is typing in \($where)"
+  else empty end'
+
+# stdin: one event. $1 users file, $2 your id, $3 channel label, $4 extra file, $5 the ts a reaction points at
+render_event() {
+  jq --raw-output --slurpfile users "$1" --arg me "$2" --arg where "$3" --slurpfile extra "$4" --arg item_ts "$5" \
+    --argjson concise "$CONCISE" "$JQ_DEFS$WATCH_JQ"
+}
+
+declare -A WATCH_LABELS=()
+
+# One event in, at most one rendering out. Filters first, so a busy workspace costs nothing for what is hidden.
+watch_event() {
+  local ev="$1" kind actor chan ts extra where
+  IFS=$'\x1f' read -r kind actor chan ts < <(jq --raw-output '
+    def kind:
+      if .type == "message" and .subtype == "message_replied" then "other"
+      elif .type == "message" then "message"
+      elif .type == "reaction_added" or .type == "reaction_removed" then "reaction"
+      elif .type == "file_shared" then "file"
+      elif (.type // "" | test("_marked$")) then "marked"
+      elif .type == "user_typing" then "typing"
+      else "other" end;
+    [kind, (.user // .user_id // .message.user // .previous_message.user // ""),
+     (.channel // .item.channel // .channel_id // ""), (.item.ts // "")] | join("\u001f")' <<<"$ev")
+
+  [[ "$kind" != "other" ]] || return 0
+  [[ ",$EVENTS," == *",$kind,"* || ",$EVENTS," == *",all,"* ]] || return 0
+  [[ "$kind" != "marked" ]] || actor="$WATCH_ME" # a read marker is your own state
+  [[ "$ONLY_ME" != "true" || "$actor" == "$WATCH_ME" ]] || return 0
+  [[ "$OTHERS" != "true" || "$actor" != "$WATCH_ME" ]] || return 0
+  [[ -z "$WATCH_CHANNELS" || " $WATCH_CHANNELS " == *" $chan "* ]] || return 0
+  if [[ "$JSON" == "true" ]]; then
+    printf '%s\n' "$ev"
+    return 0
+  fi
+
+  where=""
+  if [[ -n "$chan" ]]; then
+    if [[ -z "${WATCH_LABELS[$chan]:-}" ]]; then
+      WATCH_LABELS[$chan]=$(channel_label "$chan")
+    fi
+    where="${WATCH_LABELS[$chan]}"
+  fi
+
+  extra='{}'
+  case "$kind" in
+  reaction) extra=$(call conversations.history "channel=$chan" "latest=$ts" inclusive=true limit=1 2>/dev/null) || extra='{}' ;;
+  file) extra=$(call files.info "file=$(jq --raw-output '.file_id' <<<"$ev")" 2>/dev/null) || extra='{}' ;;
+  esac
+  render_event "$WATCH_USERS" "$WATCH_ME" "$where" <(printf '%s' "$extra") "$ts" <<<"$ev"
+}
+
+# An endless stream of raw event lines. Each connection needs its own single-use
+# ticket from rtm.connect, so a lost socket means asking again, with backoff.
+watch_stream() {
+  local res url delay=1 started fails=0
+  while :; do
+    if res=$(call rtm.connect); then
+      fails=0
+    else
+      fails=$((fails + 1))
+      [[ "$fails" -lt 5 ]] || abort "slapi watch: Slack would not hand out a socket five times in a row, giving up"
+      echo "slapi watch: could not reach Slack, retrying in ${delay}s" >&2
+      sleep "$delay"
+      delay=$((delay * 2 > 30 ? 30 : delay * 2))
+      continue
+    fi
+    url=$(jq --raw-output '.url // ""' <<<"$res")
+    # the ticket and the cookie ride to this address, so it must be Slack's (or loopback, for tests)
+    [[ "$url" =~ ^wss://([A-Za-z0-9-]+\.)*slack\.com/ ||
+      ("$BASE_URL" =~ ^http://(127\.0\.0\.1|localhost) && "$url" =~ ^ws://(127\.0\.0\.1|localhost)[:/]) ]] ||
+      abort "slapi: rtm.connect returned an unexpected socket address"
+    started=$SECONDS
+    jq --null-input --compact-output --arg url "$url" --arg cookie "$D_COOKIE" '{url: $url, cookie: $cookie}' |
+      node -e "$PUMP_JS"
+    if ((SECONDS - started > 60)); then delay=1; fi
+    echo "slapi watch: connection lost, reconnecting in ${delay}s" >&2
+    sleep "$delay"
+    delay=$((delay * 2 > 30 ? 30 : delay * 2))
+  done
+}
+
+show_watch() {
+  local conv id
+  command -v node >/dev/null || abort "slapi: watch needs node 22 or newer for its WebSocket"
+  EVENTS="${EVENTS:-message,reaction,file}"
+  WATCH_USERS=$(users_file) || exit 1
+  WATCH_ME=$(auth_info | jq --raw-output '.user_id') || exit 1
+  WATCH_CHANNELS=""
+  for conv in "${ARGS[@]}"; do
+    id=$(pick_conversation_id "$conv") || no_conversation "$?" "$conv"
+    WATCH_CHANNELS+="$id "
+  done
+  echo "slapi watch: showing ${EVENTS} for ${WATCH_CHANNELS:-every conversation you are in }(Ctrl-C to stop)" >&2
+  watch_stream | while IFS= read -r ev; do
+    watch_event "$ev"
+  done
+}
+
+# The same backend as the web client's own Threads panel: threads you started,
+# replied to, or were mentioned in, most recently active first. No working
+# pagination was found (several plausible parameter names were tried and Slack
+# ignored all of them), so this is Slack's own fixed recent window, not full history.
+# shellcheck disable=SC2016
+THREADS_JQ='
+  def thread_unread:
+    ((.root_msg.last_read // "0") | tonumber) < ((.root_msg.latest_reply // .root_msg.ts) | tonumber);
+  def twhere: ($labels[.root_msg.channel] // .root_msg.channel);
+  def tkey: "\(.root_msg.channel):\(.root_msg.ts)";
+  # A reply arrived since the last --changed checkpoint. A thread never checkpointed
+  # before is not "changed", it is just now being baselined, so it does not fire the
+  # first time you look. This is purely local bookkeeping, never Slack'"'"'s own read
+  # state: looking does not mark anything read on the real account.
+  def tchanged:
+    (($prev[tkey].reply_count) // -1) as $seen
+    | ($seen >= 0) and ((.root_msg.reply_count // 0) > $seen);
+  def tblock:
+    .root_msg as $r
+    | (.latest_replies[0] // null) as $lr
+    | "=== Thread in \(twhere), started by \($r|author)\($r|you($me)) at \($r.ts|clock_s) ===\nMessage TS: \($r.ts|oneline)" + ($r | own_body_line)
+    + "\n\($r.reply_count // 0) replies, latest \(($r.latest_reply // $r.ts) | clock_s)\(if thread_unread then " (unread)" else "" end)"
+    + (if $lr then "\nLatest reply from \($lr|author)\($lr|you($me)): \($lr|line_text|.[0:300])" else "" end)
+    + "\nOpen: slapi thread \($r.channel) \($r.ts)\n";
+  def tline:
+    .root_msg as $r
+    | (.latest_replies[0] // null) as $lr
+    | "\(($r.latest_reply // $r.ts) | clock) \(twhere) \($r.reply_count // 0) replies\(if thread_unread then " (unread)" else "" end) \($r|author): \($r|line_text)"
+    + (if $lr then "  last: \($lr|author): \($lr|line_text|.[0:100])" else "" end);
+  . as $top
+  | ($top.threads
+     | map(select(($ids | length) == 0 or (.root_msg.channel as $c | $ids | index($c)) != null))
+     | map(select(($unread_only | not) or thread_unread))
+     | map(select(($changed | not) or tchanged))
+     | (if $limit > 0 then .[0:$limit] else . end)) as $rows
+  | (if $concise then empty
+     elif $changed then (if ($rows|length) > 0 then "# Threads with new replies since you last checked (\($rows|length))\n" else empty end)
+     else "# Threads (\($rows|length) shown, \($top.total_unread_replies // 0) unread replies, \($top.new_threads_count // 0) new)\n"
+     end),
+    ($rows[] | if $concise then tline else tblock end)'
+
+# stdin: the getView response. $1 users file, $2 your id, $3 channel-id -> label map,
+# $4 channel-id allowlist ([] = none), $5 the previous --changed checkpoint ({} = none)
+render_threads() {
+  jq --raw-output --slurpfile users "$1" --arg me "$2" --argjson labels "$3" --argjson ids "$4" --argjson prev "$5" \
+    --argjson unread_only "$UNREAD" --argjson limit "${LIMIT:-0}" --argjson concise "$CONCISE" --argjson changed "$CHANGED" \
+    "$JQ_DEFS$THREADS_JQ"
+}
+
+show_threads() {
+  local res me users labels='{}' ids='[]' chan id prev_state='{}' state_file
+  res=$(call subscriptions.thread.getView) || exit 1
+  me=$(auth_info | jq --raw-output '.user_id') || exit 1
+  users=$(users_file) || exit 1
+
+  for chan in "${ARGS[@]}"; do
+    id=$(pick_conversation_id "$chan") || no_conversation "$?" "$chan"
+    ids=$(jq --compact-output --arg id "$id" '. + [$id]' <<<"$ids")
+  done
+
+  # one channel_label() lookup per distinct channel, not per thread
+  for chan in $(jq --raw-output '[.threads[].root_msg.channel] | unique | .[]' <<<"$res"); do
+    labels=$(jq --compact-output --arg id "$chan" --arg name "$(channel_label "$chan")" '. + {($id): $name}' <<<"$labels")
+  done
+
+  if [[ "$CHANGED" == "true" ]]; then
+    # nested one level past the flat cache files, so refresh's depth-2 sweep never
+    # touches this: it is a deliberate checkpoint, not a disposable lookup cache
+    state_file="$CACHE_DIR/tracking/thread-state.json"
+    mkdir --parents "$(dirname "$state_file")"
+    if [[ -f "$state_file" ]]; then
+      prev_state=$(<"$state_file")
+      jq --exit-status . <<<"$prev_state" >/dev/null 2>&1 || prev_state='{}' # corrupt or empty: nothing tracked yet
+    fi
+  fi
+
+  render_threads "$users" "$me" "$labels" "$ids" "$prev_state" <<<"$res" || return 1
+
+  if [[ "$CHANGED" == "true" ]]; then
+    # a fresh snapshot, not a merge: Slack's own view is already a bounded recent
+    # window, so a thread that scrolls out of it just gets a new baseline if and
+    # when it becomes active again, rather than the state file growing forever
+    jq --compact-output '
+      [.threads[] | {("\(.root_msg.channel):\(.root_msg.ts)"): {reply_count: (.root_msg.reply_count // 0)}}] | add // {}' \
+      <<<"$res" >"$state_file.tmp" && mv --force "$state_file.tmp" "$state_file"
+  fi
+}
+
+# Help comes in layers: this list, then `slapi help <command>` for one command's
+# flags and examples, then hints printed inside the output itself.
+usage() {
+  cat <<'EOF'
+Usage: slapi <command> [args] [flags]
+
+  whoami                         who this session is
+  channels | dms                 your conversations
+  read <chan|user>               messages, newest first (alias: history)
+  thread <chan> <ts>             a thread, parent first (or a message permalink)
+  search <query>                 messages, or files with --files
+  search-channels <words...>     find channels by name, topic, purpose
+  search-users <words...>        find users, -word excludes
+  profile [user]                 a user profile, yours by default
+  canvas <F...>                  a canvas as markdown
+  file <F... | url>...           download images and attached files, prints paths
+  threads [chan...]              threads you started, replied to, or are mentioned in
+  watch [chan...]                live events as they happen, your own actions included
+  api <method> [key=value...]    raw read-only Slack API call
+  refresh                        drop cached user and channel lists
+
+slapi help <command> (or <command> --help) shows its flags and examples.
+New here? Try slapi channels, then slapi read <name>. Most commands take --concise.
+
+Environment:
+  SLAPI_TEAM=<name>            which workspace to use (checked against Slack; ignored with SLAPI_XOXC)
+  SLAPI_XOXC, SLAPI_D_COOKIE   use these instead of reading them from Chrome
+  SLAPI_MAX_TIME, SLAPI_DOWNLOAD_MAX_TIME   API and download timeouts in seconds (60, 300)
+Both credentials are read from Chrome's Default profile, so Slack must be open there.
+EOF
+}
+
+command_help() {
+  case "$1" in
+  w | whoami)
+    cat <<'EOF'
+slapi whoami
+
+Which Slack user, workspace and workspace URL this session belongs to. It asks
+Slack every time, never the cache, so it doubles as a check that the Chrome
+session is still alive. Takes no flags.
+EOF
+    ;;
+  ch | channels | dm | dms)
+    cat <<'EOF'
+slapi channels
+slapi dms
+
+Your own conversations, from the cache. channels lists the public and private
+channels you are in, dms lists direct and group messages. Columns: name, kind,
+id, and for a DM the user id.
+Read one with: slapi read <name or id>. Channels you have not joined turn up
+with: slapi search-channels <words>.
+EOF
+    ;;
+  r | read | h | history)
+    cat <<'EOF'
+slapi read <chan> [flags]                          (aliases: history, r, h)
+
+Messages of a channel or DM, newest first, in the layout of the Slack connector.
+With no <chan>, fzf opens over your conversations.
+
+<chan> is an ID, a message permalink, #name (channels only), @name (people only),
+a fuzzy name, or a user ID (opens that DM). Whole names beat fuzzy ones, and your
+own conversations beat the rest of the workspace.
+
+  --limit N     messages per call, up to 999 (default 100)
+  --oldest T    only messages after T
+  --latest T    only messages before T
+  --cursor C    next page, from the "More results" line printed on stderr
+  --asc         reverse each page (pages still walk back in time)
+  --concise     one line per message
+
+T is unix seconds, a Slack ts, or a date such as 2026-09-20.
+A message with replies prints the slapi thread command that opens it, and
+attached files print their ids for slapi file. A message permalink starts the
+page at that message, so it shows the linked message and what came before it.
+
+Examples:
+  slapi read general --limit 20
+  slapi read @alice --oldest 2026-09-20 --concise
+  slapi read https://team.slack.com/archives/C123/p1790000300000100
+EOF
+    ;;
+  t | thread)
+    cat <<'EOF'
+slapi thread <chan> <ts> [flags]                   (alias: t)
+slapi thread <message permalink> [flags]
+
+A thread, parent first. <ts> is a Slack ts (1790000300.000100) or the p-form
+from a permalink (p1790000300000100). A permalink to a reply opens its parent
+thread. <chan> is anything slapi read accepts.
+
+  --limit N     replies per call, up to 999 (default 100)
+  --oldest T    only replies after T
+  --latest T    only replies before T
+  --cursor C    next page, from the "More results" line printed on stderr
+  --concise     one line per message
+EOF
+    ;;
+  s | search)
+    cat <<'EOF'
+slapi search <query> [flags]                       (alias: s)
+
+Messages you can see, or files with --files. <query> is Slack search syntax, so
+from:@name in:#channel has:link is:thread before:2026-09-01 all work in it.
+
+  --public        public channels only
+  --types T       comma list of public_channel, private_channel, mpim, im
+  --mine          only channels and DMs you are in
+  --bots          include bot messages (hidden by default)
+  --files         search files instead, prints ids for slapi file
+  --after D       only from day D on (a date, unix seconds or a Slack ts)
+  --before D      only up to and including day D (read's --latest is exact, this is by day)
+  --context N     show the N messages before each hit, one extra call per hit (in a long thread, several)
+  --sort S        score (default) or timestamp
+  --asc           reverse the sort order
+  --limit N       hits per Slack page, up to 100 (default 20). A filtered call reads up to 5 pages
+  --page N        Slack page to start from
+  --skip N        skip the first N hits from there (the More results line fills this in)
+  --concise       one line per hit
+
+--public, --types, --mine and --bots filter after Slack answers, so one call may
+pull several Slack pages to fill a page of hits. The "More results" line on
+stderr gives the next --page. With --files those filters and --context are refused.
+
+Examples:
+  slapi search "deploy failed" --public --after 2026-09-01
+  slapi search from:@alice in:#general --context 2
+  slapi search invoice --files
+EOF
+    ;;
+  sc | search-channels)
+    cat <<'EOF'
+slapi search-channels <words...> [flags]           (alias: sc)
+
+Channels in the whole workspace by name, topic or purpose. Every word must match,
+and a quoted phrase matches as one. Shows creator, topic, purpose and link.
+
+  --private     include private channels you can see
+  --archived    include archived channels
+  --limit N     results per page (default 20)
+  --page N      page of results
+  --concise     one line per channel
+
+Example: slapi search-channels "project alpha" eng
+EOF
+    ;;
+  su | search-users)
+    cat <<'EOF'
+slapi search-users <words...> [flags]              (alias: su)
+
+Users by name, handle, email, title or profile fields. Every word must match, and
+a word starting with - excludes: slapi search-users engineer -intern
+Deleted users are skipped. Read one profile in full with slapi profile <id>.
+
+  --limit N     results per page (default 20)
+  --page N      page of results
+  --concise     one line per user
+EOF
+    ;;
+  p | profile)
+    cat <<'EOF'
+slapi profile [user] [flags]                       (alias: p)
+
+A user's profile: contact details, status, timezone, admin flags. Yours when no
+user is given. [user] is a user id, a handle or a real name, a leading @ is fine.
+
+  --locale      include the locale
+  --concise     one line
+EOF
+    ;;
+  c | canvas)
+    cat <<'EOF'
+slapi canvas <canvas id>                           (alias: c)
+
+A canvas as markdown. The id is the canvas's F... file id. Images inside it stay
+links, fetch them with slapi file <url>. Section ids, which only editing needs,
+are left out.
+EOF
+    ;;
+  f | file | files)
+    cat <<'EOF'
+slapi file <F-id | url>... [--out DIR]             (aliases: files, f)
+
+Downloads images and attached files and prints one local path per argument, so
+the file can be opened right away. Ids come from slapi read, from search --files,
+or from the Files section under a message. A URL works too, and credentials only
+ever go to Slack's own file store.
+Default folder is ~/.cache/slapi/files, a file already there is not fetched again,
+and downloads older than a month are removed.
+
+  --out DIR     save into DIR instead
+EOF
+    ;;
+  api)
+    cat <<'EOF'
+slapi api <method> [key=value...]
+
+A raw Slack Web API call, printed as JSON. Read-only: auth.test, search.* and the
+*.list, *.info, *.get, *.history, *.replies, *.members and *.lookup methods are
+allowed, and every argument must be key=value.
+Example: slapi api users.info user=U0123456789
+EOF
+    ;;
+  threads)
+    cat <<'EOF'
+slapi threads [chan...] [flags]
+
+Threads you are subscribed to across the whole workspace, the same list Slack's
+own Threads panel shows: ones you started, replied to, or were mentioned in.
+Sorted by most recently active first. Slack's endpoint hands back a fixed recent
+window with no working pagination found, so this is a snapshot, not full history.
+
+Give conversations (anything slapi read accepts) to show only threads in them.
+
+  --unread      only threads with a reply since you last read them (Slack's own read state)
+  --changed     only threads with a reply since the last time YOU ran --changed (a
+                separate, local checkpoint slapi keeps in its own cache, never Slack's
+                read state, so looking never marks anything read on the real account).
+                Prints nothing at all when there is nothing new, so it is quiet in a
+                loop. The first time you run it, nothing shows: that run just sets the
+                baseline. Good for "did anyone pick this up since I last checked".
+  --limit N     show at most N of what Slack returned
+  --concise     one line per thread
+
+Examples:
+  slapi threads
+  slapi threads --unread
+  slapi threads general
+  slapi threads --changed   # in a loop: only prints when something actually moved
+EOF
+    ;;
+  watch)
+    cat <<'EOF'
+slapi watch [chan...] [flags]
+
+Live events from Slack's real-time socket, so nothing has to poll. Everything in
+the conversations you are in arrives, whichever client caused it, and your own
+actions are tagged (you): replies, reactions, edits, deletes, files you share.
+Give conversations (anything slapi read accepts) to watch only those. Runs until
+Ctrl-C and reconnects when the socket drops. Needs node 22 or newer.
+
+  --events LIST   what to show: message, reaction, file, marked, typing, all
+                  (default message,reaction,file. message covers edits, deletes and thread replies)
+  --only-me       only what you did
+  --others        only what other people did
+  --json          the raw events, one per line, for scripts
+  --concise       messages as one line
+
+A reaction shows the message it is on. A shared file shows its name and how to
+fetch it (slapi file <id>).
+
+Examples:
+  slapi watch
+  slapi watch general --only-me
+  slapi watch --events message,reaction --concise
+EOF
+    ;;
+  refresh)
+    cat <<'EOF'
+slapi refresh
+
+Drops the cached user, channel and identity lists (they are kept for 10 minutes)
+so the next run fetches them again. Downloaded files stay.
+EOF
+    ;;
+  *)
+    abort "slapi: no help for '$1', slapi help lists the commands"
+    ;;
+  esac
+}
+
+main() {
+  [[ "$#" -lt 1 ]] && abort "$(usage)"
+
+  local cmd="$1"
+  shift
+
+  case "$cmd" in
+  help | -h | --help)
+    if [[ -n "${1:-}" ]]; then command_help "$1"; else usage; fi
+    return
+    ;;
+  esac
+  # help never touches Chrome or the network, and works wherever it appears
+  local arg
+  if [[ "${1:-}" == "-h" ]]; then
+    command_help "$cmd"
+    return
+  fi
+  for arg in "$@"; do
+    [[ "$arg" == "--" ]] && break
+    if [[ "$arg" == "--help" ]]; then
+      command_help "$cmd"
+      return
+    fi
+  done
+  # the help table doubles as the list of known commands, so a typo costs no cookie lookup
+  (command_help "$cmd") >/dev/null 2>&1 || abort "slapi: unknown command '$cmd', slapi help lists the commands"
+  umask 077
+  mkdir --parents "$CACHE_ROOT"
+
+  # A sandbox has no Chrome, but may have been wired to a host-side relay (see
+  # hostrelay) that runs the real slapi on the host and streams the result
+  # back, so the credential itself never enters the box. This box was actually
+  # wired to one (the directory exists) or it was not: if not, fall through to
+  # load_auth's own clear "no Chrome profile" error rather than hostrelay's,
+  # which would be about the wrong thing.
+  if [[ -z "${SLAPI_D_COOKIE:-}" && ! -r "$CHROME_DIR/Cookies" &&
+    -d "${HOSTRELAY_ROOT:-$HOME/.cache/hostrelay}/slack/requests" ]]; then
+    exec hostrelay call slack -- "$cmd" "$@"
+  fi
+
+  if [[ "$cmd" == "refresh" ]]; then
+    # not -prune: -delete implies -depth, which turns -prune off
+    find "$CACHE_ROOT" -mindepth 2 -maxdepth 2 -type f -not -path "$FILES_DIR/*" -not -path '*/run.*/*' -delete
+    rm --force "$CACHE_ROOT"/live-*
+    return
+  fi
+
+  parse_flags "$@"
+  check_flags "$cmd"
+  validate_flags
+  load_auth
+
+  dispatch "$cmd" | sanitize
+}
+
+# Message text, file names and channel names are attacker-controlled. Drop what can
+# rewrite a terminal, reorder text or hide it: C0/C1 controls (ESC, CR, CSI, OSC),
+# every bidi mark, override and isolate, soft hyphen, the fillers, invisible
+# operators and zero-width space, BOM, tag characters and their variation-selector
+# cousins. Tab and newline stay, and so do ZWJ and ZWNJ, which emoji sequences and
+# several scripts need. Bytes that are not UTF-8 decode to U+FFFD, and every line is
+# flushed at once: a live stream (watch) must not wait for a full buffer.
+sanitize() {
+  perl -MEncode -e '$| = 1; binmode STDIN; binmode STDOUT; while (<STDIN>) { my $s = decode("UTF-8", $_); $s =~ s/[\x00-\x08\x0B-\x1F\x7F\x{80}-\x{9F}\x{AD}\x{34F}\x{61C}\x{115F}\x{1160}\x{17B4}\x{17B5}\x{180B}-\x{180E}\x{200B}\x{200E}\x{200F}\x{2028}-\x{202E}\x{2060}-\x{206F}\x{3164}\x{FEFF}\x{FFA0}\x{FFF0}-\x{FFFB}\x{E0000}-\x{E007F}\x{E0100}-\x{E01EF}]//g; print encode("UTF-8", $s) }'
+}
+
+dispatch() {
+  case "$1" in
+  w | whoami)
+    call auth.test | jq --raw-output '"\(.user) @ \(.team) \(.url)"'
+    ;;
+  ch | channels)
+    list_conversations | awk --field-separator='\t' '$2 == "channel" || $2 == "private"' | cut --fields 1-3 | sort | column --table --separator $'\t'
+    ;;
+  dm | dms)
+    list_conversations | awk --field-separator='\t' '$2 == "dm" || $2 == "group"' | sort | column --table --separator $'\t'
+    ;;
+  r | read | h | history)
+    show_history
+    ;;
+  t | thread)
+    show_thread
+    ;;
+  s | search)
+    run_search
+    ;;
+  sc | search-channels)
+    search_channels
+    ;;
+  su | search-users)
+    search_users
+    ;;
+  p | profile)
+    show_profile
+    ;;
+  c | canvas)
+    show_canvas
+    ;;
+  f | file | files)
+    show_files
+    ;;
+  threads)
+    show_threads
+    ;;
+  watch)
+    show_watch
+    ;;
+  api)
+    raw_api
+    ;;
+  *)
+    abort "slapi: unknown command '$1', slapi help lists the commands"
+    ;;
+  esac
+}
+
+# sourceable, so the renderers can be tested without a network
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

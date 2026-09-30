@@ -53,7 +53,7 @@ alias nr='newsraft'
 ### suffer from slop
 alias cl='claude'
 alias cr='claude -r'
-alias cls='claude --model sonnet --effort max'
+alias cls='claude --model sonnet'
 
 function rm() {
   emulate -L zsh

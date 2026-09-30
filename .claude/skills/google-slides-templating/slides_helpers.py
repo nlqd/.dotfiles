@@ -319,6 +319,95 @@ def insert_text(id_, text):
     return [{"insertText": {"objectId": id_, "text": text}}]
 
 
+# --- paragraph-preserving edits: the tool for a box that is NOT uniformly styled ------------
+
+# What set_paras() carries from the old paragraph onto the new text. Deliberately not the whole
+# style object: backgroundColor/weightedFontFamily/baselineOffset copied blind can fight the
+# theme. fontFamily is included because a deck restyled to a non-theme font loses it otherwise.
+STYLE_FIELDS = ("fontFamily", "fontSize", "bold", "italic", "foregroundColor", "underline")
+
+
+def paragraphs(text_elements):
+    """[{start, end, text, style}] per paragraph of a fetched shape/cell. `end` is exclusive and
+    includes the paragraph's trailing newline; `style` is its FIRST run's text style. Feed a
+    shape's `text.textElements` (shape_paragraphs/cell_paragraphs below do that for you)."""
+    paras, cur = [], None
+    for te in text_elements:
+        s, e = te.get("startIndex", 0), te["endIndex"]
+        if "paragraphMarker" in te:
+            cur = {"start": s, "end": e, "text": "", "style": None}
+            paras.append(cur)
+        elif "textRun" in te and cur is not None:
+            cur["text"] += te["textRun"]["content"]
+            if cur["style"] is None:
+                cur["style"] = te["textRun"].get("style", {})
+    for p in paras:
+        p["text"] = p["text"].rstrip("\n")
+        p["style"] = p["style"] or {}
+    return paras
+
+
+def shape_paragraphs(el):
+    return paragraphs(el.get("shape", {}).get("text", {}).get("textElements", []))
+
+
+def cell_paragraphs(table_el, row, col):
+    cell = table_el["table"]["tableRows"][row]["tableCells"][col]
+    return paragraphs(cell.get("text", {}).get("textElements", []))
+
+
+def set_paras(id_, old_paras, new_paras, cell=None, fields=STYLE_FIELDS):
+    """Rewrite a text box paragraph by paragraph, KEEPING each paragraph's own style.
+
+    settext() is the wrong tool for a box that mixes styles, e.g. a card whose first paragraph
+    is a 14pt bold amber title over 11.5pt grey body: it restyles everything uniformly. This
+    rewrites paragraph N in place and re-applies paragraph N's original run style, so the card
+    keeps its two-tone look. `old_paras` comes from shape_paragraphs()/cell_paragraphs() on a
+    FRESH read (indices shift after every write). For a table cell also pass
+    cell={"rowIndex": r, "columnIndex": c}.
+
+    Extra new paragraphs inherit the last old paragraph's style; surplus old paragraphs are
+    deleted. Works back to front so earlier indices stay valid.
+
+    CAUTION: changing the paragraph COUNT changes layout. Empty paragraphs are real spacing in
+    many decks (a subtitle box padded with blank lines to push text down the slide); drop them
+    and the text jumps up into the title. Match the old shape, blank lines included, unless you
+    mean to move things."""
+    loc = {"cellLocation": cell} if cell else {}
+    n_old, n_new = len(old_paras), len(new_paras)
+    if n_new >= n_old:
+        plan = [(i, [i]) for i in range(n_old - 1)] + [(n_old - 1, list(range(n_old - 1, n_new)))]
+    else:
+        plan = [(i, [i]) for i in range(n_new)]
+    reqs = []
+    if n_new < n_old:  # delete the surplus tail first, it sits after everything else
+        tail_start, tail_end = old_paras[n_new - 1]["end"] - 1, old_paras[-1]["end"] - 1
+        if tail_end > tail_start:
+            reqs.append({"deleteText": {"objectId": id_, **loc, "textRange": {
+                "type": "FIXED_RANGE", "startIndex": tail_start, "endIndex": tail_end}}})
+    for oi, new_idx in reversed(plan):
+        p = old_paras[oi]
+        start, end = p["start"], p["end"] - 1  # keep the paragraph's own newline
+        text = "\n".join(new_paras[k] for k in new_idx)
+        if end > start:
+            reqs.append({"deleteText": {"objectId": id_, **loc, "textRange": {
+                "type": "FIXED_RANGE", "startIndex": start, "endIndex": end}}})
+        if text:
+            reqs.append({"insertText": {"objectId": id_, **loc, "insertionIndex": start, "text": text}})
+        style = {k: p["style"][k] for k in fields if k in p["style"]}
+        pos = start
+        for k in new_idx:
+            seg = len(new_paras[k])
+            if style and seg:
+                body = {"objectId": id_, "style": style, "fields": ",".join(style),
+                        "textRange": {"type": "FIXED_RANGE", "startIndex": pos, "endIndex": pos + seg}}
+                if cell:
+                    body["cellLocation"] = cell
+                reqs.append({"updateTextStyle": body})
+            pos += seg + 1
+    return reqs
+
+
 def hyperlink(id_, url, text_range=None):
     """Make an existing run clickable (updateTextStyle link). Renders underlined; works in the
     editable/Drive deck, not in a flattened screenshare. Defaults to the whole element; pass a
