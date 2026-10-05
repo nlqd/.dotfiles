@@ -36,7 +36,7 @@ alias lmk='latexmk'
 alias nb='newsboat -r'
 alias nr='newsraft'
 alias nrvn='newsraft -f ~/.config/newsraft/feeds-vn'
-alias upgrade='sudo apt update && sudo apt upgrade && flatpak update -y'
+alias upgrade='sudo apt update && sudo apt upgrade -y && flatpak update -y'
 alias ez='nvim ~/.zshrc'
 alias sz='. ~/.zshrc'
 alias tma='tmux -2 a'
@@ -163,7 +163,7 @@ function hcloud-edit-zone() {
 plugins=(
   git
   docker
-  emoji
+  # emoji
   systemd
   vi-mode
   # per-directory-history

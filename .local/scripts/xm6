@@ -1,6 +1,11 @@
 #!/bin/bash
 
 bluetoothctl power on
-id=$(bluetoothctl paired-devices | rg XM6 | awk '{ print $2 }')
+id=$(bluetoothctl devices Paired | rg XM6 | awk '{ print $2 }')
 [[ -z "$id" ]] && id=$(bluetoothctl devices | rg XM6 | awk '{ print $2 }')
-bluetoothctl connect "$id"
+
+if bluetoothctl info "$id" | rg -q 'Connected: yes'; then
+  bluetoothctl disconnect "$id"
+else
+  bluetoothctl connect "$id"
+fi
