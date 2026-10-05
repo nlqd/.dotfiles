@@ -35,21 +35,3 @@
     name: dungngo
     groups: docker
     append: true
-
-- name: Create n8n app directory
-  ansible.builtin.file:
-    path: /home/dungngo/apps/n8n
-    state: directory
-    owner: dungngo
-
-- name: Copy n8n compose file
-  ansible.builtin.copy:
-    src: n8n-compose.yml
-    dest: /home/dungngo/apps/n8n/compose.yaml
-    owner: dungngo
-
-- name: Create n8n local-files directory
-  ansible.builtin.file:
-    path: /home/dungngo/apps/n8n/local-files
-    state: directory
-    owner: dungngo

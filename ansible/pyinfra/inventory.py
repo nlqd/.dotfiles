@@ -19,13 +19,6 @@ hetz = [
                 "template": "manufeature.conf.j2",
                 "certbot": True,
             },
-            {
-                "name": "n8n",
-                "domain": "n8n.dzungngo.com",
-                "template": "n8n.conf.j2",
-                "certbot": True,
-                "enabled": False,
-            },
         ],
     }),
 ]

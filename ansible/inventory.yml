@@ -14,11 +14,6 @@ all:
           domain: wms.dzungngo.com
           template: manufeature.conf.j2
           certbot: true
-        - name: n8n
-          domain: n8n.dzungngo.com
-          template: n8n.conf.j2
-          certbot: true
-          enabled: false
 
       mail_domain: dzungngo.com
       mail_hostname: mail.dzungngo.com

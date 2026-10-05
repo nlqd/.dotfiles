@@ -45,22 +45,3 @@ server.shell(
     name="Add dungngo to docker group",
     commands=["usermod -aG docker dungngo"],
 )
-
-files.directory(
-    name="Create n8n app directory",
-    path="/home/dungngo/apps/n8n",
-    user="dungngo",
-)
-
-files.put(
-    name="Copy n8n compose file",
-    src="../roles/docker/files/n8n-compose.yml",
-    dest="/home/dungngo/apps/n8n/compose.yaml",
-    user="dungngo",
-)
-
-files.directory(
-    name="Create n8n local-files directory",
-    path="/home/dungngo/apps/n8n/local-files",
-    user="dungngo",
-)
