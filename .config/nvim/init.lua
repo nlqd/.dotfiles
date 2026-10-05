@@ -359,7 +359,7 @@ vim.keymap.set('n', '<leader>sc', '<Plug>SlimeSendCell', { desc = 'Slime Send Ce
 
 -- vimtex
 vim.pack.add({ gh 'lervag/vimtex' })
-vim.g.vimtex_view_method = 'zathura'
+vim.g.vimtex_view_method = 'zathura_simple'
 vim.g.vimtex_quickfix_open_on_warning = 0
 
 -- dadbod
