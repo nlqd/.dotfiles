@@ -1,0 +1,11 @@
+#!/bin/sh
+# Share local ports over HTTPS through hetz: tunnel 8080 [3000 ...]
+# Prints one signed link per port (valid 24h). Ctrl-C closes the tunnel.
+# Server side: Tunnels in infra/services.py, helper in infra/httpssh.py.
+[ $# -gt 0 ] || { echo "usage: tunnel <port>..." >&2; exit 2; }
+for port do
+  case $port in ''|*[!0-9]*) echo "tunnel: not a port: $port" >&2; exit 2 ;; esac
+  set -- "$@" -R "0:localhost:$port"
+  shift
+done
+exec ssh -o ControlPath=none -o ExitOnForwardFailure=yes "$@" hetz httpssh link
