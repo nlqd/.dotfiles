@@ -1,0 +1,506 @@
+#!/usr/bin/env python3
+"""newsraft-web: read newsraft's feeds on the phone, over the Headscale tailnet only.
+
+  newsraft-web                   serve on this laptop's Headscale address, port 8787
+  newsraft-web --listen HOST:PORT
+
+newsraft opens its database in SQLite's exclusive locking mode, so only one program can use
+it at a time. Every request here opens it briefly and closes it again, so the terminal
+newsraft starts whenever the phone is idle. When the terminal newsraft holds it, the page
+offers "Switch to phone", which sends that newsraft SIGTERM; newsraft handles the signal by
+restoring the terminal and closing its database.
+"""
+from __future__ import annotations
+
+import html
+import json
+import os
+import re
+import signal
+import sqlite3
+import subprocess
+import sys
+import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import datetime
+from html.parser import HTMLParser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, quote, unquote, urlsplit
+
+TAILNET = "hs.dzungngo.com"
+PORT = 8787
+DATA = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+DB = DATA / "newsraft/newsraft.sqlite3"
+FEEDS_FILES = [CONFIG / "newsraft/feeds", CONFIG / "newsraft/feeds-vn"]
+LIMIT = 300
+# Feed HTML is shown inline, and no page runs scripts: this policy is what keeps feeds inert.
+CSP = "default-src 'none'; style-src 'self'; img-src * data:; media-src *; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+
+e = html.escape
+
+
+class Locked(Exception):
+    """Another newsraft holds the database."""
+
+
+# Functional core
+
+
+def largest_text(serialized: str | None) -> tuple[str, str]:
+    """newsraft stores content as entries 'D^' of 'Dkey=value' fields, D being the first character.
+    Like newsraft, pick the longest text= piece; type= defaults to plain text."""
+    best = ("", "text/plain")
+    if not serialized:
+        return best
+    delimiter = serialized[0]
+    for entry in serialized.split(delimiter + "^"):
+        fields = dict(field.split("=", 1) for field in entry.split(delimiter) if "=" in field)
+        if len(fields.get("text", "")) > len(best[0]):
+            best = (fields["text"], fields.get("type", "text/plain"))
+    return best
+
+
+def tailnet_address(status: dict[str, Any], tailnet: str) -> str | None:
+    if status.get("BackendState") != "Running" or (status.get("CurrentTailnet") or {}).get("Name") != tailnet:
+        return None
+    ipv4 = [ip for ip in status.get("Self", {}).get("TailscaleIPs", []) if ":" not in ip]
+    return ipv4[0] if ipv4 else None
+
+
+def when(timestamp: int) -> str:
+    try:
+        return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M") if timestamp else ""
+    except (OverflowError, OSError, ValueError):
+        return ""
+
+
+def parse_feeds(text: str) -> dict[str, str]:
+    """Feeds in a newsraft feeds file: each line is a URL or $(command), optionally followed by "Name".
+    Returns feed -> name ("" when unnamed); @ section lines and # comments are skipped."""
+    feeds: dict[str, str] = {}
+    for line in map(str.strip, text.splitlines()):
+        if not line or line.startswith(("#", "@")):
+            continue
+        named = re.fullmatch(r'(.*\S)\s+"([^"]*)"', line)
+        feeds[named[1] if named else line] = named[2] if named else ""
+    return feeds
+
+
+def feed_name(title: str | None, url: str) -> str:
+    name = title or urlsplit(url).hostname or url
+    return name if len(name) <= 60 else name[:59] + "…"
+
+
+def page(title: str, body: str, refresh: bool = False) -> str:
+    return (
+        '<!doctype html><html><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        + ('<meta http-equiv="refresh" content="3">' if refresh else "")
+        + f'<title>{e(title)}</title><link rel="stylesheet" href="/simple.css"><link rel="stylesheet" href="/reader.css"></head>'
+        + f'<body><main><p><a href="/">Feeds</a> · <a href="/unread">All unread</a></p>{body}</main></body></html>'
+    )
+
+
+def button(action: str, label: str, **fields: str) -> str:
+    hidden = "".join(f'<input type="hidden" name="{e(k)}" value="{e(v)}">' for k, v in fields.items())
+    return f'<form method="post" action="{e(action)}">{hidden}<button>{e(label)}</button></form>'
+
+
+def item_list(items: list[tuple[int, str, int, str | None, str]]) -> str:
+    rows = "".join(
+        f'<li><a href="/item/{rowid}">{e(title or "(untitled)")}</a><br><small>{e(feed_name(feed, url))} · {when(date)}</small></li>'
+        for rowid, title, date, feed, url in items
+    )
+    return f"<ul>{rows}</ul>" if rows else "<p>Nothing unread.</p>"
+
+
+def list_page(name: str, feeds: list[tuple[str, str | None, int]], others: list[str], fetch_error: str) -> str:
+    """One feeds file in its own order, like newsraft's first screen."""
+    rows = "".join(
+        f'<li><a href="/feed?url={quote(url, safe="")}">{e(feed_name(title, url))}</a>{f" {count}" if count else ""}</li>'
+        for url, title, count in feeds
+    )
+    error = f"<p><small>Last fetch failed:</small></p><pre>{e(fetch_error)}</pre>" if fetch_error else ""
+    links = " · ".join(f'<a href="/list/{quote(other)}">{e(other)}</a>' for other in others)
+    return page(
+        name,
+        f"<h1>{e(name)}</h1><p>{sum(count for _, _, count in feeds)} unread</p>{button('/fetch', 'Fetch new')}{error}"
+        f"<ul>{rows}</ul>" + (f"<p>{links}</p>" if links else ""),
+    )
+
+
+def unread_page(items: list[tuple[int, str, int, str | None, str]]) -> str:
+    return page("All unread", f"<h1>All unread</h1>{item_list(items)}")
+
+
+def feed_page(url: str, title: str | None, items: list[tuple[int, str, int, str | None, str]]) -> str:
+    name = feed_name(title, url)
+    return page(name, f"<h1>{e(name)}</h1>{button('/feed/read', 'Mark feed read', url=url)}{item_list(items)}")
+
+
+# Feed HTML is untrusted and was written for another site's stylesheet: its classes would pick up
+# Simple.css's button and notice styles, and its widgets cannot work without scripts. Keep structure
+# and text, drop the rest.
+KEEP = {
+    "a", "abbr", "b", "blockquote", "br", "caption", "cite", "code", "dd", "del", "details", "div", "dl", "dt", "em",
+    "figcaption", "figure", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "img", "ins", "kbd", "li", "mark", "ol",
+    "p", "picture", "pre", "q", "s", "samp", "small", "span", "strong", "sub", "summary", "sup", "table", "tbody",
+    "td", "tfoot", "th", "thead", "tr", "u", "ul",
+}
+VOID = {"br", "hr", "img"}
+DROP_WITH_CONTENT = {"button", "select", "textarea", "script", "style", "iframe", "object", "embed", "canvas", "svg", "noscript", "template"}
+ATTRIBUTES = {"a": {"href"}, "img": {"src", "alt"}, "td": {"colspan", "rowspan"}, "th": {"colspan", "rowspan"}, "ol": {"start"}}
+WEB = re.compile(r"https?://", re.IGNORECASE)
+
+
+class Cleaner(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.out: list[str] = []
+        self.open: list[str] = []
+        self.dropping: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self.dropping:
+            if tag in DROP_WITH_CONTENT and tag not in VOID:
+                self.dropping.append(tag)
+            return
+        if tag in DROP_WITH_CONTENT:
+            self.dropping.append(tag)
+            return
+        if tag not in KEEP:
+            return
+        kept = {name: value for name, value in attrs if value is not None and name in ATTRIBUTES.get(tag, set())}
+        if tag == "img" and not WEB.match(kept.get("src", "")):
+            return
+        if tag == "a" and not WEB.match(kept.get("href", "")):
+            kept.pop("href", None)
+        self.out.append("<" + tag + "".join(f' {name}="{e(value)}"' for name, value in kept.items()) + ">")
+        if tag not in VOID:
+            self.open.append(tag)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        if tag not in VOID and tag in KEEP and not self.dropping:
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self.dropping:
+            if tag == self.dropping[-1]:
+                self.dropping.pop()
+            return
+        if tag in self.open:
+            while self.open:
+                closing = self.open.pop()
+                self.out.append(f"</{closing}>")
+                if closing == tag:
+                    break
+
+    def handle_data(self, data: str) -> None:
+        if not self.dropping:
+            self.out.append(e(data, quote=False))
+
+    def result(self) -> str:
+        while self.open:
+            self.out.append(f"</{self.open.pop()}>")
+        return "".join(self.out)
+
+
+def clean_html(text: str) -> str:
+    cleaner = Cleaner()
+    cleaner.feed(text)
+    cleaner.close()
+    return cleaner.result()
+
+
+def content_html(text: str, kind: str) -> str:
+    if "html" in kind:
+        return clean_html(text)
+    return "".join(f"<p>{e(part).strip()}</p>" for part in re.split(r"\n\s*\n", text) if part.strip())
+
+
+def item_page(rowid: int, title: str, link: str | None, date: int, feed: str | None, url: str, content: str | None) -> str:
+    original = f' · <a href="{e(link)}">original</a>' if link and link.startswith(("https://", "http://")) else ""
+    return page(
+        title or "(untitled)",
+        f"<article><h2>{e(title or '(untitled)')}</h2>"
+        f"<p><small>{e(feed_name(feed, url))} · {when(date)}{original}</small></p>"
+        f"{content_html(*largest_text(content))}</article>{button(f'/item/{rowid}/unread', 'Keep unread')}",
+    )
+
+
+def locked_page() -> str:
+    return page("newsraft is busy", f"<p>newsraft is open in the terminal.</p>{button('/switch', 'Switch to phone')}")
+
+
+def fetching_page(since: float) -> str:
+    return page("Fetching", f"<p>Fetching new items since {time.strftime('%H:%M', time.localtime(since))}…</p>", refresh=True)
+
+
+# Imperative shell
+
+# Some feeds carry far-future dates; those sort by when newsraft downloaded them instead.
+NEWEST = "CASE WHEN i.publication_date = 0 OR i.publication_date > strftime('%s','now') THEN i.download_date ELSE i.publication_date END DESC"
+
+
+class Reader:
+    def __init__(self, db: Path, reload_commands: list[list[str]], lists: dict[str, dict[str, str]] | None = None) -> None:
+        self.db = db
+        self.reload_commands = reload_commands
+        self.fixed_lists = lists
+        self.fetch_thread: threading.Thread | None = None
+        self.fetch_since = 0.0
+        self.fetch_error = ""
+
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        con = sqlite3.connect(self.db, timeout=2)
+        try:
+            yield con
+            con.commit()
+        except sqlite3.OperationalError as error:
+            if "locked" in str(error):
+                raise Locked from error
+            raise
+        finally:
+            con.close()
+
+    def lists(self) -> dict[str, dict[str, str]]:
+        """Each feeds file (feeds, feeds-vn) in order, read fresh each time; like newsraft, only listed feeds are shown."""
+        if self.fixed_lists is not None:
+            return self.fixed_lists
+        return {f.name: parse_feeds(f.read_text()) for f in FEEDS_FILES if f.exists()}
+
+    def feeds(self) -> dict[str, str]:
+        return {url: name for listed in self.lists().values() for url, name in listed.items()}
+
+    @staticmethod
+    def listed(feeds: dict[str, str]) -> tuple[str, tuple[str, ...]]:
+        return (" AND i.feed_url IN (SELECT value FROM json_each(?))", (json.dumps(list(feeds)),)) if feeds else ("", ())
+
+    def fetching(self) -> bool:
+        return self.fetch_thread is not None and self.fetch_thread.is_alive()
+
+    def feed_list(self, name: str | None = None) -> str | None:
+        lists = self.lists()
+        name = name or next(iter(lists), "")
+        if name not in lists:
+            return None
+        listed = lists[name]
+        only, params = self.listed(listed)
+        with self.connect() as con:
+            counts = dict(con.execute(f"SELECT i.feed_url, COUNT(*) FROM items i WHERE i.unread = 1{only} GROUP BY i.feed_url", params).fetchall())
+            titles = dict(con.execute(f"SELECT i.feed_url, i.title FROM feeds i WHERE 1{only}", params).fetchall())
+        feeds = [(url, listed[url] or titles.get(url), counts.get(url, 0)) for url in listed]
+        return list_page(name, feeds, [other for other in lists if other != name], self.fetch_error)
+
+    def unread(self) -> str:
+        listed = self.feeds()
+        only, params = self.listed(listed)
+        with self.connect() as con:
+            items = con.execute(
+                "SELECT i.rowid, i.title, i.publication_date, f.title, i.feed_url FROM items i LEFT JOIN feeds f USING (feed_url)"
+                f" WHERE i.unread = 1{only} ORDER BY {NEWEST} LIMIT ?", (*params, LIMIT)
+            ).fetchall()
+        return unread_page(self.named(items, listed))
+
+    def feed(self, url: str) -> str:
+        with self.connect() as con:
+            row = con.execute("SELECT title FROM feeds WHERE feed_url = ?", (url,)).fetchone()
+            items = con.execute(
+                "SELECT i.rowid, i.title, i.publication_date, f.title, i.feed_url FROM items i LEFT JOIN feeds f USING (feed_url)"
+                f" WHERE i.unread = 1 AND i.feed_url = ? ORDER BY {NEWEST} LIMIT ?", (url, LIMIT)
+            ).fetchall()
+        listed = self.feeds()
+        return feed_page(url, listed.get(url) or (row[0] if row else None), self.named(items, listed))
+
+    def item(self, rowid: int) -> str | None:
+        with self.connect() as con:
+            row = con.execute(
+                "SELECT i.title, i.link, i.publication_date, f.title, i.feed_url, i.content FROM items i"
+                " LEFT JOIN feeds f USING (feed_url) WHERE i.rowid = ?", (rowid,)
+            ).fetchone()
+            if row is None:
+                return None
+            con.execute("UPDATE items SET unread = 0 WHERE rowid = ?", (rowid,))
+        title, link, date, feed, url, content = row
+        return item_page(rowid, title, link, date, self.feeds().get(url) or feed, url, content)
+
+    @staticmethod
+    def named(items: list[Any], names: dict[str, str]) -> list[Any]:
+        return [(rowid, title, date, names.get(url) or feed, url) for rowid, title, date, feed, url in items]
+
+    def keep_unread(self, rowid: int) -> None:
+        with self.connect() as con:
+            con.execute("UPDATE items SET unread = 1 WHERE rowid = ?", (rowid,))
+
+    def mark_feed_read(self, url: str) -> None:
+        with self.connect() as con:
+            con.execute("UPDATE items SET unread = 0 WHERE feed_url = ?", (url,))
+
+    def fetch(self) -> None:
+        with self.connect():  # raises Locked, so a terminal newsraft is switched away first
+            pass
+        if self.fetching():
+            return
+        self.fetch_since, self.fetch_error = time.time(), ""
+        self.fetch_thread = threading.Thread(target=self._reload, daemon=True)
+        self.fetch_thread.start()
+
+    def _reload(self) -> None:
+        for command in self.reload_commands:
+            result = subprocess.run(command, capture_output=True, text=True)
+            if result.returncode != 0:
+                self.fetch_error = (result.stderr or result.stdout).strip()[-1000:]
+                return
+
+    def holders(self) -> list[int]:
+        """newsraft processes that have this database open."""
+        target = os.path.realpath(self.db)
+        pids: list[int] = []
+        for proc in Path("/proc").iterdir():
+            if not proc.name.isdigit() or int(proc.name) == os.getpid():
+                continue
+            try:
+                argv0 = (proc / "cmdline").read_bytes().split(b"\0")[0]
+                if os.path.basename(argv0) == b"newsraft" and any(os.path.realpath(fd) == target for fd in (proc / "fd").iterdir()):
+                    pids.append(int(proc.name))
+            except OSError:
+                continue
+        return pids
+
+    def switch(self) -> None:
+        for pid in self.holders():
+            os.kill(pid, signal.SIGTERM)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                with self.connect():
+                    return
+            except Locked:
+                time.sleep(0.2)
+
+
+def make_handler(reader: Reader) -> type[BaseHTTPRequestHandler]:
+    class Handler(BaseHTTPRequestHandler):
+        def send(self, status: int, body: str, content_type: str = "text/html; charset=utf-8") -> None:
+            data = body.encode()
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Security-Policy", CSP)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def respond(self, render: Any) -> None:
+            if reader.fetching():
+                return self.send(200, fetching_page(reader.fetch_since))
+            try:
+                body = render()
+            except Locked:
+                return self.send(200, locked_page())
+            if body is None:
+                return self.send(404, page("Not found", "<p>Not found.</p>"))
+            self.send(200, body)
+
+        def do_GET(self) -> None:
+            parts = urlsplit(self.path)
+            if parts.path == "/simple.css":
+                return self.send(200, STYLE, "text/css; charset=utf-8")
+            if parts.path == "/reader.css":
+                return self.send(200, READER_STYLE, "text/css; charset=utf-8")
+            if parts.path == "/":
+                return self.respond(reader.feed_list)
+            if parts.path == "/unread":
+                return self.respond(reader.unread)
+            if match := re.fullmatch(r"/list/([^/]+)", parts.path):
+                return self.respond(lambda: reader.feed_list(unquote(match[1])))
+            if parts.path == "/feed":
+                url = parse_qs(parts.query).get("url", [""])[0]
+                return self.respond(lambda: reader.feed(url))
+            if match := re.fullmatch(r"/item/(\d+)", parts.path):
+                return self.respond(lambda: reader.item(int(match[1])))
+            self.send(404, page("Not found", "<p>Not found.</p>"))
+
+        def do_POST(self) -> None:
+            # Buttons only work from this reader's own pages, not from other sites open on the phone.
+            if self.headers.get("Origin") != f"http://{self.headers.get('Host')}":
+                return self.send(403, page("Forbidden", "<p>Forbidden.</p>"))
+            length = int(self.headers.get("Content-Length") or 0)
+            form = {k: v[0] for k, v in parse_qs(self.rfile.read(length).decode()).items()}
+            path = urlsplit(self.path).path
+            actions: dict[str, Any] = {
+                "/fetch": reader.fetch,
+                "/switch": reader.switch,
+                "/feed/read": lambda: reader.mark_feed_read(form.get("url", "")),
+            }
+            if match := re.fullmatch(r"/item/(\d+)/unread", path):
+                actions[path] = lambda: reader.keep_unread(int(match[1]))
+            if path not in actions:
+                return self.send(404, page("Not found", "<p>Not found.</p>"))
+            try:
+                actions[path]()
+            except Locked:
+                return self.send(200, locked_page())
+            back = "/" if path in ("/fetch", "/switch", "/feed/read") else urlsplit(self.headers.get("Referer") or "/").path
+            self.send_response(303)
+            self.send_header("Location", back)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+    return Handler
+
+
+def serve(reader: Reader, host: str, port: int) -> ThreadingHTTPServer:
+    return ThreadingHTTPServer((host, port), make_handler(reader))
+
+
+def main(argv: list[str]) -> int:
+    if argv[:1] == ["--listen"] and len(argv) == 2:
+        host, port = argv[1].rsplit(":", 1)
+    else:
+        status = json.loads(subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True).stdout or "{}")
+        address = tailnet_address(status, TAILNET)
+        if address is None:
+            print(f"newsraft-web: not on the {TAILNET} tailnet; refusing to serve anywhere else", file=sys.stderr)
+            return 1
+        host, port = address, str(PORT)
+    reload_commands = [["newsraft", "-f", str(f), "-e", "reload-all"] for f in FEEDS_FILES if f.exists()]
+    server = serve(Reader(DB, reload_commands), host, int(port))
+    print(f"newsraft-web: http://{host}:{port}/", flush=True)
+    server.serve_forever()
+    return 0
+
+
+# What Simple.css leaves to chance: feed content wider than a phone scrolls inside its own box.
+READER_STYLE = """\
+article { overflow-wrap: anywhere; }
+article img, article video { max-width: 100%; height: auto; }
+article table { display: block; max-width: 100%; overflow-x: auto; }
+article pre { max-width: 100%; overflow-x: auto; }
+"""
+
+# Simple.css 2.3.7 (simple.min.css, sha256 fb0624582679e4af905268e0fb461128583a49b5d9e5d8675d1c9e2fc34c7d3d)
+# MIT License, Copyright (c) 2020 Simple.css (Kev Quirk), https://github.com/kevquirk/simple.css
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+# documentation files (the "Software"), to deal in the Software without restriction, including without limitation
+# the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and
+# to permit persons to whom the Software is furnished to do so, subject to the following conditions: The above
+# copyright notice and this permission notice shall be included in all copies or substantial portions of the
+# Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+# LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+# SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+# DEALINGS IN THE SOFTWARE.
+STYLE = r""":root{--sans-font:-apple-system,BlinkMacSystemFont,"Avenir Next",Avenir,"Nimbus Sans L",Roboto,"Noto Sans","Segoe UI",Arial,Helvetica,"Helvetica Neue",sans-serif;--mono-font:Consolas,Menlo,Monaco,"Andale Mono","Ubuntu Mono",monospace;--standard-border-radius:5px;--border-width:1px;--bg:#fff;--accent-bg:#f5f7ff;--text:#212121;--text-light:#585858;--border:#898ea4;--accent:#0d47a1;--accent-hover:#1266e2;--accent-text:var(--bg);--code:#d81b60;--preformatted:#444;--marked:#fd3;--disabled:#efefef}@media (prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#212121;--accent-bg:#2b2b2b;--text:#dcdcdc;--text-light:#ababab;--accent:#ffb300;--accent-hover:#ffe099;--accent-text:var(--bg);--code:#f06292;--preformatted:#ccc;--disabled:#111}img,video{opacity:.8}}*,:before,:after{box-sizing:border-box}textarea,select,input,progress{-webkit-appearance:none;-moz-appearance:none;appearance:none}html{font-family:var(--sans-font);scroll-behavior:smooth}body{color:var(--text);background-color:var(--bg);grid-template-columns:1fr min(45rem,90%) 1fr;margin:0;font-size:1.15rem;line-height:1.5;display:grid}body>*{grid-column:2}body>header{background-color:var(--accent-bg);border-bottom:var(--border-width)solid var(--border);text-align:center;grid-column:1/-1;padding:0 .5rem 2rem}body>header>:only-child{margin-block-start:2rem}body>header h1{max-width:1200px;margin:1rem auto}body>header p{max-width:40rem;margin:1rem auto}main{padding-top:1.5rem}body>footer{color:var(--text-light);text-align:center;border-top:var(--border-width)solid var(--border);margin-top:4rem;padding:2rem 1rem 1.5rem;font-size:.9rem}h1{font-size:3rem}h2{margin-top:3rem;font-size:2.6rem}h3{margin-top:3rem;font-size:2rem}h4{font-size:1.44rem}h5{font-size:1.15rem}h6{font-size:.96rem}p{margin:1.5rem 0}p,h1,h2,h3,h4,h5,h6{overflow-wrap:break-word}h1,h2,h3{line-height:1.1}@media only screen and (width<=720px){h1{font-size:2.5rem}h2{font-size:2.1rem}h3{font-size:1.75rem}h4{font-size:1.25rem}}a,a:visited{color:var(--accent)}a:hover{text-decoration:none}button,.button,a.button,input[type=submit],input[type=reset],input[type=button]{border:var(--border-width)solid var(--accent);background-color:var(--accent);color:var(--accent-text);padding:.5rem .9rem;line-height:normal;text-decoration:none}.button[aria-disabled=true],input:disabled,textarea:disabled,select:disabled,button[disabled]{cursor:not-allowed;background-color:var(--disabled);border-color:var(--disabled);color:var(--text-light)}input[type=range]{padding:0}abbr[title]{cursor:help;text-decoration-line:underline;text-decoration-style:dotted}button:enabled:hover,.button:not([aria-disabled=true]):hover,input[type=submit]:enabled:hover,input[type=reset]:enabled:hover,input[type=button]:enabled:hover{background-color:var(--accent-hover);border-color:var(--accent-hover);cursor:pointer}.button:focus-visible,button:focus-visible:where(:enabled),input:enabled:focus-visible:where([type=submit],[type=reset],[type=button]){outline:2px solid var(--accent);outline-offset:1px}header nav{padding:1rem 0 0;font-size:1rem;line-height:2}header nav ul,header nav ol{flex-flow:wrap;place-content:space-around center;align-items:center;margin:0;padding:0;list-style-type:none;display:flex}header nav ul li,header nav ol li{display:inline-block}header nav a,header nav a:visited{border:var(--border-width)solid var(--border);border-radius:var(--standard-border-radius);color:var(--text);margin:0 .5rem 1rem;padding:.1rem 1rem;text-decoration:none;display:inline-block}header nav a:hover,header nav a.current,header nav a[aria-current=page],header nav a[aria-current=true]{border-color:var(--accent);color:var(--accent);cursor:pointer}@media only screen and (width<=720px){header nav a{border:none;padding:0;line-height:1;text-decoration:underline}}aside,details,pre,progress{background-color:var(--accent-bg);border:var(--border-width)solid var(--border);border-radius:var(--standard-border-radius);margin-bottom:1rem}aside{float:right;width:30%;margin-inline-start:15px;padding:0 15px;font-size:1rem}[dir=rtl] aside{float:left}@media only screen and (width<=720px){aside{float:none;width:100%;margin-inline-start:0}}article,fieldset,dialog{border:var(--border-width)solid var(--border);border-radius:var(--standard-border-radius);margin-bottom:1rem;padding:1rem}article h2:first-child,section h2:first-child,article h3:first-child,section h3:first-child{margin-top:1rem}section{border-top:var(--border-width)solid var(--border);border-bottom:var(--border-width)solid var(--border);margin:3rem 0;padding:2rem 1rem}section+section,section:first-child{border-top:0;padding-top:0}section+section{margin-top:0}section:last-child{border-bottom:0;padding-bottom:0}details{padding:.7rem 1rem}summary{cursor:pointer;word-break:break-all;margin:-.7rem -1rem;padding:.7rem 1rem;font-weight:700}details[open]>summary+*{margin-top:0}details[open]>summary{margin-bottom:.5rem}details[open]>:last-child{margin-bottom:0}table{border-collapse:collapse;margin:1.5rem 0}figure>table{width:max-content;margin:0}td,th{border:var(--border-width)solid var(--border);text-align:start;padding:.5rem}th{background-color:var(--accent-bg);font-weight:700}tr:nth-child(2n){background-color:var(--accent-bg)}table caption{margin-bottom:.5rem;font-weight:700}textarea,select,input,button,.button{font-size:inherit;border-radius:var(--standard-border-radius);box-shadow:none;max-width:100%;margin-bottom:.5rem;padding:.5em;font-family:inherit;display:inline-block}textarea,select,input{color:var(--text);background-color:var(--bg);border:var(--border-width)solid var(--border)}label{display:block}textarea:not([cols]){width:100%}select:not([multiple]){background-image:linear-gradient(45deg,transparent 49%,var(--text)51%),linear-gradient(135deg,var(--text)51%,transparent 49%);background-position:calc(100% - 15px),calc(100% - 10px);background-repeat:no-repeat;background-size:5px 5px,5px 5px;padding-inline-end:25px}[dir=rtl] select:not([multiple]){background-position:10px,15px}input[type=checkbox],input[type=radio]{vertical-align:middle;width:min-content;position:relative}input[type=checkbox]+label,input[type=radio]+label{display:inline-block}input[type=radio]{border-radius:100%}input[type=checkbox]:checked,input[type=radio]:checked{background-color:var(--accent)}input[type=checkbox]:checked:after{content:" ";border-right:solid var(--bg).08em;border-bottom:solid var(--bg).08em;background-color:#0000;border-radius:0;width:.2em;height:.4em;font-size:1.8em;position:absolute;top:.04em;left:.18em;transform:rotate(45deg)}input[type=radio]:checked:after{content:" ";background-color:var(--bg);border-radius:100%;width:.3em;height:.3em;font-size:1.8em;position:absolute;top:.125em;left:.125em}@media only screen and (width<=720px){textarea,select,input{width:100%}}input[type=color]{height:2.5rem;padding:.2rem}input[type=file]{border:0}hr{height:var(--border-width);background:var(--border);border:none;margin:1rem auto}mark{border-radius:var(--standard-border-radius);background-color:var(--marked);color:#000;padding:2px 5px}mark a{color:#0d47a1}img,video{border-radius:var(--standard-border-radius);max-width:100%;height:auto}figure{margin:0;display:block;overflow-x:auto}figure>img,figure>picture>img{margin-inline:auto;display:block}figcaption{text-align:center;color:var(--text-light);margin-block:1rem;font-size:.9rem;position:sticky;left:0}blockquote{border-inline-start:.35rem solid var(--accent);color:var(--text-light);margin-block:2rem;margin-inline:2rem 0;padding:.4rem .8rem;font-style:italic}cite{color:var(--text-light);font-size:.9rem;font-style:normal}dt{color:var(--text-light)}code,pre,pre span,kbd,samp{font-family:var(--mono-font);color:var(--code)}kbd{color:var(--preformatted);border:var(--border-width)solid var(--preformatted);border-bottom:3px solid var(--preformatted);border-radius:var(--standard-border-radius);padding:.1rem .4rem}pre{max-width:100%;color:var(--preformatted);padding:1rem 1.4rem;overflow:auto}pre code{color:var(--preformatted);background:0 0;margin:0;padding:0}progress{width:100%}progress:indeterminate{background-color:var(--accent-bg)}progress::-webkit-progress-bar{border-radius:var(--standard-border-radius);background-color:var(--accent-bg)}progress::-webkit-progress-value{border-radius:var(--standard-border-radius);background-color:var(--accent)}progress::-moz-progress-bar{border-radius:var(--standard-border-radius);background-color:var(--accent);transition-property:width;transition-duration:.3s}progress:indeterminate::-moz-progress-bar{background-color:var(--accent-bg)}dialog{background-color:var(--bg);max-width:40rem;margin:auto}dialog::backdrop{background-color:var(--bg);opacity:.8}@media only screen and (width<=720px){dialog{max-width:calc(100vw - 2rem)}}sup,sub{vertical-align:baseline;position:relative}sup{top:-.4em}sub{top:.3em}.notice{background:var(--accent-bg);border:var(--border-width)solid var(--border);border-radius:var(--standard-border-radius);margin:2rem 0;padding:1.5rem}@media print{@page{margin:1cm}body{display:block}body>header{background-color:unset}body>header nav,body>footer{display:none}article{border:none;padding:0}a[href^=http]:after{content:" <" attr(href)">"}abbr[title]:after{content:" (" attr(title)")"}a{text-decoration:none}p{widows:3;orphans:3}hr{border-top:var(--border-width)solid var(--border)}mark{border:var(--border-width)solid var(--border)}pre,table,figure,img,svg{break-inside:avoid}pre code{white-space:pre-wrap}}"""
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

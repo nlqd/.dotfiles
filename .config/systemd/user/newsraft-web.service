@@ -1,0 +1,15 @@
+[Unit]
+Description=newsraft-web: newsraft feeds on the phone over the Headscale tailnet
+After=network-online.target
+
+[Service]
+Type=simple
+# newsraft's $(command) feeds call helpers in ~/.local/scripts that need asdf's python (its shims call asdf from ~/go/bin).
+Environment=PATH=%h/.local/scripts:%h/.local/bin:%h/.asdf/shims:%h/go/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/scripts/newsraft-web
+# It exits when the laptop isn't on Headscale; retry until it is.
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target
