@@ -1,0 +1,705 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["pypdf", "cryptography", "msoffcrypto-tool", "openpyxl"]
+# ///
+"""fin: statements and invoices to hledger. Run `fin help` for the command list."""
+from __future__ import annotations
+
+import base64
+import csv
+import fnmatch
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import tomllib
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(os.environ.get("FIN_DIR") or Path.home() / "Documents/finance")
+SAFE = re.compile(r"[A-Za-z0-9_-]+")
+
+
+# Functional core
+
+
+def parse_rules(text: str) -> list[dict[str, str]]:
+    return list(tomllib.loads(text).get("rule", []))
+
+
+class MissingProfile(Exception):
+    """profile.toml lacks a value a password rule needs; the message names the key, never a value."""
+
+
+class WrongPassword(Exception):
+    pass
+
+
+def match_rule(rules: list[dict[str, str]], entry: dict[str, str]) -> tuple[dict[str, str], str] | None:
+    """The first rule matching this file and where it files it. Values captured from email text must be
+    plain words, so a crafted subject cannot point a file outside the folder."""
+    for rule in rules:
+        found = re.search(rule["pattern"], entry.get(rule["field"], ""))
+        if not found:
+            continue
+        values = {**found.groupdict(), "date": entry["date"]}
+        if not all(SAFE.fullmatch(v or "") or re.fullmatch(r"\d{4}-\d\d-\d\d", v or "") for v in values.values()):
+            continue
+        dest = rule["dest"].format(**values) + Path(entry["file"]).suffix.lower()
+        if dest.startswith("/") or ".." in Path(dest).parts:
+            continue
+        return rule, dest
+    return None
+
+
+def classify(rules: list[dict[str, str]], entry: dict[str, str]) -> str | None:
+    matched = match_rule(rules, entry)
+    return matched[1] if matched else None
+
+
+def profile_tokens(profile: dict[str, str]) -> dict[str, str]:
+    tokens = dict(profile)
+    if "dob" in profile:  # ddmmyyyy
+        tokens["dob_ddmm"] = profile["dob"][:4]
+        tokens["dob_ddmmyyyy"] = profile["dob"]
+    return tokens
+
+
+def password_for(rules: list[dict[str, str]], entry: dict[str, str], profile: dict[str, str]) -> str | None:
+    matched = match_rule(rules, entry)
+    if matched is None or "password" not in matched[0]:
+        return None
+    try:
+        return matched[0]["password"].format(**profile_tokens(profile))
+    except KeyError as missing:
+        key = "dob" if str(missing.args[0]).startswith("dob_") else missing.args[0]  # the derived pieces come from dob
+        raise MissingProfile(f"profile.toml has no {key!r}, which the password rule for {matched[1]} needs") from None
+
+
+def read_pdf_text(path: Path, password: str) -> str:
+    import pypdf
+
+    reader = pypdf.PdfReader(path)
+    if reader.is_encrypted and not reader.decrypt(password):
+        raise WrongPassword(path.name)
+    with tempfile.TemporaryDirectory() as tmp:
+        plain = Path(tmp) / "plain.pdf"
+        plain.touch(mode=0o600)
+        with open(plain, "wb") as f:
+            pypdf.PdfWriter(clone_from=reader).write(f)
+        return subprocess.run(["pdftotext", "-layout", str(plain), "-"], capture_output=True, text=True, check=True).stdout
+
+
+def read_xlsx_csv(path: Path, password: str) -> str:
+    import msoffcrypto
+    import openpyxl
+    from msoffcrypto.exceptions import InvalidKeyError
+    import warnings
+
+    warnings.filterwarnings("ignore", message="Workbook contains no default style")  # BIDV's workbooks lack one
+
+    plain = io.BytesIO()
+    with open(path, "rb") as f:
+        office = msoffcrypto.OfficeFile(f)
+        if office.is_encrypted():
+            if not password:
+                raise WrongPassword(path.name)
+            office.load_key(password=password)
+            try:
+                office.decrypt(plain)
+            except InvalidKeyError:
+                raise WrongPassword(path.name) from None
+        else:
+            plain.write(f.read())
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    for sheet in openpyxl.load_workbook(plain, data_only=True).worksheets:
+        for row in sheet.iter_rows(values_only=True):
+            if any(cell not in (None, "") for cell in row):
+                writer.writerow(["" if cell is None else cell for cell in row])
+    return out.getvalue()
+
+
+def new_names(names: list[str], raw: Path) -> list[str]:
+    return [name for name in names if not (raw / name).exists()]
+
+
+# Ledger: statements -> tidy csv -> hledger. Each bank is a recipe in rules.toml, not code.
+
+
+@dataclass
+class Row:
+    date: str  # YYYY-MM-DD
+    description: str
+    amount: int  # credit positive, debit negative
+    balance: int | None = None
+    counterparty: str = ""
+    reference: str = ""
+
+
+@dataclass
+class Statement:
+    rows: list[Row] = field(default_factory=list)
+    opening: int | None = None
+    closing: int | None = None
+    debit_total: int | None = None
+    credit_total: int | None = None
+    date: str | None = None  # a date for the opening balance when there are no rows
+
+    @property
+    def first_date(self) -> str:
+        return min((r.date for r in self.rows), default=self.date or "")
+
+
+def money(text: str) -> int:
+    """'266,000', '-13,474,846', '+23,375.00', '500000.0' -> whole dong."""
+    return round(float(text.replace(",", "").replace("+", "").strip() or "0"))
+
+
+def _iso(text: str, date_format: str) -> str:
+    return datetime.strptime(text.strip(), date_format).date().isoformat()
+
+
+def _cell(text: str) -> str:
+    return " ".join(text.split())
+
+
+def extract_csv_table(text: str, cfg: dict[str, Any]) -> Statement:
+    table = [[_cell(c) for c in row] for row in csv.reader(io.StringIO(text))]
+    head = next(i for i, row in enumerate(table) if cfg["header_cell"] in row)
+    names = table[head]
+    col = {key: names.index(label) for key, label in cfg["columns"].items()}
+    number_col = names.index(cfg["row_number_column"])
+
+    def labelled(label: str) -> list[str] | None:
+        return next((row for row in table[head + 1 :] if label in row), None)
+
+    statement = Statement()
+    for row in table[head + 1 :]:
+        if len(row) <= number_col or not row[number_col].isdigit():
+            continue
+        debit = money(row[col["debit"]] or "0")
+        credit = money(row[col["credit"]] or "0")
+        statement.rows.append(
+            Row(
+                date=_iso(row[col["date"]], cfg["date_format"]),
+                description=row[col["description"]],
+                amount=credit - debit,
+                balance=money(row[col["balance"]]) if row[col["balance"]] else None,
+                counterparty=row[col["counterparty"]] if "counterparty" in col else "",
+                reference=row[col["reference"]] if "reference" in col else "",
+            )
+        )
+    for key, label in (("opening", cfg.get("opening")), ("closing", cfg.get("closing"))):
+        found = labelled(label) if label else None
+        if found and found[col["balance"]]:
+            setattr(statement, key, money(found[col["balance"]]))
+    totals = labelled(cfg["totals"]) if cfg.get("totals") else None
+    if totals:
+        statement.debit_total = money(totals[col["debit"]] or "0")
+        statement.credit_total = money(totals[col["credit"]] or "0")
+    if cfg.get("unsigned_overdraft") and statement.opening is not None:
+        restore_overdraft_signs(statement)
+    return statement
+
+
+def restore_overdraft_signs(statement: Statement) -> None:
+    """Some banks print an overdrawn balance without its minus sign. Flip only where the running balance proves it."""
+    running = statement.opening or 0
+    for row in statement.rows:
+        running += row.amount
+        if row.balance is not None and running < 0 and row.balance == -running:
+            row.balance = running
+
+
+def is_debit(found: re.Match[str], boundary: int, min_gap: int | None) -> bool:
+    """A row's side. Pages without their own header have wider columns, so when the recipe sets
+    debit_min_gap a row is judged by how far its description starts after its amount: credits are
+    printed against the description, debits sit well left of it. Otherwise the header's column boundary decides."""
+    if min_gap is not None:
+        return found.start("text") - found.end("amount") >= min_gap
+    return found.end("amount") <= boundary
+
+
+def extract_text_table(text: str, cfg: dict[str, Any]) -> Statement:
+    lines = text.splitlines()
+    statement = Statement()
+    sign = cfg.get("balance_sign", 1)
+    for key, pattern in cfg.get("numbers", {}).items():
+        found = re.search(pattern, text, re.MULTILINE | re.DOTALL)
+        if not found:
+            continue
+        value = money(found.group(1))
+        if key in ("opening", "closing"):
+            setattr(statement, key, value * sign)
+        else:
+            setattr(statement, key, value)
+    if cfg.get("statement_date"):
+        found = re.search(cfg["statement_date"], text)
+        statement.date = _iso(found.group(1), cfg["date_format"]) if found else None
+    if "row" not in cfg:
+        return statement
+    start = next((i for i, line in enumerate(lines) if cfg["start"] in line), None)
+    if start is None:
+        return statement
+    end = next((i for i in range(start, len(lines)) if cfg["end"] in lines[i]), len(lines))
+    ignore = [re.compile(p) for p in cfg.get("ignore", [])]
+    row = re.compile(cfg["row"])
+    signed = bool(cfg.get("signed_amounts"))  # every amount carries its own sign: no columns to read
+    # A wrapped description is centred on its amount line: as many lines above it as below. Lines after a row
+    # first finish that row, the rest wait for the next one.
+    centered = bool(cfg.get("text_centered"))
+    waiting: list[str] = []
+    owed_below = 0
+    boundary: int | None = 0 if signed else None  # each page repeats the header, and its columns can sit elsewhere
+    for line in lines[start:end]:
+        if not signed and cfg["debit_header"] in line and cfg["credit_header"] in line:
+            boundary = (line.index(cfg["debit_header"]) + line.index(cfg["credit_header"])) // 2
+            continue
+        if boundary is None:
+            continue
+        found = row.match(line)
+        if found:
+            amount = money(found.group("amount"))
+            if not signed and is_debit(found, boundary, cfg.get("debit_min_gap")):
+                amount = -amount
+            text = (found.group("text") or "").strip()
+            if centered:
+                text, owed_below, waiting = " ".join([*waiting, text]).strip(), len(waiting), []
+            statement.rows.append(
+                Row(
+                    date=_iso(found.group("date"), cfg.get("row_date_format", cfg["date_format"])),
+                    description=text,
+                    amount=amount,
+                )
+            )
+        elif line.strip() and not any(p.search(line) for p in ignore):
+            if centered and not owed_below:
+                waiting.append(line.strip())
+            elif statement.rows:
+                statement.rows[-1].description += " " + line.strip()
+                owed_below = max(owed_below - 1, 0)
+    # Some notices print an opening that counts principal only. The opening the closing implies then
+    # has to match the previous statement's closing, so the chain check still verifies every row.
+    if cfg.get("opening_from_rows") and statement.closing is not None:
+        statement.opening = statement.closing - sum(r.amount for r in statement.rows)
+    return statement
+
+
+def problems(statement: Statement) -> list[str]:
+    """Checks against what the statement says about itself; empty means the extraction can be trusted."""
+    found: list[str] = []
+    if all(v is None for v in (statement.opening, statement.closing, statement.debit_total, statement.credit_total)):
+        return ["nothing to check: the recipe's numbers did not match this statement"]
+    debits = -sum(r.amount for r in statement.rows if r.amount < 0)
+    credits = sum(r.amount for r in statement.rows if r.amount > 0)
+    if statement.debit_total is not None and debits != statement.debit_total:
+        found.append(f"debit total: the rows add to {debits}, the statement says {statement.debit_total}")
+    if statement.credit_total is not None and credits != statement.credit_total:
+        found.append(f"credit total: the rows add to {credits}, the statement says {statement.credit_total}")
+    if statement.opening is not None:
+        running = statement.opening
+        for number, row in enumerate(statement.rows, start=1):
+            running += row.amount
+            if row.balance is not None and row.balance != running:
+                found.append(f"balance after row {number} ({row.date}): expected {running}, the statement says {row.balance}")
+                break
+        else:
+            if statement.closing is not None and running != statement.closing:
+                found.append(f"closing balance: opening plus rows is {running}, the statement says {statement.closing}")
+    return found
+
+
+def without_duplicates(items: list[tuple[str, Statement]]) -> tuple[list[tuple[str, Statement]], list[str]]:
+    """Some banks answer a request for any month with their latest statement, so one statement can arrive under several names."""
+    kept: list[tuple[str, Statement]] = []
+    dropped: list[str] = []
+    for name, statement in items:
+        if any(statement == other for _, other in kept):
+            dropped.append(name)
+        else:
+            kept.append((name, statement))
+    return kept, dropped
+
+
+def chain_problems(statements: list[Statement], names: list[str] | None = None) -> list[str]:
+    found: list[str] = []
+    for i, (before, after) in enumerate(zip(statements, statements[1:])):
+        if before.closing is not None and after.opening is not None and before.closing != after.opening:
+            where = f" (between {names[i]} and {names[i + 1]})" if names else ""
+            found.append(f"a statement opens at {after.opening} but the one before it closed at {before.closing}{where}: a statement is missing or overlaps")
+    return found
+
+
+def brought_forward(before: Statement, after: Statement) -> int:
+    """What changed between two statements that should have chained: money that moved in a statement we do not have."""
+    if before.closing is None or after.opening is None:
+        return 0
+    return after.opening - before.closing
+
+
+def normalized_csv(statement: Statement, with_opening: bool, brought_forward: int = 0) -> str:
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(["date", "description", "amount", "balance", "counterparty", "reference"])
+    has_balances = any(r.balance is not None for r in statement.rows)
+    if with_opening and statement.opening is not None and statement.first_date:
+        writer.writerow([statement.first_date, "Opening balance", f"{statement.opening} VND", f"{statement.opening} VND" if has_balances else "", "", ""])
+    if brought_forward and statement.first_date:
+        writer.writerow([statement.first_date, "Balance brought forward (statements missing)", f"{brought_forward} VND", "", "", ""])
+    for r in statement.rows:
+        writer.writerow([r.date, r.description, f"{r.amount} VND", f"{r.balance} VND" if r.balance is not None else "", r.counterparty, r.reference])
+    return out.getvalue()
+
+
+STARTER_CATEGORIES = """\
+# Applies to every bank. Safe to edit: fin never overwrites this file.
+# The last matching rule wins, so keep specific rules below the defaults.
+# A rule matches against the whole csv line (description, counterparty, reference).
+# After editing, just rerun a report; nothing needs rebuilding:  fin report bal expenses
+
+account2 expenses:unsorted
+if %amount ^[0-9]
+  account2 income:unsorted
+if ,Opening balance,
+  account2 equity:opening balances
+if ,Balance brought forward
+  account2 equity:missing statements
+
+# Examples; change freely. Money moving between your own accounts should go to one shared account
+# so both sides cancel out (it nets to zero when both statements are in):
+# if card debt|Thanh toan no the
+#   account2 equity:transfers
+# if PETROLIMEX|PLX
+#   account2 expenses:transport:fuel
+"""
+
+
+def _write_if_changed(path: Path, content: str) -> bool:
+    if path.exists() and path.read_text() == content:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    return True
+
+
+def build_ledger(root: Path) -> dict[str, Any]:
+    recipes = tomllib.loads((root / "rules.toml").read_text()).get("extract", [])
+    found: list[tuple[dict[str, Any], str, Statement]] = []
+    messages: list[str] = []
+    for source in sorted((root / "work").rglob("*")):
+        if source.suffix not in (".csv", ".txt") or not source.is_file():
+            continue
+        name = source.relative_to(root / "work").with_suffix("").as_posix()
+        recipe = next((r for r in recipes if fnmatch.fnmatch(name, r["match"])), None)
+        if recipe is None:
+            continue
+        parse = extract_csv_table if recipe["kind"] == "csv-table" else extract_text_table
+        try:
+            found.append((recipe, name, parse(source.read_text(), recipe)))
+        except (StopIteration, ValueError, KeyError, IndexError) as error:
+            messages.append(f"{name}: could not read it with the recipe ({type(error).__name__}: {error})")
+    by_account: dict[str, list[tuple[dict[str, Any], str, Statement]]] = {}
+    for item in found:
+        by_account.setdefault(item[0]["account"], []).append(item)
+    written = 0
+    duplicates = 0
+    for account, items in by_account.items():
+        items.sort(key=lambda i: (i[2].first_date, i[1]))
+        unique, dropped = without_duplicates([(i[1], i[2]) for i in items])
+        duplicates += len(dropped)
+        items = [i for i in items if i[1] not in dropped]
+        for recipe, name, statement in items:
+            messages += [f"{name}: {p}" for p in problems(statement)]
+        messages += [f"{account}: {p}" for p in chain_problems([i[2] for i in items], [i[1].split("/")[-1] for i in items])]
+        for position, (recipe, name, statement) in enumerate(items):
+            if problems(statement):
+                continue
+            stem = name.removeprefix("statements/").replace("/", "-")
+            written += _write_if_changed(root / f"ledger/csv/{stem}.csv", normalized_csv(statement, with_opening=position == 0, brought_forward=brought_forward(items[position - 1][2], statement) if position else 0))
+            _write_if_changed(root / f"ledger/csv/{stem}.csv.rules", f"include ../rules/{recipe['rules']}.rules\n")
+            has_balances = any(r.balance is not None for r in statement.rows)
+            base = f"# Reading rules for {account}. Safe to edit: fin never overwrites this file.\nskip 1\nfields date, description, amount, balance, counterparty, reference\ndate-format %Y-%m-%d\naccount1 {account}\n"
+            base += "balance1 %balance\n" if has_balances else ""
+            base += "include categories.rules\n"
+            if not (root / f"ledger/rules/{recipe['rules']}.rules").exists():
+                _write_if_changed(root / f"ledger/rules/{recipe['rules']}.rules", base)
+    if written or any((root / "ledger/csv").glob("*.csv")):
+        if not (root / "ledger/rules/categories.rules").exists():
+            _write_if_changed(root / "ledger/rules/categories.rules", STARTER_CATEGORIES)
+        if not (root / "ledger/base.journal").exists():
+            _write_if_changed(root / "ledger/base.journal", "; Generated once by fin; yours to edit: commodity styles, cash purchases, anything not on a statement.\ncommodity 1,000,000. VND\n")
+    return {"written": written, "duplicates": duplicates, "problems": messages}
+
+
+def report_command(root: Path) -> list[str]:
+    """hledger reads every statement csv with its own rules file (it cannot include csv from a journal)."""
+    files = [root / "ledger/base.journal", *sorted((root / "ledger/csv").glob("*.csv"))]
+    return ["hledger", "-c", "1,000,000 VND", *[arg for f in files if f.exists() for arg in ("-f", str(f))]]
+
+
+def web_command(root: Path, host: str, port: int) -> list[str]:
+    """hledger-web over the same files as a report: read-only, no browser, on one address."""
+    return ["hledger-web", *report_command(root)[1:], "--serve", "--host", host, "--port", str(port), "--capabilities=view"]
+
+
+WEB_PORT = 5000
+
+
+def tailnet_address() -> str:
+    result = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True)
+    address = result.stdout.strip().splitlines()[0] if result.returncode == 0 and result.stdout.strip() else ""
+    if not address:
+        raise SystemExit("fin: this laptop has no Headscale address (is tailscale up?)")
+    return address
+
+
+def report_args(args: list[str]) -> list[str]:
+    return args or ["bal"]
+
+
+# Imperative shell
+
+
+def file_all(root: Path) -> dict[str, Any]:
+    rules = parse_rules((root / "rules.toml").read_text())
+    manifest = root / "raw/manifest.jsonl"
+    entries = [json.loads(line) for line in manifest.read_text().splitlines() if line.strip()] if manifest.exists() else []
+    filed, unfiled = 0, []
+    for entry in entries:
+        dest = classify(rules, entry)
+        if dest is None:
+            unfiled.append(entry["file"])
+            continue
+        target = root / dest
+        if target.exists():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(root / "raw" / entry["file"], target)
+        target.chmod(0o600)
+        filed += 1
+    return {"filed": filed, "unfiled": unfiled}
+
+
+def unlock(root: Path) -> dict[str, Any]:
+    rules = parse_rules((root / "rules.toml").read_text())
+    profile_file = root / "profile.toml"
+    profile = tomllib.loads(profile_file.read_text()) if profile_file.exists() else {}
+    manifest = root / "raw/manifest.jsonl"
+    entries = [json.loads(line) for line in manifest.read_text().splitlines() if line.strip()] if manifest.exists() else []
+    unlocked, failed, missing = 0, [], []
+    for entry in entries:
+        matched = match_rule(rules, entry)
+        if matched is None:
+            continue
+        dest = matched[1]
+        suffix = ".csv" if dest.endswith(".xlsx") else ".txt"
+        target = (root / "work" / dest).with_suffix(suffix)
+        if target.exists():
+            continue
+        try:
+            password = password_for(rules, entry, profile) or ""
+            source = root / "raw" / entry["file"]
+            text = read_xlsx_csv(source, password) if dest.endswith(".xlsx") else read_pdf_text(source, password)
+        except MissingProfile as error:
+            missing.append(str(error))
+            continue
+        except WrongPassword:
+            failed.append(dest)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+        target.chmod(0o600)
+        unlocked += 1
+    return {"unlocked": unlocked, "failed": failed, "missing": missing}
+
+
+# Runs on the server as root, reads the mailbox, writes a tar of new attachments plus their manifest.
+REMOTE = r'''
+import base64, datetime, email, email.policy, email.utils, io, json, os, re, sys, tarfile
+alias, mailbox, known = sys.argv[1], sys.argv[2], set(json.loads(base64.b64decode(sys.argv[3])))
+tar = tarfile.open(fileobj=sys.stdout.buffer, mode="w|")
+manifest = []
+for root, _dirs, files in os.walk(mailbox):
+    if "/cur" not in root and "/new" not in root:
+        continue
+    for name in sorted(files):
+        msg = email.message_from_binary_file(open(os.path.join(root, name), "rb"), policy=email.policy.default)
+        to = " ".join(str(msg.get(h, "")) for h in ("To", "Delivered-To", "X-Original-To", "Envelope-To", "Cc"))
+        if alias not in to:
+            continue
+        when = email.utils.parsedate_to_datetime(str(msg["Date"])).astimezone(datetime.timezone.utc)
+        for part in msg.walk():
+            filename = part.get_filename()
+            if not filename:
+                continue
+            out = f"{when:%Y-%m-%dT%H%M}_" + re.sub(r"[^A-Za-z0-9._-]+", "_", filename)
+            if out in known:
+                continue
+            data = part.get_payload(decode=True) or b""
+            info = tarfile.TarInfo(out)
+            info.size, info.mode = len(data), 0o600
+            tar.addfile(info, io.BytesIO(data))
+            manifest.append({"file": out, "subject": str(msg["Subject"]), "date": f"{when:%Y-%m-%d}"})
+blob = "".join(json.dumps(m) + "\n" for m in manifest).encode()
+info = tarfile.TarInfo("manifest.jsonl")
+info.size = len(blob)
+tar.addfile(info, io.BytesIO(blob))
+tar.close()
+'''
+
+
+def pull(root: Path) -> int | None:
+    """How many new attachments arrived, or None if the mailbox could not be read."""
+    config = tomllib.loads((root / "config.toml").read_text())
+    raw = root / "raw"
+    raw.mkdir(parents=True, exist_ok=True)
+    known = base64.b64encode(json.dumps(sorted(p.name for p in raw.iterdir())).encode()).decode()
+    result = subprocess.run(
+        ["ssh", config["host"], "sudo", "python3", "-", config["alias"], config["mailbox"], known],
+        input=REMOTE.encode(), capture_output=True,
+    )
+    if result.returncode != 0:
+        print(f"fin: could not read the mailbox: {result.stderr.decode().strip()[-300:]}", file=sys.stderr)
+        return None
+    added = 0
+    with tarfile.open(fileobj=io.BytesIO(result.stdout)) as tar:
+        for member in tar:
+            data = tar.extractfile(member).read()  # type: ignore[union-attr]
+            if member.name == "manifest.jsonl":
+                if data:
+                    with open(raw / "manifest.jsonl", "ab") as f:
+                        f.write(data)
+                continue
+            if "/" in member.name or member.name.startswith("."):
+                continue
+            (raw / member.name).write_bytes(data)
+            (raw / member.name).chmod(0o600)
+            added += 1
+    return added
+
+
+SHORT_HELP = """fin: statements and invoices to hledger.
+
+  fin            fetch new attachments, then file them
+  fin unfiled    list attachments no rule has claimed
+  fin unlock     decrypt the filed statements
+  fin ledger     rebuild the ledger from the statements
+  fin report     balances; or any hledger report: fin report reg food
+  fin web        browse it on the phone (read-only, over the tailnet)
+  (fin pull and fin file are the two halves of plain fin)
+
+More: fin help <topic>   topics: {topics}"""
+
+TOPICS = {
+    "config": """config.toml in ~/Documents/finance (override with FIN_DIR):
+  host = "ssh-name"   alias = "the-forwarding-address"   mailbox = "/home/x/Mail"
+profile.toml, which only you read:
+  dob = "ddmmyyyy"   id = "..."   and any other value a password template names""",
+    "rules": """rules.toml decides where each attachment goes:
+  [[rule]] field = "subject" or "file", pattern = '(?P<y>\\d{4})', dest = "statements/bank/card/{y}-{m}"
+  optional password = "{dob_ddmm}{card_last4}", built from profile.toml
+The pattern's named groups fill dest; {date} is the message date. Extensions are kept.
+[[extract]] recipes (see fin help ledger) say how each bank's statement becomes rows.""",
+    "layout": """Everything lives in ~/Documents/finance, nothing in this repo:
+  raw/        every attachment as received, plus manifest.jsonl
+  statements/ invoices/   filed copies, named by the rules
+  work/       decrypted text and csv, same layout
+  ledger/     csv/ one tidy csv per statement (generated), rules/ per-bank and categories.rules (yours),
+              base.journal (yours: commodity styles, cash purchases, anything not on a statement)""",
+    "ledger": """fin ledger reads work/ by the [[extract]] recipes in rules.toml and writes ledger/.
+Every statement is checked against its own totals and balances, and consecutive ones must chain.
+Edit ledger/rules/categories.rules, then rerun fin report: nothing needs rebuilding.
+Recipe options: kind csv-table or text-table, unsigned_overdraft, balance_sign, statement_date,
+debit_min_gap (text tables whose later pages have no header: a debit sits that many columns left of the description),
+signed_amounts (every amount carries its sign), text_centered (a wrapped description sits half above its amount line),
+opening_from_rows (the printed opening is not the real one: take closing minus rows, and let the chain check verify).""",
+}
+
+
+def help_text(topic: str | None) -> str:
+    names = ", ".join(TOPICS)
+    if topic is None:
+        return SHORT_HELP.format(topics=names)
+    if topic in TOPICS:
+        return TOPICS[topic]
+    return f"fin: no help topic {topic!r}. Topics: {names}"
+
+
+def unfiled_line(names: list[str]) -> str | None:
+    if not names:
+        return None
+    if len(names) == 1:
+        return f"fin: no rule for {names[0]} (fin help rules)"
+    return f"fin: {len(names)} files have no rule (fin unfiled lists them)"
+
+
+def summary(new: int, filed: int) -> str:
+    if new == 0 and filed == 0:
+        return "fin: nothing new"
+    return f"fin: {new} new, {filed} filed"
+
+
+def main(argv: list[str]) -> int:
+    ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    command = argv[0] if argv else "all"
+    if command in ("help", "-h", "--help"):
+        print(help_text(argv[1] if len(argv) > 1 else None))
+        return 0
+    if command not in ("all", "pull", "file", "unfiled", "unlock", "ledger", "report", "web"):
+        print(help_text(None), file=sys.stderr)
+        return 2
+    if command == "report":
+        return subprocess.run([*report_command(ROOT), *report_args(argv[1:])]).returncode
+    if command == "web":
+        if not shutil.which("hledger-web"):
+            print("fin: hledger-web is not installed (sudo apt install hledger-web)", file=sys.stderr)
+            return 1
+        return subprocess.run(web_command(ROOT, tailnet_address(), WEB_PORT)).returncode
+    new = filed = 0
+    unfiled = None
+    if command in ("all", "pull"):
+        pulled = pull(ROOT)
+        if pulled is None:
+            return 1
+        new = pulled
+    if command in ("all", "file"):
+        report = file_all(ROOT)
+        filed = report["filed"]
+        unfiled = unfiled_line(report["unfiled"])
+    if command in ("all", "pull", "file"):
+        print(summary(new, filed))
+        if unfiled:
+            print(unfiled)
+    if command == "unfiled":
+        print("\n".join(file_all(ROOT)["unfiled"]) or "fin: every attachment has a rule")
+        return 0
+    if command == "ledger":
+        report = build_ledger(ROOT)
+        print(f"fin: {report['written']} updated" if report["written"] else "fin: ledger up to date")
+        if report["duplicates"]:
+            print(f"fin: {report['duplicates']} duplicate statement(s) ignored")
+        for message in report["problems"]:
+            print(f"fin: {message}")
+        return 1 if report["problems"] else 0
+    if command == "unlock":
+        report = unlock(ROOT)
+        print(f"fin: unlocked {report['unlocked']}" if report["unlocked"] else "fin: nothing to unlock")
+        for dest in report["failed"]:
+            print(f"fin: wrong password for {dest} (fin help config)")
+        for message in sorted(set(report["missing"])):
+            print(f"fin: {message}")
+        return 1 if report["failed"] or report["missing"] else 0
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

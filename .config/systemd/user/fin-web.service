@@ -1,0 +1,14 @@
+[Unit]
+Description=fin web: the finance ledger (hledger-web, read-only) on the phone over the Headscale tailnet
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/scripts/fin web
+# It exits when the laptop isn't on Headscale or hledger-web is missing; retry until it works.
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target
