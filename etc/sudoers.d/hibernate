@@ -1,0 +1,5 @@
+# Ubuntu's polkit rule (com.ubuntu.desktop.rules) denies hibernate to user
+# sessions, so sush goes through sudo. UPower and root are not affected.
+#
+# Install: rootsync --apply (it runs visudo --check on this file first)
+qd ALL=(ALL) NOPASSWD: /usr/bin/systemctl suspend-then-hibernate

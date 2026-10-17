@@ -1,0 +1,14 @@
+# Dell thermal profile follows AC power: aggressive cooling (Cool) while docked,
+# balanced (Optimized) on battery for quieter, lower-drain lap use. udev runs as
+# root and writes the dell-wmi-sysman firmware attribute directly, so no sudoers
+# is needed. The value persists in BIOS NVRAM, so a boot-time race on the module
+# is harmless: the last-set profile holds until the next AC transition.
+#
+# TLP also writes the platform profile, and its default on AC is 'performance'
+# (this BIOS setting's UltraPerformance). Whichever ran last won, so
+# etc/tlp.d/10-server-cool.conf sets PLATFORM_PROFILE_ON_AC=cool as well. Keep
+# both in agreement.
+#
+# Install (per machine): rootsync --apply
+SUBSYSTEM=="power_supply", KERNEL=="AC", ATTR{online}=="1", RUN+="/bin/sh -c 'echo Cool > /sys/class/firmware-attributes/dell-wmi-sysman/attributes/ThermalManagement/current_value; logger --tag thermal-ac AC-on:Cool'"
+SUBSYSTEM=="power_supply", KERNEL=="AC", ATTR{online}=="0", RUN+="/bin/sh -c 'echo Optimized > /sys/class/firmware-attributes/dell-wmi-sysman/attributes/ThermalManagement/current_value; logger --tag thermal-ac AC-off:Optimized'"

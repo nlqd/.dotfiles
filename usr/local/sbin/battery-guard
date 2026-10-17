@@ -1,0 +1,28 @@
+#!/bin/sh
+# Hibernate, then power off, on low battery. Runs from battery-guard.timer as root.
+#
+# Why not rely on UPower: on 2026-10-15 its critical action never reached logind and the
+# worn pack ran from 2% to a hard cutoff in server mode. Percentages here are of the
+# pack's current full charge, which is only ~40% of design, so 7% is about 1.4 Wh.
+BAT=${BATTERY_GUARD_BAT:-/sys/class/power_supply/BAT0}
+HIBERNATE_AT=${BATTERY_GUARD_HIBERNATE_AT:-7}
+POWEROFF_AT=${BATTERY_GUARD_POWEROFF_AT:-3}
+
+[ -r "$BAT/status" ] || exit 0
+[ "$(cat "$BAT/status")" = Discharging ] || exit 0
+
+capacity=$(cat "$BAT/capacity")
+case "$capacity" in
+    '' | *[!0-9]*)
+        logger --tag battery-guard "unreadable capacity '$capacity' in $BAT"
+        exit 1
+        ;;
+esac
+
+if [ "$capacity" -le "$POWEROFF_AT" ]; then
+    logger --tag battery-guard "capacity ${capacity}%: powering off"
+    exec systemctl poweroff
+elif [ "$capacity" -le "$HIBERNATE_AT" ]; then
+    logger --tag battery-guard "capacity ${capacity}%: hibernating"
+    exec systemctl hibernate
+fi

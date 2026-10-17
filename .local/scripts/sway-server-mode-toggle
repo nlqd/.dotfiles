@@ -11,7 +11,7 @@ else
     touch "$STATE_FILE"
     logger --tag sway-server-mode "ON"
     "$HOME/.local/scripts/battery-charge-mode" cap || logger --tag sway-server-mode "battery cap failed"
-    notify-send "Server Mode ON" "Lid close = screen off; battery capped ~60% on AC"
+    notify-send "Server Mode ON" "Lid close = screen off; battery charge capped at 90% on AC"
 fi
 
 # Signal waybar to update (signal 4 = SIGRTMIN+4)

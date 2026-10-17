@@ -1,7 +1,7 @@
 #!/bin/bash
 # Check server mode status and output for waybar
 if [ -f "$HOME/.cache/sway-server-mode" ]; then
-    echo '{"text": "SRV", "class": "server-mode-on", "tooltip": "Server Mode ON - Lid close disabled"}'
+    echo '{"text": "SRV", "class": "server-mode-on", "tooltip": "Server Mode ON - lid close only turns the screen off"}'
 else
     echo '{"text": "", "class": "server-mode-off", "tooltip": "Server Mode OFF"}'
 fi

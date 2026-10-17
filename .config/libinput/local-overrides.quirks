@@ -1,0 +1,26 @@
+# Tag kanata's virtual keyboard as external so libinput does NOT pair it with the
+# lid switch. That stops libinput's "keyboard activity while lid closed => lid is
+# open" heuristic from synthesizing phantom lid-opens. Those phantoms both woke
+# the screen in server mode and, once the ACPI guard suppressed them, left
+# libinput's lid state stuck "open" so a later real lid-open emitted no event and
+# the panel stayed dark. Externalizing kanata makes libinput track the real
+# SW_LID, so opens always wake and closes always sleep.
+#
+# This removes one source of phantom opens, not all of them: the ACPI guard in
+# sway-lid-handler still caught phantoms on 2026-07-19, 07-26 and 10-03. libinput
+# pairs every internal keyboard-class device (Dell WMI hotkeys, Intel HID, Video
+# Bus, ...) with the lid, so the guard stays.
+#
+# Trade-off: disables touchpad disable-while-typing (the same
+# EVDEV_TAG_INTERNAL_KEYBOARD tag drives both). Accepted.
+#
+# This sway build reads overrides from its own prefix, not /etc/libinput. Install
+# per machine/rebuild by symlinking it into place:
+#   ln -sf ~/dotfiles/.config/libinput/local-overrides.quirks \
+#     ~/.local/sway-1.12/etc/libinput/local-overrides.quirks
+# Takes effect when the kanata device re-registers (restart kanata) or on the
+# next sway restart.
+[Kanata Virtual Keyboard]
+MatchUdevType=keyboard
+MatchName=kanata
+AttrKeyboardIntegration=external

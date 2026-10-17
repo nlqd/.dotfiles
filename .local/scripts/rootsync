@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Compare or install the root-owned files kept under etc/ and usr/ in the repo.
+# They are stow-ignored on purpose: a symlink from /etc into $HOME would let
+# anything running as the user edit files that root executes (udev RUN+=,
+# sudoers, systemd units).
+#
+#   rootsync           dry run; exits 1 when the live files differ from the repo
+#   rootsync --apply   install what differs, then reload what reads it
+set -euo pipefail
+
+REPO=${ROOTSYNC_REPO:-$HOME/dotfiles}
+# Test hooks: DEST installs under another prefix, empty SUDO skips sudo, HOOKS=0 skips reloads.
+DEST=${ROOTSYNC_DEST:-}
+SUDO=${ROOTSYNC_SUDO-sudo}
+HOOKS=${ROOTSYNC_HOOKS:-1}
+
+mode_for() {
+    case "$1" in
+        etc/sudoers.d/*) echo 0440 ;;
+        *) if [[ -x "$REPO/$1" ]]; then echo 0755; else echo 0644; fi ;;
+    esac
+}
+
+# Root-only files (sudoers is 0440) cannot be read by the user, so compare through sudo.
+state_of() {
+    local live="$DEST/$1"
+    if ! $SUDO test -e "$live"; then
+        echo new
+    elif $SUDO cmp --silent "$REPO/$1" "$live"; then
+        echo same
+    else
+        echo changed
+    fi
+}
+
+reload_for() {
+    local udev=0 tlp=0 units=0 rel
+    for rel in "$@"; do
+        case "$rel" in
+            etc/udev/rules.d/*) udev=1 ;;
+            etc/tlp.d/*) tlp=1 ;;
+            etc/systemd/system/*) units=1 ;;
+            etc/systemd/logind.conf.d/*) echo "note: restart systemd-logind or reboot for $rel" ;;
+        esac
+    done
+    if ((udev)); then
+        $SUDO udevadm control --reload
+        $SUDO udevadm trigger --subsystem-match=power_supply
+    fi
+    if ((tlp)); then $SUDO tlp start; fi
+    if ((units)); then $SUDO systemctl daemon-reload; fi
+    for rel in "$@"; do
+        case "$rel" in
+            etc/systemd/system/*.timer) $SUDO systemctl enable --now "$(basename "$rel")" ;;
+        esac
+    done
+}
+
+apply=0
+case "${1:-}" in
+    '') ;;
+    --apply) apply=1 ;;
+    *)
+        echo "usage: ${0##*/} [--apply]" >&2
+        exit 2
+        ;;
+esac
+
+drift=()
+while IFS= read -r file; do
+    rel=${file#"$REPO"/}
+    state=$(state_of "$rel")
+    printf '%-8s %s\n' "$state" "$rel"
+    if [[ $state != same ]]; then drift+=("$rel"); fi
+done < <(find "$REPO/etc" "$REPO/usr" -type f 2>/dev/null | sort)
+
+if ((${#drift[@]} == 0)); then exit 0; fi
+if ((!apply)); then exit 1; fi
+
+for rel in "${drift[@]}"; do
+    # A sudoers file that does not parse can lock out sudo, so check before installing.
+    if [[ $rel == etc/sudoers.d/* ]]; then
+        visudo --check --quiet --file="$REPO/$rel"
+    fi
+    $SUDO install -D --mode="$(mode_for "$rel")" "$REPO/$rel" "$DEST/$rel"
+    echo "installed $rel"
+done
+
+if ((HOOKS)); then reload_for "${drift[@]}"; fi
