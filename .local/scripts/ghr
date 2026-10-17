@@ -620,14 +620,16 @@ install_repo() {
 }
 
 all_links_valid() {
-  local links_json="$1"
-  local dst
-  while IFS= read -r dst; do
+  local links_json="$1" dir="$2"
+  local src dst
+  while IFS=$'\t' read -r src dst; do
     [ -e "$dst" ] || return 1
+    # A working link to some other binary (an older extraction) is stale too.
+    [ "$(readlink "$dst")" = "$dir/$src" ] || return 1
     # "Up to date" has to mean runnable, not merely present. Without this a
     # wrong-arch binary is reported healthy forever and never re-selected.
     verify_arch "$dst" || return 1
-  done < <(echo "$links_json" | jq -r '.[]')
+  done < <(echo "$links_json" | jq -r 'to_entries[] | "\(.key)\t\(.value)"')
   return 0
 }
 
@@ -653,7 +655,7 @@ restore_single() {
   local old_ver
   old_ver=$(cat "$dir/.version" 2>/dev/null)
 
-  if [ "$old_ver" = "$ver" ] && all_links_valid "$links_json"; then
+  if [ "$old_ver" = "$ver" ] && all_links_valid "$links_json" "$dir"; then
     [ -z "$quiet" ] && echo "$prefix $repo ... ok (up to date)"
     return 0
   fi
@@ -683,7 +685,10 @@ restore_single() {
   fi
   extract_asset "$stage" "$matched_asset"
 
-  local src dst actual_src
+  # Binaries are found here, where only the new release is unpacked. The cache dir
+  # also keeps older extractions, so matching there finds an old versioned path
+  # (scrcpy-v4.0/scrcpy) exactly and links the old binary under the new version.
+  local src dst actual_src new_links_json="{}"
   while IFS=$'\t' read -r src dst; do
     actual_src=$(fuzzy_match_binary "$src" "$stage" "$matched_asset") || actual_src="$src"
     if [ ! -e "$stage/$actual_src" ]; then
@@ -697,6 +702,7 @@ restore_single() {
       echo "$prefix $repo ... FAIL ($matched_asset is not $HOST_ARCH, keeping $old_ver)" >&2
       return 1
     fi
+    new_links_json=$(echo "$new_links_json" | jq -c --arg s "$actual_src" --arg d "$dst" '. + {($s): $d}')
   done < <(echo "$links_json" | jq -r 'to_entries[] | "\(.key)\t\(.value)"')
 
   # Verified. Rename rather than copy, so an in-use executable (ETXTBSY) and a
@@ -706,16 +712,13 @@ restore_single() {
   write_cache_meta "$dir" "$repo" "$ver"
   extract_asset "$dir" "$matched_asset"
 
-  local new_links_json="{}"
   while IFS=$'\t' read -r src dst; do
-    actual_src=$(fuzzy_match_binary "$src" "$dir" "$matched_asset") || actual_src="$src"
-    chmod +x "$dir/$actual_src"
-    if ! safe_ln "$dir/$actual_src" "$dst"; then
+    chmod +x "$dir/$src"
+    if ! safe_ln "$dir/$src" "$dst"; then
       echo "$prefix $repo ... FAIL (symlink error: $dst)" >&2
       return 1
     fi
-    new_links_json=$(echo "$new_links_json" | jq -c --arg s "$actual_src" --arg d "$dst" '. + {($s): $d}')
-  done < <(echo "$links_json" | jq -r 'to_entries[] | "\(.key)\t\(.value)"')
+  done < <(echo "$new_links_json" | jq -r 'to_entries[] | "\(.key)\t\(.value)"')
 
   printf "%s\t%s\t%s\t%s" "$repo" "$matched_asset" "$ver" "$new_links_json" >"$result_file"
   echo "$prefix $repo $old_ver -> $ver"
@@ -764,7 +767,7 @@ restore_all() {
       else
         dir=$(get_dir "$repo")
         local_ver=$(cat "$dir/.version" 2>/dev/null)
-        if [ "$local_ver" = "$remote_ver" ] && all_links_valid "$links_json"; then
+        if [ "$local_ver" = "$remote_ver" ] && all_links_valid "$links_json" "$dir"; then
           echo "current" >"$tmpdir/check.$i"
         else
           echo "outdated" >"$tmpdir/check.$i"
@@ -970,4 +973,5 @@ main() {
   esac
 }
 
-main "$@"
+# Sourced by tests; run only when executed.
+[[ "${BASH_SOURCE[0]}" == "$0" ]] && main "$@"
