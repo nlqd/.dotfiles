@@ -19,7 +19,7 @@ get_gpu_load() {
 }
 
 get_weather() {
-	local cache_file="/tmp/wttr_cache"
+	local cache_file="${STATUSBAR_WEATHER_CACHE:-/tmp/wttr_cache}"
 	local cache_time=600
 
 	if [[ -f "$cache_file" ]] && [[ $(($(date +%s) - $(stat -c %Y "$cache_file"))) -lt $cache_time ]]; then
@@ -74,13 +74,15 @@ get_claude_ram() {
 	fi
 }
 
-get_xrecord() {
-	if [[ -f "/tmp/recpid" ]]; then
+# xrecord (X11) and wl-record (Wayland) both keep their pid here while recording.
+get_recording() {
+	if [[ -f "${STATUSBAR_REC_FILE:-/tmp/recpid}" ]]; then
 		echo "REC: ●"
 	fi
 }
 
-_cache_dir="/tmp/xi3status_cache"
+# The STATUSBAR_* variables only exist so the tests can run the script in isolation.
+_cache_dir="${STATUSBAR_CACHE_DIR:-/tmp/statusbar_cache}"
 _cache_ttl=30
 mkdir -p "$_cache_dir"
 
@@ -106,7 +108,7 @@ update_slow_data() {
 	wait
 }
 
-_poke_file="/tmp/xi3status_poke"
+_poke_file="${STATUSBAR_POKE_FILE:-/tmp/statusbar_poke}"
 
 update_slow_data &
 _slow_update_counter=0
@@ -122,14 +124,15 @@ while :; do
 	corne_bat=$(cat "$_cache_dir/corne_bat" 2>/dev/null)
 	gpu_load=$(cat "$_cache_dir/gpu_load" 2>/dev/null)
 	weather=$(cat "$_cache_dir/weather" 2>/dev/null)
-	rec=$(get_xrecord)
+	rec=$(get_recording)
 	claude_ram=$(cat "$_cache_dir/claude_ram" 2>/dev/null)
 
 	# Build segments, skip empties
 	segments=()
 	[[ -n "$i3s" ]] && segments+=("$i3s")
 	[[ -n "$weather" ]] && segments+=("$weather")
-	segments+=("🔆 $(xbrightness)")
+	# Brightness is the one display-specific piece: xrandr gamma on X11, backlight or DDC/CI on Wayland.
+	segments+=("🔆 $([[ -n ${WAYLAND_DISPLAY-} ]] && wl-brightness || xbrightness)")
 	[[ -n "$gpu_load" ]] && segments+=("$gpu_load")
 	[[ -n "$claude_ram" ]] && segments+=("$claude_ram")
 	[[ -n "$xm6_bat" ]] && segments+=("$xm6_bat")

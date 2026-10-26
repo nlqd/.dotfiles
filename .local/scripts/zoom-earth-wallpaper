@@ -84,13 +84,26 @@ until capture; do
   attempt=$((attempt + 1))
 done
 
-feh --no-fehbg --bg-fill "$OUT"
+# Under Sway, set the background through it. Cron has no session environment, so look for the
+# socket instead of relying on $SWAYSOCK. Sway's own config applies $OUT again after a reload.
+set_in_sway() {
+  command -v swaymsg >/dev/null || return 1
+  local sock
+  for sock in "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"/sway-ipc.*.sock; do
+    [ -S "$sock" ] && swaymsg --socket "$sock" output '*' bg "$OUT" fill >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
 
-# Wire .fehbg once so restarts pick this up too; leave it alone afterwards
-# so re-running this script doesn't keep rewriting a file outside its job.
-if ! grep -qF "$OUT" "$FEHBG" 2>/dev/null; then
-  sed -i -E "s|^(feh )|# \1|" "$FEHBG"
-  printf "feh --no-fehbg --bg-fill '%s'\n" "$OUT" >> "$FEHBG"
+if ! set_in_sway; then
+  feh --no-fehbg --bg-fill "$OUT"
+
+  # Wire .fehbg once so restarts pick this up too; leave it alone afterwards
+  # so re-running this script doesn't keep rewriting a file outside its job.
+  if ! grep -qF "$OUT" "$FEHBG" 2>/dev/null; then
+    sed -i -E "s|^(feh )|# \1|" "$FEHBG"
+    printf "feh --no-fehbg --bg-fill '%s'\n" "$OUT" >> "$FEHBG"
+  fi
 fi
 
 echo "wallpaper refreshed: $OUT"

@@ -1,4 +1,19 @@
 #!/bin/bash
 
-/home/qd/.local/bin/grim -g "$(/home/qd/.local/bin/slurp)" - > /home/qd/Pictures/Screenshots/grim-$(date +"%Y%m%d-%H%M").png
-cat /home/qd/Pictures/Screenshots/grim-$(date +"%Y%m%d-%H%M").png | wl-copy -t image/png
+dir="$HOME/Pictures/Screenshots"
+mkdir --parents "$dir"
+out="$dir/grim-$(date +"%Y%m%d-%H%M%S").png"
+# Visible windows go to slurp as predefined boxes: click picks the window under the pointer, drag
+# still selects a free region.
+windows=$(swaymsg --type get_tree | jq --raw-output '.. | select(.pid? and .visible?) | .rect | "\(.x),\(.y) \(.width)x\(.height)"')
+region=$(printf '%s\n' "$windows" | slurp) || exit 0
+size=${region#* }
+# A click without a drag selects 1x1: capture the whole screen instead of a single pixel.
+if [ "${size%x*}" -lt 10 ] || [ "${size#*x}" -lt 10 ]; then
+  grim - > "$out"
+else
+  grim -g "$region" - > "$out"
+fi
+wl-copy -t image/png < "$out"
+# Xwayland does not mirror the Wayland clipboard, and Claude Code pastes images through xclip.
+[ -n "${DISPLAY-}" ] && command -v xclip >/dev/null && xclip -selection clipboard -t image/png -i < "$out"

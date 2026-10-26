@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# wl-brightness - brightness on Wayland, the counterpart of xbrightness (xrandr gamma does
+# nothing here). Real brightness instead: the backlight on a laptop, the monitor's own DDC/CI
+# on a desktop. Same interface as xbrightness: an optional step like +0.05 or -0.05, and the
+# new level (0 to 1) on stdout.
+
+step="$*"
+level() { echo "scale=2; $1 / 100" | bc; }
+
+if [[ -n $(ls /sys/class/backlight 2>/dev/null) ]]; then
+  if [[ -n $step ]]; then
+    amount=$(echo "${step#[+-]} * 100" | bc | cut --delimiter=. --fields=1)
+    light "$([[ $step == -* ]] && echo -U || echo -A)" "$amount"
+  fi
+  level "$(light -G)"
+  exit 0
+fi
+
+# The cache holds "<i2c bus> <percent>". The bus number changes across boots, so it is looked
+# up once per boot (the cache lives in the runtime dir) instead of on every key press.
+cache="${XDG_RUNTIME_DIR:-/tmp}/wl-brightness.cache"
+read -r bus current 2>/dev/null <"$cache"
+if [[ -z ${bus-} ]]; then
+  bus=$(ddcutil detect --brief 2>/dev/null | awk '/I2C bus/ {sub(".*i2c-", "", $3); print $3; exit}')
+  [[ -n $bus ]] || { echo "wl-brightness: no DDC/CI monitor found" >&2; exit 1; }
+fi
+if [[ -z ${current-} ]]; then
+  current=$(ddcutil --bus "$bus" getvcp 10 --brief 2>/dev/null | awk '{print $4}')
+fi
+
+if [[ -n $step ]]; then
+  # bc has no unary plus, so "+0.05" must lose its sign.
+  new=$(echo "$current + (${step#+}) * 100" | bc | cut --delimiter=. --fields=1)
+  ((new > 100)) && new=100
+  ((new < 25)) && new=25
+  # The write takes a few hundred ms. Do it in the background, one at a time, so the bar
+  # updates immediately and quick repeated presses are applied in order.
+  (flock 9; ddcutil --noverify --bus "$bus" --sleep-multiplier 0.1 setvcp 10 "$new") \
+    9>"${XDG_RUNTIME_DIR:-/tmp}/wl-brightness.lock" >/dev/null 2>&1 &
+  current=$new
+fi
+echo "$bus $current" >"$cache"
+level "$current"
