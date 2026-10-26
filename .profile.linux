@@ -28,7 +28,7 @@ fi
 . "$HOME/.cargo/env"
 
 . "$HOME/.local/share/../bin/env"
-export PATH="$PATH:/home/qd/.malai/bin"
+export PATH="$PATH:$HOME/.malai/bin"
 
 # PATH additions visible to GUI apps launched by Sway (dmenu, etc.),
 # not just interactive zsh. Keep in sync with .zshrc.linux.

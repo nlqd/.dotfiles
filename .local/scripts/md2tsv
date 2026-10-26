@@ -21,7 +21,8 @@ SEP_ROW = re.compile(r"\|[\s\-:|]+\|")
 
 
 def is_wayland() -> bool:
-    return bool(os.environ.get("WAYLAND_DISPLAY")) and not os.environ.get("DISPLAY")
+    # Xwayland sets DISPLAY inside a Wayland session too, so only WAYLAND_DISPLAY decides.
+    return bool(os.environ.get("WAYLAND_DISPLAY"))
 
 
 def read_clipboard() -> str:
