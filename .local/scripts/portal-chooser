@@ -1,0 +1,31 @@
+#!/bin/sh
+# portal-chooser - monitor/window picker for xdg-desktop-portal-wlr (chooser_type=dmenu).
+# The portal writes one choice per line on stdin and reads the chosen line back on stdout.
+# Chrome opens two portal sessions per share (preview, then the real one), so a pick is
+# remembered for PORTAL_CHOOSER_TTL seconds and reused while it is still in the list. A single
+# choice is returned without asking. PORTAL_CHOOSER_MENU overrides the menu (default: dmenu).
+
+list=$(cat)
+cache=${XDG_RUNTIME_DIR:-/tmp}/portal-chooser.last
+ttl=${PORTAL_CHOOSER_TTL:-60}
+
+if [ "$(printf '%s\n' "$list" | wc -l)" -eq 1 ]; then
+  printf '%s\n' "$list"
+  exit 0
+fi
+
+if [ -f "$cache" ] && [ $(($(date +%s) - $(stat --format=%Y "$cache"))) -lt "$ttl" ]; then
+  # Match on the trailing "(id)": a window title changes between the two sessions, its id does not.
+  last=$(cat "$cache")
+  key=" (${last##* (}"
+  match=$(printf '%s\n' "$list" | awk -v k="$key" 'index($0, k) == length($0) - length(k) + 1 { print; exit }')
+  if [ -n "$match" ]; then
+    printf '%s\n' "$match"
+    exit 0
+  fi
+fi
+
+pick=$(printf '%s\n' "$list" | ${PORTAL_CHOOSER_MENU:-dmenu} -l 12 -p Share) || exit 1
+[ -n "$pick" ] || exit 1
+printf '%s\n' "$pick" >"$cache"
+printf '%s\n' "$pick"
