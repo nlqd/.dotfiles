@@ -362,7 +362,10 @@ start_chat_session() {
       else
         cat $(RESPONSE_FILE) | sed -n '/^```'"$block"'.*$/,/^```$/p' | sed '/^```/d'
       fi | {
-        ([[ $(uname) = 'Darwin' ]] && pbcopy) || xclip -sel c
+        if [[ $(uname) = 'Darwin' ]]; then pbcopy
+        elif [[ -n ${WAYLAND_DISPLAY-} ]]; then wl-copy
+        else xclip -sel c
+        fi
       }
       continue
     fi

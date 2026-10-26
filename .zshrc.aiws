@@ -46,8 +46,13 @@ alias lg='lazygit'
 alias ldk='lazydocker'
 alias dbui='nvim -c "DBUI"'
 alias oil='nvim -c "Oil"'
-alias pbcopy='xclip -sel c'
-alias pbpaste='xclip -sel c -o'
+if [[ -n ${WAYLAND_DISPLAY-} ]]; then
+  alias pbcopy='wl-copy'
+  alias pbpaste='wl-paste'
+else
+  alias pbcopy='xclip -sel c'
+  alias pbpaste='xclip -sel c -o'
+fi
 alias nr='newsraft'
 
 ### suffer from slop

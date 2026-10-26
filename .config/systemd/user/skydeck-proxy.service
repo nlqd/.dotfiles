@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/home/dungngo/.asdf/shims/node /home/dungngo/dotfiles/.local/scripts/skydeck-proxy
+ExecStart=%h/.asdf/shims/node %h/dotfiles/.local/scripts/skydeck-proxy
 Restart=always
 RestartSec=2
 

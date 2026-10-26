@@ -27,7 +27,7 @@ export FZF_DEFAULT_OPTS="--layout=reverse"
 export FZF_TMUX_OPTS='-p80%,60%'
 export ZSH="$HOME/.oh-my-zsh"
 
-export FLYCTL_INSTALL="/home/qd/.fly"
+export FLYCTL_INSTALL="$HOME/.fly"
 export PATH="$FLYCTL_INSTALL/bin:$PATH"
 
 alias v='nvim'
