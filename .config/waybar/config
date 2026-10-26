@@ -81,7 +81,7 @@
     },
 
     "custom/server-mode": {
-        "exec": "/home/qd/.local/scripts/sway-server-mode-status",
+        "exec": "${HOME}/.local/scripts/sway-server-mode-status",
         "return-type": "json",
         "signal": 4,
         "interval": 10,
@@ -111,7 +111,7 @@
         "interval": 5,
         // "format-wifi": "  {signalStrength}%", // Icon: wifi
         "format-wifi": "  {bandwidthDownBits}", // Icon: wifi
-        "format-ethernet": "  {ifname}", // Icon: ethernet
+        "format-ethernet": "󰈀  {ifname}", // Icon: ethernet
         "format-disconnected": "⚠  Disconnected",
         "tooltip-format": "{essid}: {ifname}: {ipaddr}"
     },

@@ -1,16 +1,19 @@
 font pango:Iosevka NF 11
 
-set $wallpaper /home/qd/Pictures/Wallpapers/mountain-03.jpg
-output * background $wallpaper fill
+set $wallpaper $HOME/Pictures/Wallpapers/mountain-03.jpg
+# The trailing color is the fallback: without it a missing wallpaper is a config error.
+output * background $wallpaper fill #07080d
 
 # Notification daemon
 # https://github.com/emersion/mako
-exec --no-startup-id mako
-exec --no-startup-id fcitx5 -d --replace
-exec --no-startup-id nm-applet
+# Each daemon falls back when the preferred one is not installed (laptop: mako, fcitx5;
+# desktop: dunst, ibus).
+exec --no-startup-id sh -c 'command -v mako >/dev/null && exec mako; exec dunst'
+exec --no-startup-id sh -c 'command -v fcitx5 >/dev/null && exec fcitx5 -d --replace; exec ibus-daemon --daemonize --replace'
+exec --no-startup-id sh -c 'command -v nm-applet >/dev/null && exec nm-applet'
 # Sync battery charge policy to saved server-mode state on boot (literal path:
 # $dot_local is defined further down, after this exec block).
-exec --no-startup-id /home/qd/.local/scripts/battery-charge-mode sync
+exec --no-startup-id $HOME/.local/scripts/battery-charge-mode sync
 
 # Variables
 set $mod Mod4
@@ -18,7 +21,7 @@ set $left h
 set $down j
 set $up k
 set $right l
-set $dot_local /home/qd/.local/scripts
+set $dot_local $HOME/.local/scripts
 set $dmenu_flags  -i -fn "Iosevka NF-16" -nb "#C4C6CD" -nf "#07080D" -sb "#004C63" -sf "#FFFFFF"
 
 ### from SergeantBiggs
@@ -72,8 +75,9 @@ bindsym XF86AudioPlay         exec playerctl play-pause
 bindsym XF86AudioPause        exec playerctl play-pause
 bindsym XF86AudioNext         exec playerctl next
 bindsym XF86AudioPrev         exec playerctl previous
-bindsym XF86MonBrightnessUp   exec light -A 5
-bindsym XF86MonBrightnessDown exec light -U 5
+# wl-brightness uses the backlight (laptop) or the monitor's DDC/CI (desktop).
+bindsym XF86MonBrightnessUp   exec wl-brightness +0.05, exec statusbar-poke
+bindsym XF86MonBrightnessDown exec wl-brightness -0.05, exec statusbar-poke
 
 bindsym Shift+Print exec $dot_local/wl-record
 bindsym Print       exec $dot_local/wl-screenshot
@@ -151,5 +155,6 @@ bar swaybar_command waybar
 
 include /etc/sway/config.d/*
 
-# per-machine config, tracked in repo, auto-selected by hostname (uncomment to enable)
-# include hosts/$(hostname).conf
+# per-machine config, tracked in repo, auto-selected by hostname. A machine without a
+# matching file is fine: sway only logs a debug line.
+include hosts/$(hostname).conf

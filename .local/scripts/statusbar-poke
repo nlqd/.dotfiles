@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+touch "${STATUSBAR_POKE_FILE:-/tmp/statusbar_poke}"
