@@ -9,7 +9,7 @@ output * background $wallpaper fill #07080d
 # Each daemon falls back when the preferred one is not installed (laptop: mako, fcitx5;
 # desktop: dunst, ibus).
 # Portals (screen sharing, file pickers) are started by D-Bus and need to see this session.
-exec --no-startup-id dbus-update-activation-environment --systemd WAYLAND_DISPLAY SWAYSOCK XDG_CURRENT_DESKTOP
+exec --no-startup-id sh -c 'dbus-update-activation-environment --systemd WAYLAND_DISPLAY SWAYSOCK XDG_CURRENT_DESKTOP && systemctl --user restart xdg-desktop-portal-wlr xdg-desktop-portal'
 exec --no-startup-id sh -c 'command -v mako >/dev/null && exec mako; exec dunst'
 exec --no-startup-id sh -c 'command -v fcitx5 >/dev/null && exec fcitx5 -d --replace; exec ibus-daemon --daemonize --replace'
 exec --no-startup-id sh -c 'command -v nm-applet >/dev/null && exec nm-applet'

@@ -1,0 +1,5 @@
+[screencast]
+# Chrome opens one portal session for its preview and one for the real share, so a menu would
+# show twice. With a single choice pick it silently, with several ask through the dmenu shim.
+chooser_type=dmenu
+chooser_cmd=sh -c 'l=$(cat); [ "$(printf "%s\n" "$l" | wc -l)" -eq 1 ] && printf "%s\n" "$l" || printf "%s\n" "$l" | dmenu -p "Share"'
