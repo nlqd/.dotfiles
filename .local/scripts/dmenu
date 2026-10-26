@@ -1,0 +1,32 @@
+#!/bin/sh
+# dmenu is an X11 program: under a Wayland compositor it runs through Xwayland and is upscaled,
+# which makes it blurry. On Wayland, hand the same arguments to wmenu (native) when it is
+# installed. On X11, or without wmenu, run the real dmenu untouched.
+# DMENU_REAL and WMENU are overridable so the tests can stub them.
+real=${DMENU_REAL:-/usr/bin/dmenu}
+wmenu=${WMENU:-wmenu}
+
+if [ -z "${WAYLAND_DISPLAY-}" ] || ! command -v "$wmenu" >/dev/null 2>&1; then
+  exec "$real" "$@"
+fi
+
+# Translate dmenu's options to wmenu's, one argument at a time (POSIX sh has no arrays):
+# each pass takes one argument off the front and puts its translation at the back.
+n=$#
+while [ "$n" -gt 0 ]; do
+  opt=$1; shift; n=$((n - 1))
+  case $opt in
+    -fn) # Xft "Family-16" becomes pango "Family 16"
+      font=$(printf '%s' "$1" | sed -E 's/-([0-9]+(\.[0-9]+)?)$/ \1/')
+      shift; n=$((n - 1)); set -- "$@" -f "$font" ;;
+    -nb) set -- "$@" -N "$1"; shift; n=$((n - 1)) ;;
+    -nf) set -- "$@" -n "$1"; shift; n=$((n - 1)) ;;
+    -sb) set -- "$@" -S "$1"; shift; n=$((n - 1)) ;;
+    -sf) set -- "$@" -s "$1"; shift; n=$((n - 1)) ;;
+    -l | -p) set -- "$@" "$opt" "$1"; shift; n=$((n - 1)) ;;
+    -m | -w) shift; n=$((n - 1)) ;; # X monitor and window id: no equivalent
+    -v | -f) ;;                     # version, and grab-keyboard (not wmenu's -f): drop
+    *) set -- "$@" "$opt" ;;        # -i, -b and anything else shared
+  esac
+done
+exec "$wmenu" "$@"

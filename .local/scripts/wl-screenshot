@@ -14,6 +14,16 @@ if [ "${size%x*}" -lt 10 ] || [ "${size#*x}" -lt 10 ]; then
 else
   grim -g "$region" - > "$out"
 fi
+# "wl-screenshot annotate" opens the capture in swappy (pen, arrow, text, blur, ...) first.
+# swappy writes the final image to --output-file whenever it exits, so the annotated image is
+# what gets saved and copied below.
+if [ "${1-}" = annotate ] && command -v swappy >/dev/null; then
+  raw=$out
+  out="${raw%.png}-annotated.png"
+  swappy --file "$raw" --output-file "$out"
+  rm --force "$raw"
+  [ -s "$out" ] || exit 0
+fi
 wl-copy -t image/png < "$out"
 # Xwayland does not mirror the Wayland clipboard, and Claude Code pastes images through xclip.
 [ -n "${DISPLAY-}" ] && command -v xclip >/dev/null && xclip -selection clipboard -t image/png -i < "$out"

@@ -33,10 +33,10 @@ run_tmux_copy() { printf 'text' | env PATH="$W/bin:/usr/bin:/bin" "$@" sh -c "$c
 
 fresh; run_tmux_copy WAYLAND_DISPLAY=wayland-1 DISPLAY=:0
 check "tmux copy on Wayland (Xwayland DISPLAY also set) uses wl-copy" "wl-copy" "$(tools_used)"
-fresh; run_tmux_copy --unset=WAYLAND_DISPLAY DISPLAY=:0
+fresh; run_tmux_copy WAYLAND_DISPLAY= DISPLAY=:0
 check "tmux copy on macOS (pbcopy present, no Wayland) uses pbcopy" "pbcopy" "$(tools_used)"
 mv "$W/bin/pbcopy" "$W/pbcopy.off"
-fresh; run_tmux_copy --unset=WAYLAND_DISPLAY DISPLAY=:0
+fresh; run_tmux_copy WAYLAND_DISPLAY= DISPLAY=:0
 check "tmux copy on X11 (no pbcopy) uses xsel" "xsel" "$(tools_used)"
 mv "$W/pbcopy.off" "$W/bin/pbcopy"
 
@@ -54,14 +54,14 @@ alias_block=$(sed -n '/^if \[\[ -n \${WAYLAND_DISPLAY-} \]\]; then$/,/^fi$/p' "$
 check "zshrc.aiws aliases pbcopy to wl-copy on Wayland" "wl-copy" \
   "$(WAYLAND_DISPLAY=wayland-1 zsh -c "$alias_block; alias pbcopy" | sed -E "s/^pbcopy='?//; s/'$//")"
 check "zshrc.aiws aliases pbcopy to xclip on X11" "xclip -sel c" \
-  "$(env --unset=WAYLAND_DISPLAY zsh -c "$alias_block; alias pbcopy" | sed -E "s/^pbcopy='?//; s/'$//")"
+  "$(env WAYLAND_DISPLAY= zsh -c "$alias_block; alias pbcopy" | sed -E "s/^pbcopy='?//; s/'$//")"
 
 # sdai: the copy branch, extracted from the script. uname is stubbed to pick the platform.
 sdai_branch=$(sed -n "/if \[\[ \$(uname) = 'Darwin' \]\]; then pbcopy/,/^        fi$/p" "$ROOT/.local/scripts/sdai")
 run_sdai() { printf 'reply' | env PATH="$W/bin:/usr/bin:/bin" "$@" bash -c "$sdai_branch"; }
 fresh; run_sdai WAYLAND_DISPLAY=wayland-1
 check "sdai copies with wl-copy on Wayland" "wl-copy" "$(tools_used)"
-fresh; run_sdai --unset=WAYLAND_DISPLAY
+fresh; run_sdai WAYLAND_DISPLAY=
 check "sdai copies with xclip on X11" "xclip" "$(tools_used)"
 printf '#!/bin/sh\necho Darwin\n' > "$W/bin/uname"; chmod +x "$W/bin/uname"
 fresh; run_sdai WAYLAND_DISPLAY=wayland-1
