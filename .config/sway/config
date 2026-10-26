@@ -8,9 +8,14 @@ output * background $wallpaper fill #07080d
 # https://github.com/emersion/mako
 # Each daemon falls back when the preferred one is not installed (laptop: mako, fcitx5;
 # desktop: dunst, ibus).
+# Portals (screen sharing, file pickers) are started by D-Bus and need to see this session.
+exec --no-startup-id dbus-update-activation-environment --systemd WAYLAND_DISPLAY SWAYSOCK XDG_CURRENT_DESKTOP
 exec --no-startup-id sh -c 'command -v mako >/dev/null && exec mako; exec dunst'
 exec --no-startup-id sh -c 'command -v fcitx5 >/dev/null && exec fcitx5 -d --replace; exec ibus-daemon --daemonize --replace'
 exec --no-startup-id sh -c 'command -v nm-applet >/dev/null && exec nm-applet'
+# Clipboard history: record text and images as they are copied; $mod+v opens the picker.
+exec --no-startup-id sh -c 'command -v cliphist >/dev/null && exec wl-paste --type text --watch cliphist store'
+exec --no-startup-id sh -c 'command -v cliphist >/dev/null && exec wl-paste --type image --watch cliphist store'
 # Sync battery charge policy to saved server-mode state on boot (literal path:
 # $dot_local is defined further down, after this exec block).
 exec --no-startup-id $HOME/.local/scripts/battery-charge-mode sync
@@ -51,6 +56,13 @@ client.urgent           #590008 #590008 #ffffff #590008   #590008
 smart_gaps on
 gaps inner 10
 
+# Floating windows, as in i3. Zoom runs through Xwayland (class); the rest set their app id.
+for_window [class="^zoom$"] floating enable
+for_window [app_id="^zoom$"] floating enable
+for_window [app_id="^quicklaunch$"] floating enable, resize set width 60 ppt height 40 ppt, move position center
+for_window [app_id="^claude-float$"] floating enable, resize set width 80 ppt height 60 ppt, move position center
+for_window [app_id="^clip-history$"] floating enable, resize set width 70 ppt height 60 ppt, move position center
+
 input type:keyboard {
     xkb_numlock enabled
 }
@@ -81,10 +93,12 @@ bindsym XF86MonBrightnessDown exec wl-brightness -0.05, exec statusbar-poke
 
 bindsym Shift+Print exec $dot_local/wl-record
 bindsym Print       exec $dot_local/wl-screenshot
+bindsym $mod+Print  exec $dot_local/wl-screenshot annotate
 
 # bindsym $mod+t           exec ~/.cargo/bin/alacritty
 bindsym $mod+t           exec foot
 bindsym $mod+b           exec firefox
+bindsym $mod+v           exec foot --app-id=clip-history wl-cliphist
 bindsym $mod+d           exec dmenu_run $dmenu_flags
 bindsym $mod+Shift+d     exec i3-dmenu-desktop --dmenu='dmenu $dmenu_flags'
 bindsym $mod+F7          exec $dot_local/sway-server-mode-toggle

@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# wl-cliphist - clipboard history picker: cliphist | fzf | wl-copy. Text and images are both kept
+# by cliphist (sway runs `wl-paste --watch cliphist store` for each); images are previewed in the
+# terminal through chafa (sixel, which foot supports). Meant for a floating foot window:
+#   foot --app-id=clip-history wl-cliphist
+# WL_CLIPHIST_FORMAT overrides the chafa format (symbols works in any terminal).
+
+if [[ ${1-} == --preview ]]; then
+  tmp=$(mktemp)
+  trap 'rm --force "$tmp"' EXIT
+  cliphist decode "$2" >"$tmp" 2>/dev/null
+  if [[ $(file --brief --mime-type "$tmp") == image/* ]]; then
+    chafa --format="${WL_CLIPHIST_FORMAT:-sixel}" --size="${FZF_PREVIEW_COLUMNS:-60}x${FZF_PREVIEW_LINES:-30}" "$tmp"
+  else
+    head --bytes=4000 "$tmp"
+  fi
+  exit 0
+fi
+
+if ! command -v cliphist >/dev/null; then
+  echo "wl-cliphist: cliphist is not installed (sudo apt install cliphist)" >&2
+  sleep 4
+  exit 1
+fi
+
+pick=$(cliphist list | fzf --no-sort --delimiter=$'\t' --with-nth=2.. --prompt='clipboard> ' \
+  --preview "$0 --preview {1}" --preview-window=right,55%,border-left) || exit 0
+cliphist decode <<<"$pick" | wl-copy

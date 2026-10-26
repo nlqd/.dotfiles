@@ -39,16 +39,16 @@ has() { case "$(first_line)" in *"$1"*) echo yes ;; *) echo no ;; esac; }
 
 start WAYLAND_DISPLAY=wayland-1;           check "Wayland session shows the wl-brightness level" yes "$(has '🔆 .WL')"
 check "Wayland session does not call xbrightness" no "$(has '.X')"; stop
-start --unset=WAYLAND_DISPLAY;             check "X11 session shows the xbrightness level" yes "$(has '🔆 .X')"
+start WAYLAND_DISPLAY=;             check "X11 session shows the xbrightness level" yes "$(has '🔆 .X')"
 check "X11 session does not call wl-brightness" no "$(has '.WL')"; stop
-start --unset=WAYLAND_DISPLAY;             check "includes the i3status part" yes "$(has 'I3S')"
+start WAYLAND_DISPLAY=;             check "includes the i3status part" yes "$(has 'I3S')"
 check "no recording indicator without a pid file" no "$(has 'REC')"; stop
 
 touch "$W/rec"
-start --unset=WAYLAND_DISPLAY;             check "recording indicator when xrecord or wl-record is running" yes "$(has 'REC: ●')"; stop
+start WAYLAND_DISPLAY=;             check "recording indicator when xrecord or wl-record is running" yes "$(has 'REC: ●')"; stop
 rm "$W/rec"
 
-start --unset=WAYLAND_DISPLAY
+start WAYLAND_DISPLAY=
 touch "$W/poke"; consumed=no
 for _ in $(seq 1 40); do [ -e "$W/poke" ] || { consumed=yes; break; }; sleep 0.1; done
 check "statusbar-poke triggers an immediate refresh (poke file consumed)" yes "$consumed"; stop
