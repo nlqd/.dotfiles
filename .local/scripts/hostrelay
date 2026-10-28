@@ -43,6 +43,33 @@ valid_name() {
   [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
 }
 
+# A box's requests/, processing/ and responses/ are writable by the box, so a box can
+# plant a symlink in place of any of them, or of a file the server is about to write.
+# The server never writes through one: a symlinked dir means the box is skipped, and
+# files are removed first and then created under noclobber (O_EXCL), which refuses a
+# symlink raced in between.
+box_dirs_plain() {
+  [[ ! -L "$1/requests" && ! -L "$1/processing" && ! -L "$1/responses" ]]
+}
+
+# Opens fresh stdout/stderr files for a request as OUT_FD and ERR_FD.
+open_responses() {
+  local respdir="$1" id="$2" rc
+  rm --force -- "$respdir/$id.stdout" "$respdir/$id.stderr"
+  set -o noclobber
+  exec {OUT_FD}>"$respdir/$id.stdout" {ERR_FD}>"$respdir/$id.stderr"
+  rc=$?
+  set +o noclobber
+  return "$rc"
+}
+
+# The exit code is written to a temp name and renamed, so a client never reads half of it.
+write_rc() {
+  local respdir="$1" id="$2" code="$3" tmp="$1/$2.rc.tmp"
+  rm --force -- "$tmp"
+  (set -o noclobber && printf '%s' "$code" >"$tmp") && mv --force "$tmp" "$respdir/$id.rc"
+}
+
 heartbeat_fresh() {
   local hb="$1" now mtime
   now=$(date +%s)
@@ -110,7 +137,8 @@ client_call() {
   trap request_stop EXIT INT TERM
 
   : >>"$respdir/$id.stdout" # tail --retry needs somewhere to look before the server creates it
-  tail --follow=name --retry --sleep-interval="$POLL_INTERVAL" "$respdir/$id.stdout" &
+  # The server replaces the placeholder with a fresh file, which makes tail warn; that is expected.
+  tail --follow=name --retry --sleep-interval="$POLL_INTERVAL" "$respdir/$id.stdout" 2>/dev/null &
   local tail_pid=$!
   while [[ ! -f "$respdir/$id.rc" ]]; do
     if ! heartbeat_fresh "$heartbeat"; then
@@ -144,8 +172,7 @@ serve_one() {
   argv_json=$(jq --compact-output '.argv' <"$claimed" 2>/dev/null)
   if ! jq --exit-status 'type == "array" and all(.[]; type == "string")' <<<"$argv_json" >/dev/null 2>&1; then
     mv --force "$claimed" "$(dirname "$claimed")/../requests/$id.bad" 2>/dev/null
-    printf '1' >"$respdir/$id.rc.tmp"
-    mv --force "$respdir/$id.rc.tmp" "$respdir/$id.rc"
+    write_rc "$respdir" "$id" 1
     rm --force "$claimed"
     return
   fi
@@ -158,9 +185,16 @@ serve_one() {
   # is normally safe to invoke locally may still need to behave more
   # defensively here (slapi, for one, ignores --out under this and always
   # downloads to its own fixed directory).
+  if ! open_responses "$respdir" "$id" 2>/dev/null; then
+    echo "hostrelay: refused $id, could not create its response files (planted symlink?)" >&2
+    write_rc "$respdir" "$id" 1
+    rm --force "$claimed"
+    return
+  fi
   HOSTRELAY_SERVICE="$service" timeout --kill-after="$KILL_GRACE" "$max_time" "$binary" "${argv[@]}" \
-    >"$respdir/$id.stdout" 2>"$respdir/$id.stderr" &
+    >&"$OUT_FD" 2>&"$ERR_FD" &
   child=$!
+  exec {OUT_FD}>&- {ERR_FD}>&-
 
   stop_at="$(dirname "$claimed")/../requests/$id.stop"
   while kill -0 "$child" 2>/dev/null; do
@@ -174,8 +208,7 @@ serve_one() {
     sleep "$POLL_INTERVAL"
   done
   wait "$child" 2>/dev/null
-  printf '%s' "$?" >"$respdir/$id.rc.tmp"
-  mv --force "$respdir/$id.rc.tmp" "$respdir/$id.rc"
+  write_rc "$respdir" "$id" "$?"
   rm --force "$claimed"
 }
 
@@ -223,7 +256,7 @@ server_serve() {
   # client waiting on a response that will never come.
   local box
   for box in "$dir" "$dir"/boxes/*; do
-    [[ -d "$box/processing" ]] || continue
+    [[ -d "$box/processing" ]] && box_dirs_plain "$box" || continue
     for f in "$box"/processing/*.json; do
       [[ -e "$f" ]] || continue
       mv --force "$f" "$box/requests/$(basename "$f")" 2>/dev/null
@@ -235,7 +268,7 @@ server_serve() {
   while :; do
     touch "$dir/heartbeat"
     for box in "$dir" "$dir"/boxes/*; do
-      [[ -d "$box/requests" ]] || continue
+      [[ -d "$box/requests" ]] && box_dirs_plain "$box" || continue
       [[ "$box" == "$dir" ]] || touch "$box/heartbeat" 2>/dev/null
       mkdir --parents "$box/processing" "$box/responses"
       for req in "$box"/requests/*.json; do
