@@ -56,9 +56,7 @@ client.urgent           #590008 #590008 #ffffff #590008   #590008
 smart_gaps on
 gaps inner 10
 
-# Floating windows, as in i3. Zoom runs through Xwayland (class); the rest set their app id.
-for_window [class="^zoom$"] floating enable
-for_window [app_id="^zoom$"] floating enable
+# Floating windows, as in i3.
 # The Meet call popup: titled "Meet - <code>" with no browser suffix, unlike a normal window.
 # Chrome sets the title after the window opens, so a for_window title rule never sees it; float it
 # when the title event arrives instead.
