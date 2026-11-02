@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+
+# require: jq
+
+# wl-session - remember the foot and browser windows and put them back after the next login.
+#   wl-session save      write the current windows to the state file (kept as is when there are none)
+#   wl-session restore   relaunch what the state file lists, each on its workspace
+#   wl-session watch     save every WL_SESSION_INTERVAL seconds (default 60)
+# Only foot, Chrome and Firefox are handled. The browsers restore their own tabs: they are launched
+# once, and their windows are then moved to the saved workspaces by matching window titles.
+# WL_SESSION_STATE, WL_SESSION_PROC and WL_SESSION_TICKS exist so the tests can stub the outside.
+
+set -o pipefail
+
+STATE="${WL_SESSION_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/wl-session/layout.json}"
+PROC="${WL_SESSION_PROC:-/proc}"
+TICKS="${WL_SESSION_TICKS:-60}" # half-second waits for a window to appear
+APPS='["foot","google-chrome","firefox"]'
+
+windows_now() {
+  swaymsg --type get_tree | jq --compact-output --argjson apps "$APPS" '
+    [ .. | objects | select(.type? == "workspace" and .name != "__i3_scratch")
+      | .name as $ws
+      | .. | objects | select(has("pid") and ((.app_id // "") as $a | $apps | index($a)))
+      | {app_id, workspace: $ws, title: (.name // ""), pid} ]'
+}
+
+first_child() {
+  cut --delimiter=' ' --fields=1 "$PROC/$1/task/$1/children" 2>/dev/null
+}
+
+# A foot window shows the directory of the shell it runs: the first child of the foot process.
+cwd_of_foot() {
+  local shell
+  shell=$(first_child "$1")
+  [[ -n "$shell" ]] && readlink "$PROC/$shell/cwd"
+}
+
+# Most foot windows are a shell running a tmux client: the tmux session that client shows.
+tmux_session_of_foot() {
+  local shell client pid session
+  shell=$(first_child "$1")
+  [[ -n "$shell" ]] && client=$(first_child "$shell")
+  [[ -n "${client:-}" && "$(tr '\0' ' ' <"$PROC/$client/cmdline" 2>/dev/null)" == tmux* ]] || return 1
+  while read -r pid session; do
+    [[ "$pid" == "$client" ]] && { echo "$session"; return 0; }
+  done < <(tmux list-clients -F '#{client_pid} #{session_name}' 2>/dev/null)
+  return 1
+}
+
+save() {
+  local now window cwd tmux_session pid
+  now=$(windows_now) || return 0
+  [[ -n "$now" && "$(jq length <<<"$now")" -gt 0 ]] || return 0
+
+  mkdir --parents "$(dirname "$STATE")"
+  {
+    while IFS= read -r window; do
+      cwd="" tmux_session=""
+      if [[ "$(jq --raw-output .app_id <<<"$window")" == foot ]]; then
+        pid=$(jq --raw-output .pid <<<"$window")
+        cwd=$(cwd_of_foot "$pid")
+        tmux_session=$(tmux_session_of_foot "$pid")
+      fi
+      jq --compact-output --arg cwd "$cwd" --arg tmux "$tmux_session" \
+        'del(.pid) + (if $cwd == "" then {} else {cwd: $cwd} end) + (if $tmux == "" then {} else {tmux_session: $tmux} end)' <<<"$window"
+    done < <(jq --compact-output '.[]' <<<"$now")
+  } | jq --slurp --arg focused "$(swaymsg --type get_workspaces | jq --raw-output '.[] | select(.focused) | .name')" \
+    '{focused_workspace: $focused, windows: .}' >"$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+}
+
+# Detached, so the app outlives this script and never reads its input.
+launch() {
+  setsid "$@" </dev/null >/dev/null 2>&1 &
+}
+
+count_of() {
+  swaymsg --type get_tree | jq --arg a "$1" '[.. | objects | select(.app_id? == $a and has("pid"))] | length'
+}
+
+wait_for_count() {
+  local app="$1" want="$2" tick
+  for ((tick = 0; tick < TICKS; tick++)); do
+    (($(count_of "$app") >= want)) && return 0
+    sleep 0.5
+  done
+}
+
+# Moves each current window of $1 to the workspace saved for a window with the same title,
+# until every saved window has been placed or the time is up. Moving twice is harmless.
+place_browser() {
+  local app="$1" saved now plan tick id workspace
+  saved=$(jq --compact-output --arg a "$app" '[.windows[] | select(.app_id == $a)]' "$STATE")
+  for ((tick = 0; tick < TICKS; tick++)); do
+    now=$(swaymsg --type get_tree | jq --compact-output --arg a "$app" \
+      '[.. | objects | select(.app_id? == $a and has("pid")) | {id, title: (.name // "")}]')
+    plan=$(jq --null-input --compact-output --argjson saved "$saved" --argjson now "$now" '
+      reduce $now[] as $c ({moves: [], left: $saved};
+        (.left | map(.title) | index($c.title)) as $i
+        | if $i == null then .
+          else .moves += [{id: $c.id, workspace: .left[$i].workspace}] | .left |= (.[:$i] + .[$i + 1:]) end)')
+    while IFS=$'\t' read -r id workspace; do
+      [[ -n "$id" ]] && swaymsg "[con_id=$id] move container to workspace \"$workspace\"" >/dev/null
+    done < <(jq --raw-output '.moves[] | [.id, .workspace] | @tsv' <<<"$plan")
+    [[ "$(jq '.left | length' <<<"$plan")" -eq 0 ]] && return 0
+    sleep 0.5
+  done
+}
+
+restore() {
+  [[ -f "$STATE" ]] || return 0
+  local window workspace cwd tmux_session before app focused
+
+  while IFS= read -r window; do
+    workspace=$(jq --raw-output .workspace <<<"$window")
+    cwd=$(jq --raw-output '.cwd // ""' <<<"$window")
+    tmux_session=$(jq --raw-output '.tmux_session // ""' <<<"$window")
+    swaymsg "workspace \"$workspace\"" >/dev/null
+    before=$(count_of foot)
+    if [[ -n "$tmux_session" ]]; then
+      # a tmux server that is gone must not leave a window that closes at once
+      launch foot sh -c 'tmux -2 attach-session -t "$1" || exec "${SHELL:-sh}"' sh "$tmux_session"
+    elif [[ -d "$cwd" ]]; then
+      launch foot --working-directory="$cwd"
+    else
+      launch foot
+    fi
+    wait_for_count foot $((before + 1))
+  done < <(jq --compact-output '.windows[] | select(.app_id == "foot")' "$STATE")
+
+  for app in google-chrome firefox; do
+    jq --exit-status --arg a "$app" '[.windows[] | select(.app_id == $a)] | length > 0' "$STATE" >/dev/null || continue
+    command -v "$app" >/dev/null || continue
+    case "$app" in
+    google-chrome) launch google-chrome --restore-last-session ;;
+    firefox) launch firefox ;;
+    esac
+    place_browser "$app"
+  done
+
+  focused=$(jq --raw-output '.focused_workspace // ""' "$STATE")
+  [[ -n "$focused" ]] && swaymsg "workspace \"$focused\"" >/dev/null
+}
+
+watch() {
+  while :; do
+    sleep "${WL_SESSION_INTERVAL:-60}"
+    save
+  done
+}
+
+case "${1:-}" in
+save) save ;;
+restore) restore ;;
+watch) watch ;;
+*)
+  echo "usage: wl-session save | restore | watch" >&2
+  exit 2
+  ;;
+esac
