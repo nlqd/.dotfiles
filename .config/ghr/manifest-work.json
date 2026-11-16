@@ -40,6 +40,14 @@
     }
   },
   {
+    "repo": "cli/cli",
+    "asset": "gh_2.104.0_linux_amd64.tar.gz",
+    "version": "v2.104.0",
+    "links": {
+      "gh_2.104.0_linux_amd64/bin/gh": "/home/dungngo/.local/bin/gh"
+    }
+  },
+  {
     "repo": "derailed/k9s",
     "asset": "k9s_Linux_amd64.tar.gz",
     "version": "v0.51.0",
