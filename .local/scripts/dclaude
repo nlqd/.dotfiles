@@ -26,6 +26,19 @@ GITMODE[rem]=rw
 BLOCK[rem]=
 FEAT[rem]="git_push podman bind_parent"
 
+JSON[wa]=$HOME/.claude-wa/.claude.json
+CREDS[wa]=$HOME/.claude-wa/.credentials.json
+GITMODE[wa]=rw
+BLOCK[wa]=
+FEAT[wa]="git_push podman bind_parent"
+
+JSON[da]=$HOME/.claude-da/.claude.json
+CREDS[da]=$HOME/.claude-da/.credentials.json
+GITMODE[da]=rw
+BLOCK[da]=
+FEAT[da]="git_push podman bind_parent"
+
+
 # op: separate identity under ~/.claude-op, similar to rem
 JSON[op]=$HOME/.claude-op/.claude.json
 CREDS[op]=$HOME/.claude-op/.credentials.json
@@ -59,13 +72,17 @@ dbox_parse "$@"
 dbox_namespaces
 dbox_system
 dbox_block "${block[@]}"
+dbox_cargo_stub
 dbox_home
 dbox_dotfiles
 dbox_hostrelay slack
+dbox_hostrelay cargo-one
 dbox_tmux
 dbox_localbin git-lfs entr
 dbox_claude "${JSON[$p]-${JSON[default]}}" "${CREDS[$p]-${CREDS[default]}}"
-for f in "${feat[@]}"; do "dbox_feat_$f"; done
+for f in "${feat[@]}"; do
+    if dbox_feat_on "$f"; then "dbox_feat_$f"; fi
+done
 dbox_resolve_links "${GITMODE[$p]-${GITMODE[default]}}"
 dbox_shared "${DBOX_SHARES[@]}"
 dbox_project "$DBOX_MODE"

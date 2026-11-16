@@ -1,0 +1,86 @@
+#!/bin/bash
+# cargo-one-box <worktree> <package> <test-filter>
+#
+# The inside of a cargo-one unit: runs the test in a bwrap box that holds the toolchain, the crate
+# cache, one worktree and the target dir, and nothing else from $HOME. It is deliberately not the
+# lane box, which binds ~/.cache, ~/.claude and ~/.config/gh. Not served by hostrelay.
+#
+# Exit code 76: a path to bind is a symlink. Otherwise whatever guarded-build or the test returned.
+set -uo pipefail
+export PATH=/usr/bin:/bin
+
+worktree=$1 package=$2 filter=$3
+target=$HOME/.cache/cargo-target/jenner-language
+
+# Before mkdir, so a planted link can't make it create a directory somewhere else.
+for path in "${target%/*}" "$target"; do
+  [ ! -L "$path" ] || { echo "cargo-one-box: REFUSED, $path is a symlink" >&2; exit 76; }
+done
+mkdir --parents "$target" || exit 76
+
+# Lanes can write ~/dev and ~/.cargo, so any of these could become a symlink to ~/.ssh after a check
+# on the name. Bind the open file descriptor instead, once it is known to be the real path.
+binds=()
+bind_checked() {
+  local flag=$1 path=$2 fd
+  exec {fd}<"$path" || { echo "cargo-one-box: cannot open $path" >&2; exit 76; }
+  if [ "$(readlink "/proc/$$/fd/$fd")" != "$path" ]; then
+    echo "cargo-one-box: REFUSED, $path is reached through a symlink" >&2
+    exit 76
+  fi
+  binds+=("$flag" "$fd" "$path")
+}
+bind_checked --ro-bind-fd "$HOME/.rustup"
+bind_checked --ro-bind-fd "$HOME/.cargo/bin"
+bind_checked --ro-bind-fd "$HOME/.cargo/registry"
+bind_checked --ro-bind-fd "$HOME/.cargo/git"
+bind_checked --bind-fd "$worktree"
+bind_checked --bind-fd "$target"
+
+# ~/.cargo/bin comes first in the box's PATH: /usr/bin has an apt rustc 1.93.1 that would shadow rustup's
+# and is too old for this workspace. Inside the box a lane-planted tool gets no secret, so this order is safe.
+# The system list is copied from dbox_system (dbox-lib.sh:115-144) and not sourced, so a later
+# lane-box change cannot widen this box.
+# cargo-one-guard is a copy of cuo/guarded-build.sh: the original sits in ~/.cache, which lanes can write,
+# and this line runs outside the box.
+# The unit gets the user manager's env, which a lane can set through ~/.config/environment.d: these two could blind the floor.
+unset GUARDED_BUILD_FREE_FILE GUARDED_BUILD_POLL
+exec "$HOME/.local/scripts/cargo-one-guard" --floor 155 -- \
+  bwrap \
+  --clearenv \
+  --setenv PATH "$HOME/.cargo/bin:/usr/bin:/bin" \
+  --setenv HOME "$HOME" \
+  --setenv CARGO_HOME "$HOME/.cargo" \
+  --setenv RUSTUP_HOME "$HOME/.rustup" \
+  --setenv CARGO_TARGET_DIR "$target" \
+  --setenv CARGO_BUILD_JOBS 2 \
+  --setenv TERM dumb \
+  --unshare-all \
+  --new-session \
+  --die-with-parent \
+  --cap-drop ALL \
+  --proc /proc \
+  --dev /dev \
+  --tmpfs /tmp \
+  --ro-bind /bin /bin \
+  --ro-bind /lib /lib \
+  --ro-bind-try /lib32 /lib32 \
+  --ro-bind /lib64 /lib64 \
+  --ro-bind /usr/bin /usr/bin \
+  --ro-bind /usr/lib /usr/lib \
+  --ro-bind-try /usr/libexec /usr/libexec \
+  --ro-bind-try /usr/include /usr/include \
+  --ro-bind /usr/local/lib /usr/local/lib \
+  --ro-bind-try /etc/alternatives /etc/alternatives \
+  --ro-bind-try /etc/ssl/certs /etc/ssl/certs \
+  --ro-bind-try /etc/ld.so.cache /etc/ld.so.cache \
+  --ro-bind-try /etc/ld.so.conf /etc/ld.so.conf \
+  --ro-bind-try /etc/ld.so.conf.d /etc/ld.so.conf.d \
+  --ro-bind-try /etc/localtime /etc/localtime \
+  --ro-bind-try /usr/share/terminfo /usr/share/terminfo \
+  --ro-bind-try /usr/share/ca-certificates /usr/share/ca-certificates \
+  --ro-bind-try /usr/share/zoneinfo /usr/share/zoneinfo \
+  --tmpfs "$HOME" \
+  "${binds[@]}" \
+  --chdir "$worktree" \
+  cargo nextest run --offline --locked --lib --test-threads 2 --package "$package" -- --exact "$filter"

@@ -1,0 +1,56 @@
+#!/bin/bash
+# cargo-one run <worktree> <package> <test-filter>
+#
+# Lets a lane box run one Rust test on the host through hostrelay, in its own cgroup, so a build
+# that blows up cannot take a worker session with it. hostrelay execs this with adversarial argv:
+# every argument is checked before use. The test code itself runs in cargo-one-box (no secrets,
+# no network); that file is not served by the relay, so these checks cannot be skipped.
+#
+# Exit codes: 64 bad argv, 73 another run holds the lock, 74 low memory, otherwise whatever the unit
+# returned, including 75 from the disk floor in cargo-one-guard.
+set -uo pipefail
+# Lanes can write ~/.cargo/bin, which is first on the host login PATH, so this file and cargo-one-box must
+# not find anything through an inherited PATH: not a tool, and not bash (hence the fixed shebang). Both run
+# outside any box, from ~/.local/scripts, which lanes bind read-only.
+export PATH=/usr/bin:/bin
+
+readonly MIN_MEM_AVAILABLE_GB=30
+readonly UNIT=cargo-one
+
+die() {
+  echo "cargo-one: REFUSED, $2" >&2
+  exit "$1"
+}
+
+[ $# -eq 4 ] && [ "$1" = run ] || die 64 "usage: cargo-one run <worktree> <package> <test-filter>"
+worktree=$2 package=$3 filter=$4
+
+# No leading dash, so a package cannot be read as a cargo flag. The filter has no dash at all.
+[[ $package =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die 64 "package must match ^[a-z0-9][a-z0-9_-]*\$"
+[[ $filter =~ ^[A-Za-z0-9_:]+$ ]] || die 64 "filter must be a full test name, matching ^[A-Za-z0-9_:]+\$"
+[[ $worktree =~ ^$HOME/dev/(jenner-language|jl-[A-Za-z0-9._-]+)$ ]] ||
+  die 64 "worktree must be \$HOME/dev/jenner-language or \$HOME/dev/jl-*"
+# A symlink here passes this check; cargo-one-box refuses it when it binds the worktree.
+
+# Under /run/user, which no lane box binds, so a lane can neither hold nor plant this lock.
+lock=${XDG_RUNTIME_DIR:-/run/user/$(id --user)}/cargo-one.lock
+exec 9>"$lock" || die 73 "cannot open $lock"
+flock --nonblock 9 || die 73 "another cargo-one run is in progress; this one does not queue"
+
+mem_kb=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
+[ "${mem_kb:-0}" -ge $((MIN_MEM_AVAILABLE_GB * 1024 * 1024)) ] ||
+  die 74 "host MemAvailable ${mem_kb:-unknown} kB is under ${MIN_MEM_AVAILABLE_GB}G"
+
+# Background plus wait, so the trap runs at once when hostrelay's timeout or the caller's stop
+# sends TERM. The unit lives outside this process, and would otherwise outlive it.
+trap 'systemctl --user stop "$UNIT.service"; exit 143' HUP INT TERM
+systemd-run --user --wait --pipe --collect --unit="$UNIT" \
+  --property=MemoryMax=24G \
+  --property=MemorySwapMax=0 \
+  --property=CPUQuota=800% \
+  --property=TasksMax=4096 \
+  --property=RuntimeMaxSec=3600 \
+  --property=Nice=10 \
+  --property=IOSchedulingClass=idle \
+  "$HOME/.local/scripts/cargo-one-box" "$worktree" "$package" "$filter" 2>&1 &
+wait $!

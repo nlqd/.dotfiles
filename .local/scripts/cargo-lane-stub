@@ -1,0 +1,85 @@
+#!/bin/bash
+# /bwrap-bin/cargo in a dclaude box (dbox_cargo_stub binds it; /bwrap-bin is first on the box PATH).
+#
+# A lane box has a 12G cap, so a compiling cargo can OOM the session (kaizen 10-26). guard-cargo.py only sees
+# cargo typed in a Bash command; this file also catches cargo run by git hooks, scripts and make. Rules:
+#  - a subcommand on the no-compile list (fmt, fetch, metadata, tree ...), --version, --help, or no subcommand: runs as usual
+#  - a core compiling subcommand with jobs 1 or 2 and an absolute target dir on a disk filesystem (DN 11-05): runs
+#  - anything else: refused, so a plugin or a new subcommand is refused until someone lists it
+# Gaps: ~/.cargo/bin/cargo by full path, `rustup run <toolchain> cargo`, and an [alias] in a cargo config file
+# that maps a listed name (fmt, tree ...) to a build.
+set -u
+real=$HOME/.cargo/bin/cargo
+
+refuse() {
+  cat >&2 <<EOF
+[cargo stub] REFUSED: cargo $* may compile inside this lane box, which has a 12G cap.
+  A compile:      cargo <build|check|clippy|test|...> --jobs 2 --target-dir <absolute dir on disk> ...
+  A git hook:     CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=<absolute dir on disk> git push ...
+  One Rust test:  hostrelay call cargo-one -- run <jl worktree> <package> <full test name>
+EOF
+  exit 1
+}
+
+# An alias can map a listed name such as fmt to a build, from the command line or the environment.
+[ -z "$(compgen -e -X '!CARGO_ALIAS_*')" ] || refuse "$@"
+args=("$@")
+for a in "${args[@]}"; do
+  [ "$a" = -- ] && break
+  case $a in --config | --config=*) refuse "$@" ;; esac
+done
+
+# The subcommand is the first word that is not an option or an option's value.
+sub="" i=0
+while [ "$i" -lt "${#args[@]}" ]; do
+  case ${args[i]} in
+    -Z | -C | --color | --explain | -j | --jobs | --target-dir | --manifest-path) i=$((i + 1)) ;;
+    -[!-]*[CZj]) i=$((i + 1)) ;;
+    +* | -*) ;;
+    *) sub=${args[i]}; break ;;
+  esac
+  i=$((i + 1))
+done
+
+case $sub in
+  "" | fmt | fetch | metadata | tree | update | generate-lockfile | locate-project | pkgid | search | version | help | \
+    verify-project | read-manifest | vendor | clean | info) exec "$real" "$@" ;;
+  build | b | check | c | clippy | test | t | run | r | bench | doc | d | rustc | rustdoc | fix) ;;
+  *) refuse "$@" ;;
+esac
+
+for a in "${args[@]:i+1}"; do
+  [ "$a" = -- ] && break
+  case $a in --help | -h | --version | -V) exec "$real" "$@" ;; esac
+done
+
+# Jobs and target dir from the command line or the environment, the two places cargo reads before its config files.
+# A short-option cluster such as -rj64 carries jobs after the j. Every jobs value given must be 1 or 2.
+jobs=(${CARGO_BUILD_JOBS+"$CARGO_BUILD_JOBS"}) target=${CARGO_TARGET_DIR:-}
+for ((k = 0; k < ${#args[@]}; k++)); do
+  a=${args[k]}
+  case $a in
+    --) break ;;
+    --jobs) jobs+=("${args[k + 1]:-}") ;;
+    --jobs=*) jobs+=("${a#--jobs=}") ;;
+    --target-dir) target=${args[k + 1]:-} ;;
+    --target-dir=*) target=${a#--target-dir=} ;;
+    --*) ;;
+    -*j) jobs+=("${args[k + 1]:-}") ;;
+    -*j*) jobs+=("${a#*j}") ;;
+  esac
+done
+[ ${#jobs[@]} -gt 0 ] || refuse "$@"
+for j in "${jobs[@]}"; do [[ $j =~ ^[12]$ ]] || refuse "$@"; done
+[[ $target == /* ]] || refuse "$@"
+
+# A make jobserver passed in by a parent make sets the job count over --jobs.
+unset MAKEFLAGS MFLAGS CARGO_MAKEFLAGS
+
+# The nearest existing parent decides the filesystem; tmpfs counts against the 12G cap.
+probe=$target
+until [ -e "$probe" ]; do probe=$(dirname "$probe"); done
+case $(stat --file-system --format=%T "$probe") in
+  ext2/ext3 | xfs | btrfs | zfs | f2fs | bcachefs) exec "$real" "$@" ;;
+  *) refuse "$@" ;;
+esac

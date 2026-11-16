@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# guarded-build.sh [--floor GB] -- <command...>
+# Run a heavy command (cargo build/test, llvm-cov, image builds) and KILL it if hcmc free disk (decimal GB, df --si)
+# drops below the floor while it runs. Default floor 155 GB (kubelet soft eviction is 147.4 GB).
+# Why (kaizen 2026-10-05): two build-driven disk incidents in one day; the second (turmoil, llvm-cov variants, ~45 GB
+# each) passed a start-of-build check at 170 GB and sank to 134 GB mid-build, under the eviction line.
+set -uo pipefail
+FLOOR=155
+if [ "${1:-}" = "--floor" ]; then FLOOR=$2; shift 2; fi
+[[ $FLOOR =~ ^[0-9]+$ ]] || { echo "guarded-build: REFUSED, floor '$FLOOR' is not a number" >&2; exit 2; }
+[ "${1:-}" = "--" ] && shift
+[ $# -gt 0 ] || { echo "usage: guarded-build.sh [--floor GB] -- <command...>" >&2; exit 2; }
+
+# A worker sandbox (dbox) has a 12 GB memory scope: a cargo build there gets the scope stopped and kills the
+# worker itself (relfix 10-26, three times, EXIT=143). Builds run in CI or on the host, never in a dbox.
+case " $* " in
+  *" cargo "*|*"/cargo "*)
+    if [ -n "${DBOX_LANE:-}" ] && [ "${GUARDED_BUILD_ALLOW_SANDBOX:-0}" != 1 ]; then
+      echo "guarded-build: REFUSED, cargo inside a worker sandbox (DBOX_LANE=$DBOX_LANE) gets the session OOM-stopped; push and let CI build it" >&2
+      exit 77
+    fi ;;
+esac
+
+# GUARDED_BUILD_FREE_FILE: tests only, read the free-GB number from a file instead of df.
+free_gb() {
+  if [ -n "${GUARDED_BUILD_FREE_FILE:-}" ]; then cat "$GUARDED_BUILD_FREE_FILE"; return; fi
+  df --block-size=1000000000 --output=avail /home/dungngo | tail -n 1 | tr -d ' '
+}
+
+# A reading that is not a number counts as under the floor: `[ "" -lt 155 ]` is an error, and that read as "enough disk".
+below_floor() { ! [[ $1 =~ ^[0-9]+$ ]] || [ "$1" -lt "$FLOOR" ]; }
+
+now=$(free_gb 2>/dev/null)
+if below_floor "$now"; then
+  echo "guarded-build: REFUSED, free disk '${now}' GB < floor ${FLOOR} GB" >&2
+  exit 75
+fi
+
+setsid "$@" &
+pid=$!
+# setsid detaches the build from the terminal, so closing the window would orphan it (10-06, corpus): kill the group on our own exit.
+trap 'kill -TERM -- "-$pid" 2>/dev/null; exit 129' HUP INT TERM
+while kill -0 "$pid" 2>/dev/null; do
+  now=$(free_gb 2>/dev/null)
+  if below_floor "$now"; then
+    echo "guarded-build: KILLED, free disk '${now}' GB < floor ${FLOOR} GB during the build" >&2
+    kill -TERM -- "-$pid" 2>/dev/null; sleep 5; kill -KILL -- "-$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    exit 75
+  fi
+  sleep "${GUARDED_BUILD_POLL:-10}" & wait $!   # wait, not a bare sleep, so the HUP trap fires at once
+done
+wait "$pid"

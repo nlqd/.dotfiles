@@ -70,9 +70,44 @@ dbox_localbin() {
 # which tmpfs's /tmp. -try keeps it harmless when no tmux server is up. The tmux
 # binary is whitelisted via dbox_localbin so jen/rem get the host's ghr build
 # rather than the older apt /usr/bin/tmux (a version mismatch the server rejects).
-dbox_tmux() {
+dbox_tmux_raw() {
     dbox_add --bind-try "/tmp/tmux-$(id -u)" "/tmp/tmux-$(id -u)"
     dbox_localbin tmux
+}
+# The agent launchers (dclaude*) call this: the raw socket only for a lane that lists tmux=raw.
+dbox_tmux() {
+    [ "$(dbox_cap tmux)" = raw ] || return 0
+    dbox_tmux_raw
+}
+
+# Lane capabilities (A209). The host tmux server and the podman API are both outside the
+# box and both run commands as the user, so a box that can reach them is not sandboxed.
+# Each is opt-in per lane and fails closed. The lane is the name after -r/--resume/--name in
+# the claude args (Manager, Secretary, ...), so it follows the lane when an account changes.
+# File: ${DBOX_LANE_CAPS:-~/.config/dbox/lane-caps.conf}, lines "<lane> tmux=raw podman=on".
+# No file, no line for the lane, or no lane name: everything off.
+dbox_lane() {
+    local i
+    [ -n "${DBOX_LANE:-}" ] && { printf '%s' "$DBOX_LANE"; return; }   # set at launch by a human's shell
+    for ((i = 0; i < ${#DBOX_REST[@]}; i++)); do
+        case "${DBOX_REST[i]}" in
+            -r | --resume | --name | -n) printf '%s' "${DBOX_REST[i + 1]-}"; return ;;
+        esac
+    done
+}
+dbox_cap() {
+    local lane file
+    lane=$(dbox_lane)
+    file=${DBOX_LANE_CAPS:-$HOME/.config/dbox/lane-caps.conf}
+    [ -n "$lane" ] && [ -r "$file" ] || return 0
+    awk -v l="$lane" -v c="$1" '$1 == l { for (i = 2; i <= NF; i++) { split($i, kv, "="); if (kv[1] == c) print kv[2] } }' "$file"
+}
+# dbox_feat_on <feature>: true unless the feature is capability-gated and the lane lacks it.
+dbox_feat_on() {
+    case "$1" in
+        podman) [ "$(dbox_cap podman)" = on ] ;;
+        *) return 0 ;;
+    esac
 }
 
 # Read-only host system. -try on anything not guaranteed present so a missing
@@ -146,6 +181,19 @@ dbox_block() {
     dbox_add --setenv PATH "/bwrap-bin:$PATH"
 }
 
+# /bwrap-bin/cargo (cargo-lane-stub) in every dclaude box: a lane box has a 12G cap, and a git hook or a
+# script can run cargo where no Bash-command guard sees it. The launch fails if the stub file is missing.
+# Call after dbox_block: a non-empty block list has already made /bwrap-bin, and a second tmpfs would hide its stubs.
+dbox_cargo_stub() {
+    local cargofd i made=0
+    for ((i = 0; i + 1 < ${#ARGS[@]}; i++)); do
+        [ "${ARGS[i]}" = --tmpfs ] && [ "${ARGS[i + 1]}" = /bwrap-bin ] && made=1
+    done
+    [ "$made" = 1 ] || dbox_add --tmpfs /bwrap-bin --setenv PATH "/bwrap-bin:$PATH"
+    exec {cargofd}<"$HOME/.local/scripts/cargo-lane-stub"
+    dbox_add --perms 0755 --ro-bind-data "$cargofd" /bwrap-bin/cargo
+}
+
 # Persistent writable home: stray writes outside the explicit binds land here on
 # the host instead of vanishing with the sandbox tmpfs. Inspect with `ls`.
 # Must be appended BEFORE the dotfile ro-binds so those layer on top.
@@ -166,6 +214,8 @@ dbox_dotfiles() {
         --ro-bind "$HOME/.bashrc" "$HOME/.bashrc" \
         --ro-bind "$HOME/.profile" "$HOME/.profile" \
         --ro-bind "$HOME/.local" "$HOME/.local" \
+        --bind-try "$HOME/.local/share/jenner-circle" "$HOME/.local/share/jenner-circle" \
+        --bind-try "$HOME/.local/state/jenner-circle" "$HOME/.local/state/jenner-circle" \
         --ro-bind-try "$HOME/go/bin" "$HOME/go/bin" \
         --ro-bind-try "$HOME/Downloads" "$HOME/Downloads" \
         --ro-bind-try "$HOME/.asdf" "$HOME/.asdf" \
@@ -347,10 +397,14 @@ dbox_resolve_links() {
     fi
 
     local pwd_norm="${PWD%/}" claude_norm="${HOME%/}/.claude" local_norm="${HOME%/}/.local" target
+    local dotclaude; dotclaude=$(realpath -m "$HOME/dotfiles/.claude")
     while IFS= read -r -d '' target; do
         [[ "$target" == "$pwd_norm"/* ]] && continue
         [[ "$target" == "$claude_norm"/* ]] && continue
         [[ "$target" == "$local_norm"/* ]] && continue
+        # Bind the central config dir, not its files: a file bind pins the inode, so a host
+        # save by rename (editors, Claude Code) left running boxes on the old CLAUDE.md.
+        [[ "$target" == "$dotclaude"/* ]] && target="$dotclaude"
         [ -z "${seen[$target]:-}" ] || continue
         dbox_add --ro-bind "$target" "$target"; seen[$target]=1
     done < <(

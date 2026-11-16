@@ -1,0 +1,13 @@
+[Unit]
+Description=hostrelay: one Rust test on the host for sandboxed Claude Code sessions
+Documentation=file://%h/.local/scripts/hostrelay
+
+[Service]
+Type=simple
+Environment=PATH=/usr/bin:/bin
+ExecStart=%h/.local/scripts/hostrelay serve cargo-one %h/.local/scripts/cargo-one --long-running run --long-timeout 3700
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
