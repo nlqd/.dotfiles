@@ -8,7 +8,7 @@
 # for docs. Routing and pretty rendering live on top, hand-written.
 #
 # Config: ~/.config/eatracker/config.json
-#   { "api_key": "ea_user_...", "member_id": N,
+#   { "agent_key": "ea_agent_...", "member_id": N,
 #     "projects": [ { "local_path": "/repo", "pid": N, "name": "..." } ] }
 #   member_id is the default owner for `ea stories owner add`.
 #
@@ -50,10 +50,10 @@ cfg() {
   jq -r "$1 // empty" "$CONFIG_FILE" 2>/dev/null || true
 }
 
-# Auth: api_key from config, emitted as the X-TrackerToken request header line.
+# Auth: agent_key from config, emitted as the X-TrackerToken request header line.
 auth_header() {
-  local key; key=$(cfg .api_key)
-  [[ -n $key ]] || { echo "Error: no api_key in $CONFIG_FILE" >&2; exit 1; }
+  local key; key=$(cfg .agent_key)
+  [[ -n $key ]] || { echo "Error: no agent_key in $CONFIG_FILE" >&2; exit 1; }
   echo "X-TrackerToken: $key"
 }
 
@@ -92,31 +92,79 @@ api() {
   echo "$body"
 }
 
-# Auto-follow next_cursor for list endpoints (--all), merging every page's items.
+# Fetch every page of a list endpoint (--all) and merge the items. Follows
+# next_cursor when the API sends one; otherwise walks offset, because stories list
+# pages by offset and returns a bare array. Pages go through temp files: a big
+# accumulated array does not fit in jq's argv (the old --argjson crashed at ~1000 rows).
 paginate() {
-  local base="$1" sep acc='[]' body cur=""
+  local base="$1" sep tmp body cur="" off=0 n=0 first prev=""
   [[ $base == *\?* ]] && sep='&' || sep='?'
+  tmp=$(mktemp --directory) || return 1
   while :; do
-    local url="$base"; [[ -n $cur ]] && url="${base}${sep}cursor=${cur}"
-    body=$(api GET "$url") || return 1
-    acc=$(jq -c --argjson a "$acc" '$a + (.items? // .)' <<<"$body")
-    cur=$(jq -r '.next_cursor // empty' <<<"$body" 2>/dev/null || true)
-    [[ -n $cur ]] || break
+    local url="$base"
+    if [[ -n $cur ]]; then url="${base}${sep}cursor=${cur}"
+    elif (( off > 0 )); then url="${base}${sep}offset=${off}"; fi
+    body=$(api GET "$url") || { rm --recursive --force "$tmp"; return 1; }
+    n=$((n + 1))
+    jq -c '.items? // .' <<<"$body" >"$tmp/$n.json" 2>/dev/null || { rm --recursive --force "$tmp"; return 1; }
+    local count; count=$(jq 'if type=="array" then length else 0 end' "$tmp/$n.json")
+    # single objects, empty pages and an API that ignores offset (same page again) all end the walk
+    first=$(jq -c 'if type=="array" then .[0] else null end' "$tmp/$n.json")
+    (( count > 0 )) || break
+    [[ $first != "$prev" ]] || { rm "$tmp/$n.json"; break; }
+    prev="$first"
+    cur=$(jq -r '.next_cursor? // empty' <<<"$body" 2>/dev/null || true)
+    if [[ -z $cur ]]; then
+      jq -e 'type=="array"' <<<"$body" >/dev/null 2>&1 || [[ $body == *'"items"'* ]] || break
+      off=$((off + count))
+    fi
+    (( n < 500 )) || { echo "paginate: stopped after 500 pages" >&2; break; }
   done
-  jq -cn --argjson items "$acc" '{items: $items}'
+  jq -cs '{items: (add // [])}' "$tmp"/*.json
+  rm --recursive --force "$tmp"
 }
 
-# Resolve a human story_ref to a numeric story_id (digits pass through). Goes
-# through search, not a stories list page: the list caps out and silently misses
-# any ref past the cap, while search indexes the whole project. Search is
-# full-text, so the exact-ref match is re-applied here on the results.
-resolve_story() {
-  local pid="$1" ref="$2"
-  [[ $ref =~ ^[0-9]+$ ]] && { echo "$ref"; return; }
+# Short-link code from a pasted link, or a bare code. Accepts
+# https://eastagiletracker.com/s/9xg9wm99, the scheme-less /s/<code> path, and
+# a bare 8-char code. Query strings and fragments are ignored.
+short_code() {
+  local ref="$1"
+  if [[ $ref =~ ^(https?://[^/[:space:]]+)?/s/([A-Za-z0-9_-]+)/?([?#].*)?$ ]]; then
+    echo "${BASH_REMATCH[2]}"; return 0
+  fi
+  # Exactly 8 alnum: matches today's codes, and keeps short story_refs (m99,
+  # and any future 3-7 char ref) from being mistaken for one.
+  [[ $ref =~ ^[A-Za-z0-9]{8}$ ]] && { echo "$ref"; return 0; }
+  return 1
+}
+
+# Resolve any story reference to "PROJECT_ID<TAB>STORY_ID". Accepted forms:
+# numeric id, human story_ref (m99), short-link code, short URL (/s/<code>).
+# A short link carries its own project, which may differ from the caller's
+# current one, so callers must adopt the returned pid.
+resolve_target() {
+  local pid="$1" ref="$2" code hit
+  [[ $ref =~ ^[0-9]+$ ]] && { printf '%s\t%s\n' "$pid" "$ref"; return 0; }
+  if code=$(short_code "$ref"); then
+    # 404 (unknown/expired code, or no access) is quiet here: a bare token may
+    # have been meant as a story_ref, so it falls through to the search below.
+    hit=$(api GET "/short-links/${code}" 2>/dev/null) || hit=""
+    if [[ -n $hit ]]; then
+      jq -r '"\(.project_id)\t\(.story_id)"' <<<"$hit"; return 0
+    fi
+    # A pasted URL is unambiguous: don't go hunting for it as a story_ref.
+    [[ $ref != "$code" ]] && { echo "Could not resolve short link: $ref" >&2; return 1; }
+  fi
+  # Human ref: go through search, not a stories list page - the list caps out
+  # and silently misses any ref past the cap, while search indexes the whole
+  # project. Search is full-text, so re-apply the exact-ref match on results.
   local q; q=$(jq -rn --arg v "$ref" '$v|@uri')
-  api GET "/projects/${pid}/search?q=${q}&limit=25" \
+  local sid; sid=$(api GET "/projects/${pid}/search?q=${q}&limit=25" \
     | jq -r --arg r "$ref" '.results[]? | select((.story_ref | ascii_downcase) == ($r | ascii_downcase)) | .story_id' \
-    | head -1
+    | head -1)
+  [[ -n $sid ]] && { printf '%s\t%s\n' "$pid" "$sid"; return 0; }
+  echo "Could not resolve story: $ref" >&2
+  return 1
 }
 
 # ==========================================================================
@@ -124,6 +172,7 @@ resolve_story() {
 # Each line: #:[entity action] METHOD /path   (+ optional query:/body: lines).
 # ==========================================================================
 # >>> EA_API
+#:[me get_my_profile] GET /agent/me
 #:[me update_my_profile] PUT /agent/me
 #:[me update_my_profile] body: color description initials
 #:[effort_scales list_effort_scales] GET /effort_scales
@@ -135,6 +184,12 @@ resolve_story() {
 #:[api_keys create_user_key] body: name*
 #:[api_keys delete_user_key] DELETE /me/api_keys/{key_id}
 #:[deletion-impact deletion_impact] GET /me/deletion-impact
+#:[email_addresses list_email_addresses] GET /me/email_addresses
+#:[email_addresses adopt_provider_email_address] POST /me/email_addresses
+#:[email_addresses adopt_provider_email_address] body: provider*
+#:[offers list_provider_address_offers] GET /me/email_addresses/offers
+#:[primary set_primary_email_address] PUT /me/email_addresses/primary
+#:[primary set_primary_email_address] body: email*
 #:[mentions list_my_mentions] GET /me/mentions
 #:[mentions list_my_mentions] query: limit cursor since_id unacked
 #:[ack ack_mention] POST /me/mentions/{mention_id}/ack
@@ -147,9 +202,20 @@ resolve_story() {
 #:[accept accept_notification] POST /me/notifications/{id}/accept
 #:[ack ack_notification] POST /me/notifications/{id}/ack
 #:[decline decline_notification] POST /me/notifications/{id}/decline
+#:[oauth_grants list_oauth_grants] GET /me/oauth_grants
+#:[oauth_grants revoke_oauth_grant] DELETE /me/oauth_grants/{grant_id}
+#:[oauth_identities list_oauth_identities] GET /me/oauth_identities
+#:[oauth_identities disconnect_oauth_identity] DELETE /me/oauth_identities/{provider}
+#:[link start_oauth_link] POST /me/oauth_identities/{provider}/link
 #:[stories my_stories] GET /me/stories
 #:[stories my_stories] query: role state cursor limit
 #:[meta get] GET /meta
+#:[organization_bulk-remove bulk_remove] POST /organizations/{organization_id}/memberships/bulk-remove
+#:[organization_bulk-remove bulk_remove] body: anonymize_avatar anonymize_email anonymize_name member_ids[]* reassign_confirmed
+#:[organization_bulk-role bulk_role] POST /organizations/{organization_id}/memberships/bulk-role
+#:[organization_bulk-role bulk_role] body: member_ids[]* role*
+#:[organization_anonymization update_anonymization] PUT /organizations/{organization_id}/memberships/{member_id}/anonymization
+#:[organization_anonymization update_anonymization] body: anonymize_avatar* anonymize_email* anonymize_name*
 #:[priority_scales list_priority_scales] GET /priority_scales
 #:[values list_priority_values] GET /priority_scales/{scale_id}/values
 #:[project list] GET /projects
@@ -158,7 +224,7 @@ resolve_story() {
 #:[project create] body: description initial_velocity iteration_length_weeks iteration_start_day manual_velocity name* organization_id velocity_strategy
 #:[project get] GET /projects/{project_id}
 #:[project update] PUT /projects/{project_id}
-#:[project update] body: agent_key_creator_roles[] auto_plan description effort_scale_id enable_tasks initial_velocity iteration_length_weeks iteration_start_day manual_velocity name points_for_bugs_chores public_access slack_notify_prefs slack_webhook_url velocity_done_state velocity_strategy
+#:[project update] body: agent_key_creator_roles[] auto_plan description effort_scale_id enable_tasks initial_velocity iteration_length_weeks iteration_start_day manual_velocity name points_for_bugs_chores public_access slack_notify_prefs slack_webhook_url start_date velocity_done_state velocity_strategy weekdays_only
 #:[addable-members list_addable_members] GET /projects/{project_id}/addable-members
 #:[agent_keys list_agent_keys] GET /projects/{project_id}/agent_keys
 #:[agent_keys create_agent_key] POST /projects/{project_id}/agent_keys
@@ -168,7 +234,16 @@ resolve_story() {
 #:[agent_keys update_agent_key] PUT /projects/{project_id}/agent_keys/{key_id}
 #:[agent_keys update_agent_key] body: hints_enabled name role
 #:[agent_keys delete_agent_key] DELETE /projects/{project_id}/agent_keys/{key_id}
+#:[agents list_agents] GET /projects/{project_id}/agents
+#:[agents get_agent] GET /projects/{project_id}/agents/{agent_id}
+#:[agents update_agent_profile] PUT /projects/{project_id}/agents/{agent_id}
+#:[agents update_agent_profile] body: color description initials name
+#:[agents revoke_agent] DELETE /projects/{project_id}/agents/{agent_id}
+#:[avatar upload_agent_avatar] POST /projects/{project_id}/agents/{agent_id}/avatar
+#:[avatar delete_agent_avatar] DELETE /projects/{project_id}/agents/{agent_id}/avatar
+#:[rotate-key rotate_agent_key] POST /projects/{project_id}/agents/{agent_id}/rotate-key
 #:[audit-log project_audit_log] GET /projects/{project_id}/audit-log
+#:[audit-log project_audit_log] query: event_type limit before surface target_id
 #:[epics list] GET /projects/{project_id}/epics
 #:[epics create] POST /projects/{project_id}/epics
 #:[epics create] body: description epic_title label_id name
@@ -180,6 +255,7 @@ resolve_story() {
 #:[json upload_epic_json] POST /projects/{project_id}/epics/{epic_id}/attachments/json
 #:[json upload_epic_json] body: content_type* file_base64* file_name*
 #:[attachments delete_epic] DELETE /projects/{project_id}/epics/{epic_id}/attachments/{attachment_id}
+#:[text preview_text_epic] GET /projects/{project_id}/epics/{epic_id}/attachments/{attachment_id}/text
 #:[comments list_comments] GET /projects/{project_id}/epics/{epic_id}/comments
 #:[comments list_comments] query: cursor limit order
 #:[comments create_comment] POST /projects/{project_id}/epics/{epic_id}/comments
@@ -192,6 +268,10 @@ resolve_story() {
 #:[epic_followers add_follower] body: agent_id member_id
 #:[epic_agents remove_agent_follower] DELETE /projects/{project_id}/epics/{epic_id}/followers/agents/{agent_id}
 #:[epic_followers remove_follower] DELETE /projects/{project_id}/epics/{epic_id}/followers/{member_id}
+#:[link-attachments list_epic] GET /projects/{project_id}/epics/{epic_id}/link-attachments
+#:[link-attachments create_epic] POST /projects/{project_id}/epics/{epic_id}/link-attachments
+#:[link-attachments create_epic] body: title url*
+#:[link-attachments delete_epic] DELETE /projects/{project_id}/epics/{epic_id}/link-attachments/{link_attachment_id}
 #:[epic_owners list_owners] GET /projects/{project_id}/epics/{epic_id}/owners
 #:[epic_owners add_owner] POST /projects/{project_id}/epics/{epic_id}/owners
 #:[epic_owners add_owner] body: agent_id member_id
@@ -201,11 +281,12 @@ resolve_story() {
 #:[events list] query: since_id since types cursor limit
 #:[formats list_formats] GET /projects/{project_id}/export/formats
 #:[export export_format] GET /projects/{project_id}/export/{format}
-#:[export export_format] query: page_size
+#:[export export_format] query: page_size from to include_icebox include_backlog locale
 #:[json import_json] POST /projects/{project_id}/import/json
-#:[json import_json] body: dry_run file_base64 file_name include_dependencies include_milestones include_pull_requests include_releases owner repo source* token
+#:[json import_json] body: check_unpointed_estimates dry_run file_base64 file_name include_dependencies include_milestones include_pull_requests include_releases owner repo source* token
 #:[imports get_import_job] GET /projects/{project_id}/imports/{import_id}
 #:[iterations list] GET /projects/{project_id}/iterations
+#:[iterations list] query: offset
 #:[iterations create] POST /projects/{project_id}/iterations
 #:[iterations create] body: end* start*
 #:[first-preview first_preview] GET /projects/{project_id}/iterations/first-preview
@@ -224,9 +305,15 @@ resolve_story() {
 #:[add-existing add_existing_org_member] POST /projects/{project_id}/members/add-existing
 #:[add-existing add_existing_org_member] body: member_id* role
 #:[join self_join] POST /projects/{project_id}/members/join
+#:[project_anonymization update_anonymization] PUT /projects/{project_id}/members/{member_id}/anonymization
+#:[project_anonymization update_anonymization] body: anonymize_avatar* anonymize_email* anonymize_name*
 #:[memberships list] GET /projects/{project_id}/memberships
 #:[memberships create] POST /projects/{project_id}/memberships
 #:[memberships create] body: email person_id role
+#:[project_bulk-remove bulk_remove] POST /projects/{project_id}/memberships/bulk-remove
+#:[project_bulk-remove bulk_remove] body: anonymize_avatar anonymize_email anonymize_name member_ids[]*
+#:[project_bulk-role bulk_role] POST /projects/{project_id}/memberships/bulk-role
+#:[project_bulk-role bulk_role] body: member_ids[]* role*
 #:[memberships get] GET /projects/{project_id}/memberships/{membership_id}
 #:[memberships update] PUT /projects/{project_id}/memberships/{membership_id}
 #:[memberships update] body: role
@@ -236,24 +323,34 @@ resolve_story() {
 #:[preferences get_preferences] GET /projects/{project_id}/preferences
 #:[preferences update_preferences] PUT /projects/{project_id}/preferences
 #:[preferences update_preferences] body: display_density panel_config*
+#:[scope list] GET /projects/{project_id}/releases/scope
 #:[search search] GET /projects/{project_id}/search
+#:[search search] query: q query limit offset sort
 #:[showcase_claim claim_showcase_project] POST /projects/{project_id}/showcase_claim
 #:[showcase_claim_eligibility claim_eligibility] GET /projects/{project_id}/showcase_claim_eligibility
+#:[test slack_test] POST /projects/{project_id}/slack/test
 #:[stories list] GET /projects/{project_id}/stories
-#:[stories list] query: state label story_type cursor limit offset fields include_archived import_source import_external_id
+#:[stories list] query: state label story_type cursor limit offset fields archived include_archived include_done import_source import_external_id ids
 #:[stories create] POST /projects/{project_id}/stories
-#:[stories create] body: completed_at created_at current_state description estimate icebox import_external_id import_source labels[] move_to name* owners[] priority_id requestor started_at story_type
+#:[stories create] body: completed_at created_at current_state description estimate icebox import_external_id import_source labels[] move_to name* owners[] priority_id requestor scheduled_at started_at story_type
+#:[bulk-unarchive bulk_unarchive] POST /projects/{project_id}/stories/bulk-unarchive
+#:[bulk-unarchive bulk_unarchive] body: story_ids[]*
 #:[stories bulk_transition] POST /projects/{project_id}/stories/bulk_transition
-#:[stories bulk_transition] body: reason story_ids[]* to*
+#:[stories bulk_transition] body: story_ids[]* to*
+#:[transfer transfer] POST /projects/{project_id}/stories/transfer
+#:[transfer transfer] body: destination_project_id* story_ids[]*
+#:[preview preview] POST /projects/{project_id}/stories/transfer/preview
+#:[preview preview] body: destination_project_id* story_ids[]*
 #:[stories get] GET /projects/{project_id}/stories/{story_id}
 #:[stories update] PUT /projects/{project_id}/stories/{story_id}
-#:[stories update] body: current_state description estimate expected_updated_at force_state_change icebox labels[] move_to name owners[] position priority_id reorder story_type
+#:[stories update] body: current_state description estimate expected_updated_at expected_version force_state_change icebox labels[] move_to name owners[] position priority_id reorder scheduled_at snapshot_label story_type
 #:[stories delete] DELETE /projects/{project_id}/stories/{story_id}
 #:[story_archive archive] POST /projects/{project_id}/stories/{story_id}/archive
 #:[attachments list] GET /projects/{project_id}/stories/{story_id}/attachments
 #:[json upload_json] POST /projects/{project_id}/stories/{story_id}/attachments/json
 #:[json upload_json] body: content_type* file_base64* file_name*
 #:[attachments delete] DELETE /projects/{project_id}/stories/{story_id}/attachments/{attachment_id}
+#:[text preview_text] GET /projects/{project_id}/stories/{story_id}/attachments/{attachment_id}/text
 #:[blockers list] GET /projects/{project_id}/stories/{story_id}/blockers
 #:[blockers create] POST /projects/{project_id}/stories/{story_id}/blockers
 #:[blockers create] body: blocker_desc* resolved
@@ -262,7 +359,7 @@ resolve_story() {
 #:[blockers update] body: blocker_desc resolved
 #:[blockers delete] DELETE /projects/{project_id}/stories/{story_id}/blockers/{blocker_id}
 #:[comments list] GET /projects/{project_id}/stories/{story_id}/comments
-#:[comments list] query: cursor limit order
+#:[comments list] query: cursor limit order fields
 #:[comments create] POST /projects/{project_id}/stories/{story_id}/comments
 #:[comments create] body: author comment_emoji comment_text created_at mentioned_agent_ids[] mentioned_member_ids[] text
 #:[comments get] GET /projects/{project_id}/stories/{story_id}/comments/{comment_id}
@@ -281,6 +378,10 @@ resolve_story() {
 #:[labels add_label] POST /projects/{project_id}/stories/{story_id}/labels
 #:[labels add_label] body: label_id*
 #:[labels remove_label] DELETE /projects/{project_id}/stories/{story_id}/labels/{label_id}
+#:[link-attachments list] GET /projects/{project_id}/stories/{story_id}/link-attachments
+#:[link-attachments create] POST /projects/{project_id}/stories/{story_id}/link-attachments
+#:[link-attachments create] body: title url*
+#:[link-attachments delete] DELETE /projects/{project_id}/stories/{story_id}/link-attachments/{link_attachment_id}
 #:[links list] GET /projects/{project_id}/stories/{story_id}/links
 #:[links create] POST /projects/{project_id}/stories/{story_id}/links
 #:[links create] body: link_type title url*
@@ -308,9 +409,13 @@ resolve_story() {
 #:[tasks update] body: complete description task_desc task_order
 #:[tasks delete] DELETE /projects/{project_id}/stories/{story_id}/tasks/{task_id}
 #:[stories transition] POST /projects/{project_id}/stories/{story_id}/transitions
-#:[stories transition] body: reason to*
+#:[stories transition] body: to*
 #:[unarchive unarchive] POST /projects/{project_id}/stories/{story_id}/unarchive
+#:[transfer-organization transfer_organization] POST /projects/{project_id}/transfer-organization
+#:[transfer-organization transfer_organization] body: anonymize_members copy_members target_organization_id*
 #:[short-links resolve_short_link] GET /short-links/{code}
+#:[story-references resolve] GET /story-references
+#:[story-references resolve] query: codes ids
 #:[story_states list_story_states] GET /story_states
 #:[story_types list_story_types] GET /story_types
 # <<< EA_API
@@ -330,8 +435,11 @@ build_body() {
 # Pretty renderers keyed by "entity action"; default dumps JSON for piping.
 # estimate is an effort-scale object ({label,value,order,allow_points}) once a
 # story is estimated, and null otherwise; older scales sent a bare scalar.
+# Passing "project" as the first arg prefixes the project title (`ea mine`).
 story_line() {
-  jq -r '(.items? // .) | .[]? |
+  local project="${1:-}"
+  jq -r --arg project "$project" '(.items? // .) | .[]? |
+    (if $project == "project" then "\(.project_title // .project_id)\t" else "" end) +
     "[\(.story_id)]\t\(.story_ref)\t\(.current_state)\t\(.story_type[0:4])\t" +
     "\((.estimate | if type == "object" then (.label // .value) else . end) // "-")\t" +
     "\((.owners // []) | map(.actor.initials // .actor.name) | join(",") | if .=="" then "-" else . end)\t" +
@@ -341,7 +449,8 @@ story_line() {
 }
 render_story_detail() {
   jq -r '
-    "Ref:        \(.story_ref)  (id \(.story_id), link \(.short_link_code // "-"))",
+    "Ref:        \(.story_ref)  (id \(.story_id))",
+    "Share:      \(if .short_link_code then "https://eastagiletracker.com/s/\(.short_link_code)" else "-" end)",
     "Title:      \(.title)",
     "Type:       \(.story_type)   State: \(.current_state)   Estimate: \((.estimate | if type == "object" then (.label // .value) else . end) // "-")",
     "Priority:   \(.priority_name // "-")   Icebox: \(.icebox)   Labels: \((.labels // []) | map(.label_name) | join(", "))",
@@ -419,6 +528,7 @@ dispatch() {
   # create/get/update/delete, the story-label-attach actions, etc.) is plain
   # generated API surface and falls through to the generic dispatch below.
   [[ $entity == stories && $action == owner ]] && { cmd_owner "$pid" "$@"; return; }
+  [[ $entity == stories && $action == transfer ]] && { cmd_transfer "$pid" "$@"; return; }
   [[ $entity == labels && ($action == list || $action == recolor) ]] && { cmd_labels "$pid" "$action" "$@"; return; }
   [[ $entity == search && $action != search ]] && { cmd_search "$action" "$@"; return; }
 
@@ -442,16 +552,21 @@ dispatch() {
   done
 
   local tok val pi=0
+  # A short link can point at a story in another project, so resolve the story
+  # arg first (it is always the first non-project path arg) and let it override
+  # pid before {project_id} is filled in.
+  if [[ $path == *"{story_id}"* ]]; then
+    local raw="${pos[0]:-}" tgt
+    [[ -n $raw ]] || { echo "Missing path arg: story_id" >&2; op_help "$entity" "$action"; return 1; }
+    tgt=$(resolve_target "$pid" "$raw") || return 1
+    pid="${tgt%%$'\t'*}"; pos[0]="${tgt#*$'\t'}"
+  fi
   for tok in $(grep -oE '\{[a-z_]+\}' <<<"$path" | tr -d '{}'); do
     if [[ $tok == project_id ]]; then
       val="$pid"
     else
       val="${pos[$pi]:-}"; pi=$((pi + 1))
       [[ -n $val ]] || { echo "Missing path arg: $tok" >&2; op_help "$entity" "$action"; return 1; }
-      if [[ $tok == story_id ]]; then
-        local raw="$val"; val=$(resolve_story "$pid" "$raw")
-        [[ -n $val ]] || { echo "Could not resolve story: $raw" >&2; return 1; }
-      fi
     fi
     path="${path/\{$tok\}/$val}"
   done
@@ -465,7 +580,11 @@ dispatch() {
     done
     [[ -n $qs ]] && path="${path}?${qs}"
     if [[ -n $want_all ]]; then resp=$(paginate "$path") || return 1
-    else resp=$(api GET "$path") || return 1; fi
+    else
+      resp=$(api GET "$path") || return 1
+      local got; got=$(jq 'if type=="array" then length else 0 end' <<<"$resp" 2>/dev/null || echo 0)
+      (( got < 1000 )) || echo "ea: got exactly $got rows, which is the server cap; there may be more. Use --all." >&2
+    fi
   elif [[ $method == DELETE ]]; then
     resp=$(api DELETE "$path") || return 1
   else
@@ -481,6 +600,10 @@ dispatch() {
 op_help() {
   echo "ea $1 $2"
   grep -F "#:[$1 $2]" "$SELF" | sed -E 's/^#:\[[^]]*\][[:space:]]+/  /'
+  if grep -F "#:[$1 $2]" "$SELF" | grep -q '{story_id}'; then
+    echo "  <ref>: story_ref (m99), id, or the shareable short link you send"
+    echo "         to teammates: https://eastagiletracker.com/s/<code>"
+  fi
 }
 entity_help() {
   echo "ea $1 ACTION:"
@@ -501,11 +624,21 @@ Curated commands:
   dash            Overview: non-icebox stories grouped by state
   inbox [all]     Unread notification feed; 'all' includes already-read rows
   projects        List your projects
+  whoami          Agent identity, key kind, project, allowed transitions
+  mine [--role owned|requested|following] [--state S] [--all]
+                  My stories across every project the token can see
   search <text> [--limit N] [--offset N]        Full-text story search
   stories owner add|rm <ref> [--member <id>]    Add/remove a story owner
+  stories transfer <ref...> --to <pid> [--apply]
+                  Preview (default) or move stories to another project
   labels list                                   List project labels
   labels recolor <id> --bg <hex> --text <hex>   Recolor a label (color only)
   api gen         Regenerate the API manifest from the live OpenAPI spec
+
+Story refs: every <ref> above also accepts the tracker's Share link, the one
+you send to teammates: https://eastagiletracker.com/s/9xg9wm99 (/s/<code> and
+the bare 8-char code also work). Links resolve to their own project, so a
+pasted link works from any directory.
 
 API surface (generated):
 EOF
@@ -518,6 +651,32 @@ cmd_projects() {
   bar; echo "Projects"; bar
   api GET "/projects" | jq -r '.[] | "\(.project_id)\t\(.project_title)\(if .is_project_member then "" else "  (not a member)" end)"' \
     | tab 2
+}
+
+#@:[me whoami] whoami  Who the token is: agent, key kind, project, transitions
+# /meta is the useful half: it reports which key kind is authenticating and the
+# per-story-type state machine that `stories transition` otherwise only learns
+# from a 409.
+cmd_whoami() {
+  local me meta pid pname hint tr
+  me=$(api GET "/agent/me") || return 1
+  meta=$(api GET "/meta") || meta='{}'
+  pid=$(jq -r '.auth.project_id // empty' <<<"$meta")
+  pname=$(name_for_pid "${pid:-0}")
+  jq -r --argjson pid "${pid:-0}" --arg pname "${pname:-project ${pid:-?}}" \
+        --arg kind "$(jq -r '.auth.kind // "?"' <<<"$meta")" \
+        --arg key "$(jq -r '.auth.key_id // "?"' <<<"$meta")" '
+    "Agent:      \(.name) (id \(.agent_id), initials \(.initials))",
+    "Key:        \($kind) key #\($key)",
+    "Project:    \($pname) (\($pid))",
+    "Created by: \(.created_by.name // "-")",
+    (if .description then "About:      \(.description)" else empty end)' <<<"$me"
+  hint=$(jq -r '.hint.text // empty' <<<"$meta")
+  [[ -n $hint ]] && printf '\nHint:       %s\n' "$hint"
+  tr=$(jq -r '.transitions // {} | to_entries[]
+    | "  \(.key): " + ([.value | to_entries[]
+        | "\(.key)->\(if (.value | length) == 0 then "(none)" else (.value | join("|")) end)"] | join(", "))' <<<"$meta")
+  [[ -n $tr ]] && printf '\nAllowed transitions:\n%s\n' "$tr"
 }
 cmd_dash() {
   local pid="$1" name; name=$(name_for_pid "$pid")
@@ -533,6 +692,44 @@ cmd_dash() {
     echo "$block" | story_line | tab 7
     echo
   done
+}
+
+#@:[stories mine] mine [--role owned|requested|following] [--state S] [--limit N] [--all]
+# Stories I own / requested / follow, across every project the token can see
+# (an ea_agent_* key is bound to one project; member sessions and ea_user_*
+# keys see all). The payload carries project_id but not the title, so names
+# come from /projects.
+cmd_mine() {
+  local role="owned" state="" limit=50 all="" want_json=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --role)  [[ $# -ge 2 ]] || { echo "--role needs a value" >&2; return 1; }; role="$2"; shift 2 ;;
+      --state) [[ $# -ge 2 ]] || { echo "--state needs a value" >&2; return 1; }; state="$2"; shift 2 ;;
+      --limit) [[ $# -ge 2 ]] || { echo "--limit needs a value" >&2; return 1; }; limit="$2"; shift 2 ;;
+      --all)   all=1; shift ;;
+      --json)  want_json=1; shift ;;
+      --help|-h) echo "Usage: ea mine [--role owned|requested|following] [--state S] [--limit N] [--all]"; return 0 ;;
+      *)       echo "Unknown flag: $1" >&2; return 1 ;;
+    esac
+  done
+  case "$role" in
+    owned|requested|following) ;;
+    *) echo "--role must be owned, requested, or following" >&2; return 1 ;;
+  esac
+  local path="/me/stories?role=${role}&limit=${limit}"
+  [[ -n $state ]] && path="${path}&state=${state}"
+  local body
+  if [[ -n $all ]]; then body=$(paginate "$path") || return 1
+  else body=$(api GET "$path") || return 1; fi
+  [[ -n $want_json ]] && { jq . <<<"$body"; return; }
+  local names
+  names=$(api GET "/projects" | jq -c 'map({key:(.project_id|tostring), value:.project_title}) | from_entries' 2>/dev/null || echo '{}')
+  local n; n=$(jq '(.items // []) | length' <<<"$body")
+  bar; echo "My stories: ${role}${state:+ / $state} ($n)"; bar
+  [[ $n -gt 0 ]] || { echo "  (none)"; return; }
+  jq -c --argjson names "$names" '{items: [.items[] | . + {
+      project_title: ($names[(.project_id|tostring)] // ("project " + (.project_id|tostring))) }]}' <<<"$body" \
+    | story_line project | tab 8
 }
 
 
@@ -558,12 +755,71 @@ cmd_inbox() {
 }
 
 #@:[search search] search <text> [--limit N] [--offset N]  Full-text story search
-# The spec declares no query params for /search, but the endpoint reads q, limit
-# and offset (verified live), so this stays a hand-written note. The shortcut
-# re-enters dispatch so --json and any future param keep working unchanged.
+# Shortcut that takes the query positionally. It re-enters dispatch so --json
+# and the generated query params (limit, offset, sort) keep working unchanged.
 cmd_search() {
   local q="$1"; shift
   dispatch search search --q "$q" "$@"
+}
+
+#@:[stories refs] <ref> also accepts the shareable short link you send to teammates (https://eastagiletracker.com/s/<code>)
+#@:[stories transfer] transfer <ref...> --to <project-id> [--apply]  Move stories to another project
+# New transfer API: preview is the default (read-only, shows what the move
+# would drop); --apply performs it. Both endpoints want numeric story ids, so
+# refs and short links are resolved first. The source is the current project;
+# a link pointing elsewhere is rejected rather than silently moved.
+cmd_transfer() {
+  local pid="$1"; shift
+  local to="" apply="" want_json="" ref tgt
+  local -a refs=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --to)    [[ $# -ge 2 ]] || { echo "--to needs a project id" >&2; return 1; }; to="$2"; shift 2 ;;
+      --apply) apply=1; shift ;;
+      --json)  want_json=1; shift ;;
+      --help|-h) echo "Usage: ea stories transfer <ref...> --to <project-id> [--apply]"; return 0 ;;
+      --*)     echo "Unknown flag: $1" >&2; return 1 ;;
+      *)       refs+=("$1"); shift ;;
+    esac
+  done
+  [[ -n $to ]] || { echo "Usage: ea stories transfer <ref...> --to <project-id> [--apply]" >&2; return 1; }
+  [[ $to =~ ^[0-9]+$ ]] || { echo "--to needs a numeric project id (see: ea projects)" >&2; return 1; }
+  [[ ${#refs[@]} -gt 0 ]] || { echo "Missing story ref(s)" >&2; return 1; }
+  local -a ids=()
+  for ref in "${refs[@]}"; do
+    tgt=$(resolve_target "$pid" "$ref") || return 1
+    [[ ${tgt%%$'\t'*} == "$pid" ]] \
+      || { echo "Story $ref is in project ${tgt%%$'\t'*}, not $pid; run from that project" >&2; return 1; }
+    ids+=("${tgt#*$'\t'}")
+  done
+  local ids_json body
+  ids_json=$(printf '%s\n' "${ids[@]}" | jq -s -c 'map(tonumber)')
+  body=$(jq -nc --argjson to "$to" --argjson ids "$ids_json" '{destination_project_id:$to, story_ids:$ids}')
+  local path="/projects/$pid/stories/transfer"
+  [[ -z $apply ]] && path="${path}/preview"
+  local resp; resp=$(api POST "$path" "$body") || return 1
+  if [[ -n $want_json ]]; then echo "$resp" | jq .; return; fi
+  if [[ -z $apply ]]; then
+    jq -r '
+      "Destination: \(.destination.project_title) (\(.destination.project_id))" + (if .blocked then "  [BLOCKED]" else "" end),
+      (.stories[] |
+        "",
+        "[\(.story_id)] \(.title)",
+        "  panel: \(.target_panel // "-")   link: https://eastagiletracker.com/s/\(.short_link_code // "")",
+        (if .blocked_reason then "  blocked: \(.blocked_reason)" else empty end),
+        (if ((.dropped_people // []) | length) > 0 then "  drops people: " + ([.dropped_people[] | .name] | join(", ")) else empty end),
+        (if ((.removed_comments.count // 0) > 0) then "  drops comments: \(.removed_comments.count)" else empty end),
+        (if .requester_replaced then "  requester replaced by the mover" else empty end),
+        (if ((.epic_labels_displaced // []) | length) > 0 then "  epic labels displaced: " + ([.epic_labels_displaced[] | tostring] | join(", ")) else empty end),
+        (if ((.labels_created // []) | length) > 0 then "  labels created: " + ([.labels_created[] | tostring] | join(", ")) else empty end),
+        (if .estimate_cleared then "  estimate cleared" else empty end),
+        (if .priority_cleared then "  priority cleared" else empty end))' <<<"$resp"
+    echo
+    echo "Preview only. Re-run with --apply to move."
+  else
+    jq -r '"Moved to \(.destination.project_title) (\(.destination.project_id))",
+      (.moved[] | "  [\(.from_story_id)] -> [\(.story_id)]  \(.panel // "-")  https://eastagiletracker.com/s/\(.short_link_code // "")")' <<<"$resp"
+  fi
 }
 
 #@:[stories owner] owner add|rm <ref> [--member <id>]  Add/remove a story owner
@@ -586,8 +842,8 @@ cmd_owner() {
   [[ -n $ref ]] || { echo "Missing story ref" >&2; return 1; }
   [[ -n $member ]] || member=$(cfg .member_id)
   [[ $member =~ ^[0-9]+$ ]] || { echo "Need a numeric member id (--member or config .member_id)" >&2; return 1; }
-  local sid; sid=$(resolve_story "$pid" "$ref")
-  [[ -n $sid ]] || { echo "Could not resolve story: $ref" >&2; return 1; }
+  local tgt; tgt=$(resolve_target "$pid" "$ref") || return 1
+  pid="${tgt%%$'\t'*}"; local sid="${tgt#*$'\t'}"
   if [[ $sub == add ]]; then
     api POST "/projects/$pid/stories/$sid/owners" "{\"member_id\":$member}" >/dev/null \
       && echo "Added member $member as owner of $ref"
@@ -666,17 +922,21 @@ api_gen() {
       ] as $ops
       # A bare entity+action name that spans more than one distinct path is ambiguous:
       # dispatch()s `grep | head -1` would silently pick one and ignore the other (this
-      # happens for e.g. "owners"/"followers"/"archive", which epics and stories both
-      # have). Qualify only those with their immediate parent collection; leave
-      # anything unambiguous (comments, tasks, ...) using the plain name as before.
-      | ($ops | group_by(.e0 + " " + .a) | map(select((map(.p)|unique|length) > 1) | .[0].e0 + " " + .[0].a)) as $ambiguous
+      # happens for e.g. "owners" under epics and stories, or "bulk-role" under
+      # organizations and projects). Qualify only those with the first literal path
+      # segment where the clashing paths diverge; leave anything unambiguous
+      # (comments, tasks, ...) using the plain name.
+      | def literals: split("/") | map(select(. != "" and (startswith("{")|not)));
+        ($ops | group_by(.e0 + " " + .a)
+          | map(select((map(.p)|unique|length) > 1)
+                | { key: (.[0].e0 + " " + .[0].a),
+                    value: (map(.p | literals) as $s
+                            | first(range(0; $s[0]|length) | select(. as $i | ($s | map(.[$i]) | unique | length) > 1))
+                              // error("cannot disambiguate: \(.[0].e0) \(.[0].a)")) })
+          | from_entries) as $diverge
       | $ops[] | . as $o
-        | (if ($ambiguous | index($o.e0 + " " + $o.a)) then
-             ($o.p | split("/")) as $all
-             | ([$all[] | select(startswith("{"))]) as $braces
-             | ($all | index($braces[1])) as $bi
-             | ($all[$bi-1] | singularize) + "_" + $o.e0
-           else $o.e0 end) as $E
+        | ($diverge[$o.e0 + " " + $o.a]) as $i
+        | (if $i then (($o.p | literals)[$i] | singularize) + "_" + $o.e0 else $o.e0 end) as $E
         | emit($E; $o)')
   awk -v b="$block" '
     /^# >>> EA_API/ { print; print b; skip=1; next }
@@ -710,6 +970,8 @@ main() {
     dash|d)   cmd_dash "$(project_id)" ;;
     inbox)    shift; cmd_inbox "$@" ;;
     projects) cmd_projects ;;
+    whoami)   cmd_whoami ;;
+    mine)     shift; cmd_mine "$@" ;;
     *)        dispatch "$@" ;;
   esac
 }
