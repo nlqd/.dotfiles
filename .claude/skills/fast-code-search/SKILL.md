@@ -60,19 +60,8 @@ If your first semble query returns thematic-but-not-mechanistic hits:
 
 Semble indexes a repo on first query (slow), then caches for the session. For sustained work in one repo: cheap. For one-shot lookups across many repos: grep wins.
 
-## Rationalization Table
-
-| Excuse | Reality |
-|--------|---------|
-| "User asked for a map, exact lines don't matter" | Wrong lines erode trust. Verify. |
-| "I ran 4 parallel semble queries, that's thorough enough" | Thoroughness in search ≠ accuracy in citation. Read. |
-| "Semble's chunk header IS the line number" | It's the chunk boundary. Functions don't start there. |
-| "Reading is slow" | Read is one tool call. A drifted citation is a bug. |
-| "I'll Read only the suspicious ones" | You don't know which are suspicious until you Read. |
-
 ## Red Flags
 
-- About to output `file:line` without having Read that file in this session. STOP. Read first.
 - Issuing the same vague semble query at higher `top_k`. STOP. Re-phrase with mechanism words.
 - Reading five or more unrelated semble chunks. STOP. Your query is too thematic.
 - Crafting an elaborate regex because grep keeps missing. STOP. Try semble.

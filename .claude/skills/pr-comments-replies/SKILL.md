@@ -17,18 +17,16 @@ Use this to submit the comments
 
 ```
 gh api graphql \
-  --field threadId1=\
+  --field threadId1="PRRT_kwDOABC123" \
   --field body1="Thanks, fixed!" \
+  --field threadId2="PRRT_kwDOABC456" \
   --field body2="Good catch, updated." \
-  --field body3="Done, see latest commit." \
   --raw-field query='
-    mutation($threadId1: "PRT_kwDOABC123", $body1: String!, $threadId2: "PRT_kwDOABC456" , $body2: String!, $threadId3: "PRT_kwDOABC789", $body3: String!) {
+    mutation($threadId1: ID!, $body1: String!, $threadId2: ID!, $body2: String!) {
       reply1: addPullRequestReviewThreadReply(input: {
         pullRequestReviewThreadId: $threadId1, body: $body1 }) { comment { id } }
       reply2: addPullRequestReviewThreadReply(input: {
         pullRequestReviewThreadId: $threadId2, body: $body2 }) { comment { id } }
-      reply3: addPullRequestReviewThreadReply(input: {
-        pullRequestReviewThreadId: $threadId3, body: $body3 }) { comment { id } }
     }'
 ```
 
@@ -58,10 +56,9 @@ For questions about missing features:
 
 5. Before Sending
 
-- Keep responses concise (2-3 sentences max). Offer alternatives when appropriate.
+- Answer the point and stop. Offer alternatives when appropriate.
 - Match the reviewer's level of formality
 - List out the replies for the human to verify in a temp file (/tmp/pr-replies.md) so that he can edit. Add some context so he knows what he is replying to.
-- Why many words when few words do trick?
 
 ### 4. Clean up
 
@@ -82,5 +79,5 @@ gh api graphql -f query='
     t4: resolveReviewThread(input: {threadId: "PRRT_kwDOPZASLs5jwam5"}) {
       thread { isResolved }
     }
-  }')
+  }'
 ```

@@ -76,10 +76,10 @@ Proceed with frame analysis?
 
 ### 5. Invoke Subagent After Approval
 
-After user approval, invoke subagent using Task tool:
+After user approval, invoke a subagent with the Agent tool:
 
 ```
-Task(
+Agent(
   subagent_type="general-purpose",
   model="haiku",
   description="Frame analysis",
@@ -94,11 +94,6 @@ Analyze the above frame images and identify issues/behaviors according to the us
 """
 )
 ```
-
-Benefits of this approach:
-- ✅ User intent is included in analysis context
-- ✅ Subagent can focus on intent-specific efficient analysis
-- ✅ Processed in independent context for better token efficiency
 
 ## Options
 

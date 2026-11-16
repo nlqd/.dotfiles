@@ -49,7 +49,7 @@ this level, and say that final approval needs the official standard.
 3. Run the linter:
 
    ```sh
-   cd ~/dev/ste100-vale
+   cd ~/.claude/skills/ste100-vale
    export PATH="$PWD/bin:$PATH"
    vale --config=.vale.ini <path-to-file>
    ```
