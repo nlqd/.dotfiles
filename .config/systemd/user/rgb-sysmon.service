@@ -1,0 +1,15 @@
+[Unit]
+Description=rgb-sysmon: fans and RAM colored by live power, heat and memory use
+Documentation=file://%h/.local/scripts/rgb-sysmon
+Requires=openrgb-server.service
+After=openrgb-server.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/uv run --quiet --script %h/.local/scripts/rgb-sysmon
+Restart=always
+RestartSec=3
+SuccessExitStatus=143
+
+[Install]
+WantedBy=default.target

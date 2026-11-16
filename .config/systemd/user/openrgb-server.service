@@ -1,0 +1,11 @@
+[Unit]
+Description=OpenRGB SDK server, localhost only (rgb-sysmon talks to it)
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/openrgb --server --server-host 127.0.0.1 --server-port 6742
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

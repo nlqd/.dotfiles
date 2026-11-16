@@ -1,0 +1,220 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["openrgb-python", "nvidia-ml-py"]
+# ///
+"""Color the case fans and RAM from live system load, through the OpenRGB SDK server.
+
+    fan ring (8 LEDs, 3 fans on a splitter)  CPU+GPU watts fill it, the hotter of CPU/GPU sets the hue
+    board logo                               same heat hue
+    RAM stick 1                              system RAM in use, as a 12-LED bar
+    RAM stick 2                              GPU VRAM in use, as a 12-LED bar
+
+When the sensors stop answering for STALE_S seconds everything turns red, so a
+broken reader can't pass for an idle machine. Needs openrgb-server.service.
+
+    rgb-sysmon                                       # run the loop
+    rgb-sysmon render --watts 250 --cpu-c 70 ...     # print one frame, touches no hardware
+"""
+
+import argparse
+import colorsys
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+RAPL = Path("/sys/class/powercap/intel-rapl:0")
+HWMON = Path("/sys/class/hwmon")
+SDK = ("127.0.0.1", 6742)
+
+TICK_S = 0.1
+RAM_EVERY = 5  # ticks; the sticks share SMBus with the spd5118 temp reads, so 2 Hz
+STALE_S = 5
+WATTS_FULL = 500
+CPU_COOL_C, CPU_HOT_C = 65, 95  # Tctl, which idles around 60-70 on this box
+GPU_COOL_C, GPU_HOT_C = 40, 85
+DIM = 0.1
+RED = (255, 0, 0)
+
+
+@dataclass(frozen=True)
+class Sample:
+    watts: float
+    cpu_c: float
+    gpu_c: float
+    ram: float
+    vram: float
+
+
+def clamp(x):
+    return min(max(x, 0.0), 1.0)
+
+
+def hue(degrees):
+    return tuple(round(c * 255) for c in colorsys.hsv_to_rgb(degrees / 360, 1, 1))
+
+
+def scale(rgb, level):
+    return tuple(int(c * level) for c in rgb)
+
+
+def bar(fill, n, rgb):
+    lit = fill * n
+    return [scale(rgb, max(clamp(lit - i), DIM)) for i in range(n)]
+
+
+def heat(s):
+    return clamp(max((s.cpu_c - CPU_COOL_C) / (CPU_HOT_C - CPU_COOL_C),
+                     (s.gpu_c - GPU_COOL_C) / (GPU_HOT_C - GPU_COOL_C)))
+
+
+def usage_bar(fill):
+    return bar(clamp(fill), 12, hue(120 * (1 - clamp(fill))))
+
+
+def render(s):
+    if s is None:
+        return {"fans": [RED] * 8, "logo": [RED], "ram": [RED] * 12, "vram": [RED] * 12}
+    heat_rgb = hue(220 * (1 - heat(s)))
+    return {
+        "fans": bar(clamp(s.watts / WATTS_FULL), 8, heat_rgb),
+        "logo": [heat_rgb],
+        "ram": usage_bar(s.ram),
+        "vram": usage_bar(s.vram),
+    }
+
+
+def smooth(prev, new, alpha=0.3):
+    return new if prev is None else prev + alpha * (new - prev)
+
+
+def hwmon(name):
+    for d in HWMON.iterdir():
+        if (d / "name").read_text().strip() == name:
+            return d
+    sys.exit(f"rgb-sysmon: no hwmon device named {name}")
+
+
+def ram_used():
+    info = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
+    return 1 - int(info["MemAvailable"].split()[0]) / int(info["MemTotal"].split()[0])
+
+
+class Sensors:
+    def __init__(self):
+        import pynvml
+
+        self.nvml = pynvml
+        pynvml.nvmlInit()
+        self.gpu = pynvml.nvmlDeviceGetHandleByIndex(0)
+        self.tctl = hwmon("k10temp") / "temp1_input"
+        self.energy_range = int((RAPL / "max_energy_range_uj").read_text())
+        self.energy, self.at = self._energy()
+
+    def _energy(self):
+        return int((RAPL / "energy_uj").read_text()), time.monotonic()
+
+    def read(self, watts_prev):
+        energy, at = self._energy()
+        cpu_w = (energy - self.energy) % self.energy_range / 1e6 / (at - self.at)
+        self.energy, self.at = energy, at
+        nv = self.nvml
+        vram = nv.nvmlDeviceGetMemoryInfo(self.gpu)
+        return Sample(
+            watts=smooth(watts_prev, cpu_w + nv.nvmlDeviceGetPowerUsage(self.gpu) / 1000),
+            cpu_c=int(self.tctl.read_text()) / 1000,
+            gpu_c=nv.nvmlDeviceGetTemperature(self.gpu, nv.NVML_TEMPERATURE_GPU),
+            ram=ram_used(),
+            vram=vram.used / vram.total,
+        )
+
+
+def asleep_s():
+    return time.clock_gettime(time.CLOCK_BOOTTIME) - time.clock_gettime(time.CLOCK_MONOTONIC)
+
+
+def connect():
+    from openrgb import OpenRGBClient
+    from openrgb.utils import DeviceType
+
+    # At login the server is still scanning hardware: first it refuses, then it lists no devices.
+    for _ in range(30):
+        try:
+            client = OpenRGBClient(*SDK, "rgb-sysmon")
+        except ConnectionRefusedError:
+            time.sleep(1)
+            continue
+        boards = client.get_devices_by_type(DeviceType.MOTHERBOARD)
+        sticks = client.get_devices_by_type(DeviceType.DRAM)
+        if boards and len(sticks) == 2:
+            return boards[0], sticks
+        client.disconnect()
+        time.sleep(1)
+    sys.exit("rgb-sysmon: OpenRGB server on %s:%d never showed the board and both RAM sticks" % SDK)
+
+
+def run():
+    from openrgb.utils import RGBColor
+
+    board, sticks = connect()
+    zones = {
+        "logo": board.zones[0],
+        "fans": board.zones[1],
+        "ram": sticks[0].zones[0],
+        "vram": sticks[1].zones[0],
+    }
+
+    def take_control():
+        for dev in (board, *sticks):
+            dev.set_mode("direct")
+
+    take_control()
+    sensors = Sensors()
+    sample, fresh_at, slept = None, time.monotonic(), asleep_s()
+    sent, tick = {}, 0
+    while True:
+        try:
+            sample = sensors.read(sample.watts if sample else None)
+            fresh_at = time.monotonic()
+        except (OSError, ValueError, sensors.nvml.NVMLError) as e:
+            print(f"rgb-sysmon: sensor read failed: {e}", file=sys.stderr)
+
+        # The Aura board can come back from suspend in Rainbow while OpenRGB still says Direct.
+        if asleep_s() - slept > 1:
+            slept = asleep_s()
+            take_control()
+            sent.clear()
+
+        frame = render(sample if time.monotonic() - fresh_at < STALE_S else None)
+        names = ("logo", "fans", "ram", "vram") if tick % RAM_EVERY == 0 else ("logo", "fans")
+        for name in names:
+            if frame[name] != sent.get(name):
+                zones[name].set_colors([RGBColor(*c) for c in frame[name]], fast=True)
+                sent[name] = frame[name]
+        tick += 1
+        time.sleep(TICK_S)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd")
+    r = sub.add_parser("render", help="print one frame as hex colors per zone")
+    r.add_argument("--watts", type=float, default=0)
+    r.add_argument("--cpu-c", type=float, default=0)
+    r.add_argument("--gpu-c", type=float, default=0)
+    r.add_argument("--ram", type=float, default=0)
+    r.add_argument("--vram", type=float, default=0)
+    r.add_argument("--stale", action="store_true")
+    args = p.parse_args()
+
+    if args.cmd != "render":
+        run()
+        return
+    s = None if args.stale else Sample(args.watts, args.cpu_c, args.gpu_c, args.ram, args.vram)
+    for name, colors in render(s).items():
+        print(name, " ".join(f"{r:02x}{g:02x}{b:02x}" for r, g, b in colors))
+
+
+if __name__ == "__main__":
+    main()
