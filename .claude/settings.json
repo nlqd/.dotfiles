@@ -24,6 +24,7 @@
       "mcp__claude_ai_Slack__slack_read_thread"
     ]
   },
+  "model": "opus",
   "hooks": {
     "SessionStart": [
       {
@@ -42,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "p=\"$(cat)\"; m=\"$(printf \"%s\" \"$p\" | jq -r \".message // \\\"Claude needs your attention\\\"\")\"; d=\"$(printf \"%s\" \"$p\" | jq -r \".cwd // empty\")\"; n=\"${d##*/}\"; t=\"✻ ${n:-Claude Code}\"; [ -n \"$TMUX\" ] && [ -n \"$TMUX_PANE\" ] && l=\"$(tmux display-message -p -t \"$TMUX_PANE\" \"#S:#I\" 2>/dev/null)\"; [ -n \"$l\" ] && t=\"$t · $l\"; notify-netcat \"$t\" \"$m\""
+            "command": "setsid --fork claude-noti >/dev/null 2>&1"
           }
         ]
       }
@@ -88,7 +89,8 @@
     "ast-grep@ast-grep-marketplace": true,
     "impeccable@impeccable": true,
     "academic-research-skills@academic-research-skills": true,
-    "cloudflare@cloudflare": true
+    "cloudflare@cloudflare": true,
+    "cc-plugin-you-should-know@builtin": true
   },
   "extraKnownMarketplaces": {
     "crit": {
@@ -124,6 +126,14 @@
   },
   "alwaysThinkingEnabled": true,
   "effortLevel": "xhigh",
+  "modelSettings": {
+    "claude-opus-5-5": {
+      "effortLevel": "high"
+    },
+    "claude-sonnet-5-5": {
+      "effortLevel": "medium"
+    }
+  },
   "tui": "fullscreen",
   "prefersReducedMotion": true,
   "autoDreamEnabled": true,
