@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Claude Code Notification hook: reads the hook JSON on stdin and shows a popup.
+# Clicking the popup opens a floating terminal on the tmux window Claude runs in.
+# Run it detached (setsid --fork) because it waits for the click until the popup closes.
+set -euo pipefail
+
+STAY_MS=60000
+
+payload=$(cat)
+message=$(jq --raw-output '.message // "Claude needs your attention"' <<<"$payload")
+project=$(jq --raw-output '(.cwd // empty) | split("/") | last' <<<"$payload")
+
+session='' index='' window_id=''
+if [[ -n ${TMUX_PANE:-} ]]; then
+  tmux_info=$(tmux display-message -p -t "$TMUX_PANE" '#S:#I:#{window_id}' 2>/dev/null) || tmux_info=''
+  IFS=: read -r session index window_id <<<"$tmux_info"
+fi
+label=${session:+$session:$index}
+
+title="✻ ${project:-Claude Code}${label:+ · $label}"
+
+notify_args=(--app-name=claude --expire-time="$STAY_MS")
+if [[ -n $label ]]; then
+  notify_args+=(--action=default=Open)
+fi
+
+clicked=$(notify-send "${notify_args[@]}" "$title" "$message")
+[[ $clicked == default ]] || exit 0
+
+# A grouped session gives the popup its own current window, so the real client
+# keeps showing whatever it was showing. destroy-unattached must be set after
+# attaching: on a session with no client, tmux kills it on the spot.
+open_float='tmux new-session -d -t "$1" -s "$2" &&
+  tmux select-window -t "$2:$3" &&
+  exec tmux attach-session -t "$2" \; set-option -t "$2" destroy-unattached on'
+
+exec env --unset=TMUX alacritty --class claude-float --title "claude $label" \
+  -e bash -c "$open_float" _ "$session" "claude-float-$$" "$window_id"

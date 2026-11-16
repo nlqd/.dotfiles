@@ -93,41 +93,11 @@ function gdiff() {
 }
 
 function sshaiws() {
-  (
-    while true; do
-      nc -l 9999 -d | while read -r message; do
-      [ -n "$message" ] && notify-send "SSH Notification" "$message"
-    done
-  done
-  ) &
-  local pid=$!
-
-  trap "kill $pid 2>/dev/null; wait $pid 2>/dev/null" EXIT
-
-  ssh aiws -L 3000:localhost:3000 -L 8000:localhost:8000 -R 9999:localhost:9999
-
-  trap - EXIT
-  kill $pid 2>/dev/null
-  wait $pid 2>/dev/null
+  ssh aiws -L 3000:localhost:3000 -L 8000:localhost:8000
 }
 
 function moshaiws() {
-  (
-    while true; do
-      nc -l 9999 -d | while read -r message; do
-      [ -n "$message" ] && notify-send "SSH Notification" "$message"
-    done
-  done
-  ) &
-  local pid=$!
-
-  trap "kill $pid 2>/dev/null; wait $pid 2>/dev/null" EXIT
-
-  mosh aiws --ssh="ssh -L 3000:localhost:3000 -L 8000:localhost:8000 -R 9999:localhost:9999"
-
-  trap - EXIT
-  kill $pid 2>/dev/null
-  wait $pid 2>/dev/null
+  mosh aiws --ssh="ssh -L 3000:localhost:3000 -L 8000:localhost:8000"
 }
 
 function hcloud-edit-zone() {
