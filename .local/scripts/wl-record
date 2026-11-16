@@ -19,7 +19,9 @@ start() {
 }
 
 end() {
-    kill -INT $(cat /tmp/recpid) && rm -f /tmp/recpid
+    # The recorder may already be gone; clear the flag anyway or REC sticks forever.
+    kill -INT "$(cat /tmp/recpid)" 2>/dev/null
+    rm -f /tmp/recpid
     notify-send -t 1000 "Recording stopped"
 }
 
