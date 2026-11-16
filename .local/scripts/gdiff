@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Diff the working tree against its merge-base with BRANCH. BRANCH defaults to
+# the branch this one was created from, read from the reflog. Extra args go to
+# git diff.
+set -euo pipefail
+
+if (( $# > 0 )) && [[ "$1" != -* ]]; then
+  branch=$1
+  shift
+else
+  current=$(git branch --show-current)
+  branch=$(git reflog show "$current" --format='%gs' | tail --lines=1 | sed 's@branch: Created from origin/@@')
+fi
+
+exec git diff --ignore-all-space "$(git merge-base @ "$branch")" --stat --patch "$@"

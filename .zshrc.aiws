@@ -1,6 +1,3 @@
-autoload -U compinit
-compinit -i
-
 plugins=(git systemd)
 
 ### envs
@@ -19,23 +16,45 @@ autoload -Uz add-zsh-hook
 _history_skip_long() { (( ${#1} <= 500 )) || return 2 }
 add-zsh-hook zshaddhistory _history_skip_long
 
-export EDITOR=nvim
+# PATH, EDITOR and DEV_HOME live in ~/.zshenv. Only interactive settings here.
 export MANPAGER='nvim +Man!'
+export FZF_DEFAULT_OPTS="--layout=reverse"
 
-PATH="$HOME/.asdf/shims:$PATH"
-PATH="$HOME/.local/bin/:$PATH"
-PATH="$HOME/.local/bin/statusbar-lukesmithxyz/:$PATH"
-PATH="$HOME/.local/scripts:$PATH"
-PATH="/usr/local/go/bin:$PATH"
-PATH="$HOME/go/bin:$PATH"
-PATH="$HOME/.foundry/bin:$PATH"
-PATH="$HOME/flutter/bin:$PATH"
-PATH="$HOME/.pub-cache/bin:$PATH"
-# PATH="$HOME/Downloads/zips/platform-tools:$PATH"
+# `<tool> completion zsh` costs 20-30ms per tool at every startup. Cache each
+# output as an fpath file (compinit autoloads it lazily). The cache is stamped
+# with the binary's own mtime and regenerated whenever the two differ: packages
+# and tarballs keep old build-time mtimes, so a plain "newer than" test misses
+# upgrades. Must run before oh-my-zsh's compinit.
+zmodload -F zsh/stat b:zstat
+zsh_completions_dir="$HOME/.cache/zsh/completions"
+[[ -d "$zsh_completions_dir" ]] || mkdir -p "$zsh_completions_dir"
+fpath=("$zsh_completions_dir" $fpath)
 
-export PATH
+function cache_completion() {
+  local name="$1"
+  local bin="${commands[$name]}"
+  local cache="$zsh_completions_dir/_$name"
+  local tmp="$cache.$$"
+  local -a bin_mtime cache_mtime
 
-export DEV_HOME="$HOME/dev"
+  [[ -n "$bin" ]] || return 0
+  zstat -A bin_mtime +mtime "$bin"
+  zstat -A cache_mtime +mtime "$cache" 2>/dev/null
+  [[ "$bin_mtime" == "$cache_mtime" ]] && return 0
+
+  # Build aside and rename, so a parallel shell's compinit never reads a partial file.
+  # A failed or empty run keeps the old cache and retries on the next start.
+  "$bin" "${@:2}" > "$tmp" 2>/dev/null && [[ -s "$tmp" ]] \
+    && touch --reference="$bin" "$tmp" \
+    && command mv -f "$tmp" "$cache" \
+    || command rm -f "$tmp"
+}
+
+cache_completion gh completion --shell zsh
+cache_completion kubectl completion zsh
+cache_completion helm completion zsh
+cache_completion hcloud completion zsh
+cache_completion asdf completion zsh
 
 alias hr='heroku'
 alias flatpak-flutter='docker run --rm -v "$PWD":/usr/src/flatpak -u `id -u`:`id -g` theappgineer/flatpak-flutter:latest'
@@ -46,7 +65,7 @@ alias v="nvim"
 alias vv="nvim"
 alias vg="nvim +G"
 alias ez='nvim ~/.zshrc'
-alias sz='source ~/.zshrc'
+alias sz='source ~/.zshenv && source ~/.zshrc'
 alias ck='nvim ~/.sdai/cookies'
 alias tma='tmux -2 a'
 alias mkdir='mkdir -v'
@@ -92,82 +111,6 @@ function rm() {
   command rm "$@"
 }
 
-# NOTE: completion would be cool and avoid these things completely
-function gdiff() {
-  local current
-  local guess
-  local branch
-
-  current=$(git branch --show-current)
-  guess=$(git reflog show "$current" --format='%gs' | tail -1 | sed 's@branch: Created from origin/@@')
-  branch=${1:-$guess}
-  [[ "$branch" != "$guess" ]] && shift
-  git diff -w $(git merge-base @ $branch) --stat -p "$@"
-}
-
-# usage: pn [client | api | domain] command
-function pn() {
-  if [[ $# -eq 0 ]]; then
-    pnpm
-    return
-  fi
-
-  case "$1" in
-    cl | client)
-      shift
-      pnpm -F client "$@"
-      return
-      ;;
-    a | api)
-      shift
-      pnpm -F api "$@"
-      return
-      ;;
-    d | domain)
-      shift
-      pnpm -F domain "$@"
-      return
-      ;;
-
-    dev)
-      fuser -k 3000/tcp 8000/tcp 2>/dev/null
-      pnpm dev "$@"
-      # To summarize what was done to make port 3001 work:
-      # 1. Ran pnpm codegen
-      # 2. Backend only allowed localhost:3000. Added a Vite proxy so the browser calls :3001 and Vite forwards to :8000
-      # 3. Updated .env: VITE_API_BASE_URL=http://localhost:3001/graphql + VITE_API_PROXY_TARGET=http://localhost:8000
-      return
-      ;;
-
-    start-cc-dev)
-      mkdir rules/
-      ln -s ~/dev/datum-monorepo/rules/ rules
-      ln -s ~/dev/datum-monorepo/sgconfig.yml sgconfig.yml
-      ln -s ~/dev/datum-monorepo/.nvim.lua .nvim.lua
-      ln -s ~/dev/datum-monorepo/.mcp.json .mcp.json
-      ln -s ~/dev/datum-monorepo/.claude/CLAUDE.md .claude/
-      ln -s ~/dev/datum-monorepo/.claude/settings.local.json .claude/
-      ln -s ~/dev/datum-monorepo/.claude/commands/master-worktree-init.md .claude/commands/master-worktree-init.md
-      ln -s ~/dev/datum-monorepo/.claude/commands/start.md .claude/commands/start.md
-      ln -s ~/dev/datum-monorepo/.claude/commands/start-new-day.md .claude/commands/start-new-day.md
-      ln -s ~/dev/datum-monorepo/.claude/commands/rodney-datum.md .claude/commands/rodney-datum.md
-      ln -s ~/dev/datum-monorepo/infrastructure/live/.terraform/ infrastructure/live/.terraform
-      pn i
-      pn -F './apps/*' extract-env-manifest
-      pn -F env generate-env development
-      pn -F env generate-env test
-      pn d build
-      pn codegen
-      return
-      ;;
-  esac
-
-  pnpm "$@"
-}
-
-. "$HOME/.cargo/env"
-
-export FZF_DEFAULT_OPTS="--layout=reverse"
 ### endenvs
 
 source $ZSH/oh-my-zsh.sh
@@ -217,8 +160,11 @@ if [[ -z "$__osc133_done" ]]; then
   preexec_functions+=(__osc133_c)
 fi
 
-eval "$(gh completion --shell zsh)"
+# tmux.service starts at boot (linger), so restored shells predate the compositor.
+# tmux refreshes WAYLAND_DISPLAY in the session env on attach; pull it into this shell.
+if [[ -n $TMUX ]]; then
+  _tmux_refresh_wayland() { eval "$(tmux show-environment -s WAYLAND_DISPLAY 2>/dev/null)" }
+  preexec_functions+=(_tmux_refresh_wayland)
+fi
+
 complete -C '/usr/local/bin/aws_completer' aws
-eval "$(kubectl completion zsh)"
-eval "$(helm completion zsh)"
-eval "$(hcloud completion zsh)"
