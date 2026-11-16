@@ -1,0 +1,344 @@
+#!/usr/bin/env python3
+"""humanize - rewrite the prose of a document with a local humanizer model.
+
+A filter: text in, text out. Only prose paragraphs go to the model; code fences, headings,
+tables, lists, quotes, html and front matter pass through untouched. Every rewrite must keep
+the paragraph's numbers, URLs, `code` spans and names, otherwise another candidate is tried
+and, failing that, the original paragraph is kept.
+
+  humanize draft.md              rewritten text to stdout
+  humanize < draft.md > out.md
+  humanize --diff draft.md       word-level diff instead of the text
+  humanize -i draft.md           rewrite in place, keeping draft.md.bak
+  :%!humanize                    in nvim, also on a visual selection
+
+The model is gohumanize-open-humanizer (a Qwen3-4B fine-tune). On CPU by default, since the GPU
+is normally held by the big model; --gpu when it is free.
+"""
+import argparse
+import atexit
+import difflib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+DEFAULT_MODEL = Path.home() / "models" / "gohumanize-open-humanizer-Q8_0.gguf"
+DEFAULT_PORT = 8083
+MIN_WORDS = 8
+CHANGED_BELOW = 0.95   # word-similarity under this counts as a real rewrite
+GOOD_ENOUGH = 0.80     # stop trying more candidates once one is this different
+
+# The system prompt the model was trained with (from its model card).
+SYSTEM = ("Rewrite the following text so that it reads as if a person wrote it: varied sentence "
+          "length, concrete wording, natural rhythm, no filler transitions. Keep the meaning, the "
+          "facts and the order of ideas. Return only the rewritten text.")
+
+
+def die(msg, code=1):
+    print("humanize: %s" % msg, file=sys.stderr)
+    sys.exit(code)
+
+
+# ---------- splitting a document into prose and everything else ----------
+
+FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
+FIELD = re.compile(r"^[A-Za-z][\w *_-]{0,24}:\s")
+LIST_ITEM = re.compile(r"^\s*([-*+•‣◦▪]|\d+[.)])\s")
+KEEP_START = ("#", "|", ">", "<", "![", "---", "***", "___")
+
+
+def classify(lines):
+    """A paragraph is prose unless it looks like structure, or is too short to be worth rewriting."""
+    first = lines[0]
+    stripped = first.lstrip()
+    if first.startswith(("    ", "\t")) or stripped.startswith(KEEP_START):
+        return "keep"
+    if LIST_ITEM.match(first) or re.match(r"^\[[^\]]+\]:\s", stripped):
+        return "keep"
+    if all(FIELD.match(line) for line in lines):  # "Date: ..." / "Status: ..." header lines
+        return "keep"
+    if len(" ".join(lines).split()) < MIN_WORDS:
+        return "keep"
+    return "prose"
+
+
+def split_blocks(text):
+    """Return [(kind, text)] covering the document exactly; kind is 'prose' or 'keep'."""
+    lines = text.splitlines(keepends=True)
+    blocks, para, i = [], [], 0
+
+    def flush():
+        if para:
+            blocks.append((classify(para), "".join(para)))
+            para.clear()
+
+    if lines and lines[0].strip() == "---":
+        for j in range(1, len(lines)):
+            if lines[j].strip() in ("---", "..."):
+                blocks.append(("keep", "".join(lines[: j + 1])))
+                i = j + 1
+                break
+    while i < len(lines):
+        line = lines[i]
+        m = FENCE.match(line)
+        if m:
+            flush()
+            ch, width = m.group(1)[0], len(m.group(1))
+            j = i + 1
+            while j < len(lines) and not re.match(r"^\s*%s{%d,}\s*$" % (re.escape(ch), width), lines[j]):
+                j += 1
+            blocks.append(("keep", "".join(lines[i : j + 1])))
+            i = j + 1
+            continue
+        if line.strip() == "":
+            flush()
+            blocks.append(("keep", line))
+        else:
+            para.append(line)
+        i += 1
+    flush()
+    return blocks
+
+
+# ---------- the fact check ----------
+
+NUM = re.compile(r"\d[\d,]*(?:\.\d+)?")
+URL = re.compile(r"https?://[^\s)>\]]+")
+CODE = re.compile(r"`[^`\n]+`")
+ACRONYM_OR_ID = re.compile(r"\b(?:[A-Z]{2,}[A-Za-z0-9]*|[A-Za-z]+\d+[A-Za-z0-9]*)\b")
+CAPITALISED = re.compile(r"\b[A-Z][a-z0-9]+\b")
+
+
+def norm_num(n):
+    return n.replace(",", "").rstrip(".")
+
+
+def names(text):
+    """Capitalised words that are not just sentence starters, plus acronyms and identifiers like f16."""
+    found = set(ACRONYM_OR_ID.findall(text))
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        words = sentence.split()
+        for w in words[1:]:
+            found.update(CAPITALISED.findall(w))
+    return found
+
+
+def missing_facts(src, out):
+    """Everything in src that must survive but is absent from out."""
+    gone = []
+    out_nums = {norm_num(n) for n in NUM.findall(out)}
+    for u in set(URL.findall(src)):
+        if u.rstrip(".,;:") not in out:
+            gone.append(u)
+    for c in set(CODE.findall(src)):
+        if c not in out:
+            gone.append(c)
+    for n in {norm_num(n) for n in NUM.findall(src)}:
+        if n not in out_nums:
+            gone.append(n)
+    low = out.lower()
+    for name in names(src):
+        if not re.search(r"\b%s\b" % re.escape(name.lower()), low):
+            gone.append(name)
+    return gone
+
+
+CURLY = str.maketrans({"\u2019": "'", "\u2018": "'", "\u201c": '"', "\u201d": '"'})
+
+
+def straighten(src, out):
+    """The model likes typographic quotes; undo that unless the source itself used them."""
+    return out if any(ch in src for ch in "\u2019\u2018\u201c\u201d") else out.translate(CURLY)
+
+
+def markup_intact(src, out):
+    """Emphasis markers and links must come through; the model tends to strip them."""
+    for marker in ("**", "__", "](", "!["):
+        if src.count(marker) != out.count(marker):
+            return False
+    return True
+
+
+def similarity(a, b):
+    return difflib.SequenceMatcher(None, a.split(), b.split()).ratio()
+
+
+def acceptable(src, out):
+    """Return (ok, why_not)."""
+    if not out.strip():
+        return False, "empty"
+    ratio = len(out.split()) / max(len(src.split()), 1)
+    if not 0.35 <= ratio <= 1.8:
+        return False, "length"
+    if re.match(r"^\s*(here is|here's|sure|certainly)\b", out, re.I):
+        return False, "preamble"
+    if out.lstrip()[0] in "\"“'" and src.lstrip()[0] not in "\"“'":
+        return False, "wrapped in quotes"  # the model sometimes turns a paragraph into a quotation
+    if not markup_intact(src, out):
+        return False, "markdown emphasis or links changed"
+    gone = missing_facts(src, out)
+    if gone:
+        return False, "lost " + ", ".join(sorted(gone)[:4])
+    return True, ""
+
+
+# ---------- talking to the model ----------
+
+def healthy(url):
+    try:
+        with urllib.request.urlopen(url + "/health", timeout=2) as r:
+            return b"ok" in r.read()
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+def ensure_server(args):
+    """Return (base_url, process_we_started_or_None)."""
+    url = args.server or "http://127.0.0.1:%d" % args.port
+    if healthy(url):
+        return url, None
+    if args.server:
+        die("no server answering at %s" % args.server, 3)
+    if not Path(args.model).is_file():
+        die("model not found: %s" % args.model, 3)
+    if not shutil.which("llama-server"):
+        die("llama-server is not on PATH", 3)
+    cmd = ["llama-server", "--model", str(args.model), "--ctx-size", "4096", "--jinja", "-np", "1",
+           "--host", "127.0.0.1", "--port", str(args.port)]
+    cmd += ["--n-gpu-layers", "all", "--flash-attn", "on"] if args.gpu else ["--n-gpu-layers", "0"]
+    log = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "humanize.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.Popen(cmd, stdout=open(log, "w"), stderr=subprocess.STDOUT, start_new_session=True)
+    if not args.keep:
+        atexit.register(lambda: (proc.terminate(), proc.wait(timeout=20)))
+    for _ in range(90):
+        if proc.poll() is not None:
+            die("llama-server exited; see %s" % log, 3)
+        if healthy(url):
+            return url, proc
+        time.sleep(1)
+    die("llama-server did not become ready in 90s; see %s" % log, 3)
+
+
+def generate(url, paragraph, temperature):
+    body = {"messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": paragraph}],
+            "temperature": temperature, "top_p": 0.9, "top_k": 0,
+            "max_tokens": min(1024, max(128, len(paragraph.split()) * 3)),
+            "chat_template_kwargs": {"enable_thinking": False}}
+    req = urllib.request.Request(url + "/v1/chat/completions", json.dumps(body).encode(),
+                                 {"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=600) as r:
+        return json.load(r)["choices"][0]["message"]["content"].strip()
+
+
+def rewrite_paragraph(url, src, tries, temperature):
+    """Return (text, status) where status is 'rewritten', 'unchanged' or 'kept: reason'."""
+    best, best_ratio, reasons = None, 2.0, []  # above any real similarity, so an identical rewrite still counts
+    for _ in range(tries):
+        try:
+            cand = generate(url, src, temperature)
+        except (urllib.error.URLError, OSError, KeyError, ValueError) as e:
+            reasons.append("model error: %s" % e)
+            continue
+        ok, why = acceptable(src, cand)
+        if not ok:
+            reasons.append(why)
+            continue
+        ratio = similarity(src, cand)
+        if ratio < best_ratio:
+            best, best_ratio = cand, ratio
+        if best_ratio <= GOOD_ENOUGH:
+            break
+    if best is not None and best_ratio < CHANGED_BELOW:
+        return straighten(src, best), "rewritten"
+    if best is not None:
+        return src, "unchanged"
+    return src, "kept: " + (reasons[-1] if reasons else "no candidate")
+
+
+# ---------- driving a whole document ----------
+
+def humanize(text, url, args):
+    out, stats = [], {"rewritten": 0, "unchanged": 0, "kept": 0}
+    prose = [b for b in split_blocks(text) if b[0] == "prose"]
+    n = 0
+    for kind, block in split_blocks(text):
+        if kind != "prose":
+            out.append(block)
+            continue
+        n += 1
+        ending = "\n" if block.endswith("\n") else ""
+        src = " ".join(line.strip() for line in block.splitlines())
+        new, status = rewrite_paragraph(url, src, args.tries, args.temperature)
+        if status == "rewritten":
+            out.append(new + ending)
+            stats["rewritten"] += 1
+        else:
+            out.append(block)
+            stats["unchanged" if status == "unchanged" else "kept"] += 1
+        if args.verbose:
+            print("[%d/%d] %s" % (n, len(prose), status), file=sys.stderr)
+        if args.report:
+            args.report.write(json.dumps({"n": n, "status": status, "before": src, "after": new}, ensure_ascii=False) + "\n")
+    return "".join(out), stats
+
+
+def show_diff(before, after):
+    with tempfile.TemporaryDirectory() as d:
+        a, b = Path(d, "before"), Path(d, "after")
+        a.write_text(before)
+        b.write_text(after)
+        subprocess.call(["git", "--no-pager", "diff", "--no-index", "--word-diff=color", "--", str(a), str(b)])
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("file", nargs="?", help="document to rewrite; stdin when omitted")
+    p.add_argument("-i", "--in-place", action="store_true", help="rewrite FILE, keeping FILE.bak")
+    p.add_argument("--diff", action="store_true", help="show a word diff instead of the text")
+    p.add_argument("--tries", type=int, default=3, help="candidates per paragraph (default 3)")
+    p.add_argument("--temperature", type=float, default=0.9)
+    p.add_argument("--gpu", action="store_true", help="run the model on the GPU (default: CPU)")
+    p.add_argument("--server", help="use an already running server at this URL")
+    p.add_argument("--port", type=int, default=DEFAULT_PORT)
+    p.add_argument("--model", default=str(DEFAULT_MODEL))
+    p.add_argument("--keep", action="store_true", help="leave a server we started running")
+    p.add_argument("--report", type=argparse.FileType("w"), metavar="FILE",
+                   help="write one JSON line per paragraph: status, before, after")
+    p.add_argument("-v", "--verbose", action="store_true", help="one status line per paragraph")
+    p.add_argument("-q", "--quiet", action="store_true", help="no summary on stderr")
+    args = p.parse_args()
+
+    if args.in_place and not args.file:
+        die("-i needs a FILE")
+    text = Path(args.file).read_text() if args.file else sys.stdin.read()
+    if not any(kind == "prose" for kind, _ in split_blocks(text)):
+        sys.stdout.write(text)
+        return
+    url, _proc = ensure_server(args)
+    result, stats = humanize(text, url, args)
+
+    if args.diff:
+        show_diff(text, result)
+    elif args.in_place:
+        shutil.copy2(args.file, args.file + ".bak")
+        tmp = args.file + ".tmp"
+        Path(tmp).write_text(result)
+        os.replace(tmp, args.file)
+    else:
+        sys.stdout.write(result)
+    if not args.quiet:
+        print("humanize: %d rewritten, %d unchanged, %d kept by the fact check" % (
+            stats["rewritten"], stats["unchanged"], stats["kept"]), file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

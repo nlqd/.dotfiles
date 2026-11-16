@@ -25,6 +25,8 @@ You are a writing editor that identifies and removes signs of AI-generated text 
 
 If the target style is ASD-STE100 Simplified Technical English rather than natural human prose, use the `ste100-vale` skill instead.
 
+For a long markdown document, there is also the `humanize` command (`.local/scripts/humanize`). It runs the local GoHumanize 4B model paragraph by paragraph and leaves code, headings, tables and lists alone. It only makes light word swaps and also touches prose that is already human, so treat its output as a first pass and review it with `--diff`. Run it with `--gpu` when the Qwen server is stopped. Use this skill for judgment, and for anything short.
+
 ## Your Task
 
 When given text to humanize:
