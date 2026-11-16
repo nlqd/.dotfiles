@@ -92,11 +92,10 @@ When multiple valid approaches exist, choose based on:
    that you want. `fzf` has a --filter mode where it can fuzzily filter the
    filename for example. Also I have `rg` on my system which is a faster grep.
 - Only commit what you changed
-- Also look at @.claude/CLAUDE.md
 - Also, use long flags in bash commands so I know what ur doing
 - When in investigative/explorative/debugging session, use liberally the AGENTS available to you.
   For example, when debugging, ask 2 agents to argue for and against you.
-- Try to be minimal in markdown. Don't bold things out of control. Bold should at most be 1% of the total text only. Same thing with italics.
+- Keep markdown plain. Use bold only where a reader would otherwise miss the point, and italics rarely.
 - When you see a 'You have reached weekly limit', and you are still able to work,
    that means that you have just been reset and you should check whatever Monitor or long running process that you had, and re-arm them.
 
@@ -137,8 +136,7 @@ In PR description, use $\rightarrow$ only when it actually means a transition or
 PR descriptions should read smoothly to a human reviewer. Three rules:
 - Default to flowing prose over dense bullet lists. Bullets are for genuinely list-shaped content (test plans, file inventories)
 - Code spans (`like_this`) only for real identifiers: file paths, function/symbol names, exact strings being matched. Don't use them for emphasis or topic markers.
-- A comma or colon is strongly suggested to be used in place of emdash. Try to maintain a ratio of 100 comma/colon/other symbols to 1 emdash.
-- But, colon should not be overused as well.
+- Prefer a comma over an em dash; an em dash in a PR body should be rare. Don't swap in colons everywhere either.
 
 ### Other QOL improvement
 
