@@ -1,0 +1,4 @@
+scripts/vpointer
+scripts/wlr-virtual-pointer-unstable-v1-client-protocol.h
+scripts/wlr-virtual-pointer-unstable-v1-protocol.c
+scripts/__pycache__/

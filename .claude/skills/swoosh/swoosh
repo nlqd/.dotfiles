@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Record a scripted demo on a throwaway headless sway and render it Screen-Studio style.
+#
+#   swoosh build                 compile the virtual pointer (once)
+#   swoosh record TOUR.py DIR    run TOUR inside headless sway -> DIR/raw.mp4 + DIR/cursor.jsonl
+#   swoosh render DIR [OUT.mp4]  DIR -> polished 1920x1080 60 fps video (default DIR/demo.mp4)
+#   swoosh sheet DIR [VIDEO]     contact sheet at every hover/click/typing/scroll -> DIR/sheet.png
+#   swoosh test                  renderer regression test
+#   swoosh help [TOPIC]          tour (start here) | internals | porting
+#
+# Never publish a video without asking the user where it should go.
+set -euo pipefail
+
+skill=$(dirname "$(readlink --canonicalize "${BASH_SOURCE[0]}")")
+scripts=$skill/scripts
+
+# 2880x1620 at scale 1.5 is a 1920x1080 desktop with enough pixels for a sharp 1.8x
+# zoom. 4K60 drops frames on this box, and 30 fps makes scrolls judder; this size
+# holds a true 60 fps with the AMD GPU encoding.
+SIZE=2880x1620
+SCALE=1.5
+FPS=60
+
+usage() { sed --quiet '2,11s/^# \{0,1\}//p' "$0"; exit "${1:-2}"; }
+
+help() {
+  local topic=${1:-}
+  if [[ -z $topic || ! -f $skill/docs/$topic.md ]]; then
+    [[ -z $topic ]] || echo "swoosh: no help topic '$topic'" >&2
+    echo "swoosh help TOPIC, where TOPIC is one of:"
+    for doc in "$skill"/docs/*.md; do
+      printf '  %-10s %s\n' "$(basename "$doc" .md)" "$(sed --quiet '1s/^# //p' "$doc")"
+    done
+    [[ -z $topic ]] || exit 2
+    return
+  fi
+  echo "(paths are relative to $skill)"
+  echo
+  cat "$skill/docs/$topic.md"
+}
+
+build() (
+  cd "$scripts"
+  wayland-scanner client-header wlr-virtual-pointer-unstable-v1.xml wlr-virtual-pointer-unstable-v1-client-protocol.h
+  wayland-scanner private-code wlr-virtual-pointer-unstable-v1.xml wlr-virtual-pointer-unstable-v1-protocol.c
+  cc -O2 -Wall -Wextra -Wno-unused-parameter -o vpointer vpointer.c \
+    wlr-virtual-pointer-unstable-v1-protocol.c $(pkg-config --cflags --libs wayland-client)
+  echo "built $scripts/vpointer"
+)
+
+record() {
+  local tour out
+  [[ -f $1 ]] || { echo "swoosh: no tour file $1" >&2; exit 2; }
+  tour=$(readlink --canonicalize "$1")
+  mkdir --parents "$2"
+  out=$(readlink --canonicalize "$2")
+  [[ -x $scripts/vpointer ]] || build
+  SWOOSH_SCALE=$SCALE SWOOSH_FPS=$FPS PYTHONPATH="$scripts" \
+    "$scripts/headless-sway" --size "$SIZE" --scale "$SCALE" --refresh "$FPS" -- \
+    uv run --quiet "$tour" "$out"
+}
+
+render() {
+  local dir=$1 out=${2:-$1/demo.mp4}
+  uv run --quiet "$scripts/render.py" "$dir/raw.mp4" "$dir/cursor.jsonl" "$out" --src-scale "$SCALE"
+  echo "$out"
+}
+
+sheet() {
+  local dir=$1 video=${2:-$1/demo.mp4}
+  uv run --quiet "$scripts/render.py" "$dir/raw.mp4" "$dir/cursor.jsonl" "$video" --sheet "$dir/sheet.png"
+  echo "$dir/sheet.png"
+}
+
+case ${1:-} in
+  build) build ;;
+  record) [[ $# -eq 3 ]] || usage; record "$2" "$3" ;;
+  render) [[ $# -ge 2 ]] || usage; render "$2" "${3:-}" ;;
+  sheet) [[ $# -ge 2 ]] || usage; sheet "$2" "${3:-}" ;;
+  test) uv run --quiet "$scripts/test_render.py" ;;
+  help) help "${2:-}" ;;
+  ""|-h|--help) usage 0 ;;
+  *) usage ;;
+esac

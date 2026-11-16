@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Settings</title>
+<style>
+  body { margin: 0; font: 16px/1.4 system-ui, sans-serif; background: #f6f7fb; color: #1d2433; }
+  h1 { position: absolute; left: 40px; top: 30px; margin: 0; font-size: 26px; }
+  label { position: absolute; left: 40px; font-size: 13px; color: #5a6275; }
+  #name { position: absolute; left: 40px; top: 120px; width: 340px; height: 40px; padding: 0 10px;
+          border: 1px solid #c7ccd8; border-radius: 8px; font-size: 16px; background: white; }
+  #name:focus { outline: 2px solid #4c6ef5; border-color: transparent; }
+  .toggle { position: absolute; left: 40px; top: 200px; width: 60px; height: 32px; border-radius: 16px;
+            background: #c7ccd8; cursor: pointer; transition: background .2s; }
+  .toggle::after { content: ""; position: absolute; left: 4px; top: 4px; width: 24px; height: 24px;
+                   border-radius: 50%; background: white; transition: left .2s; }
+  .toggle.on { background: #4c6ef5; }
+  .toggle.on::after { left: 32px; }
+  #save { position: absolute; left: 40px; top: 270px; width: 140px; height: 44px; border: 0;
+          border-radius: 8px; background: #1d2433; color: white; font-size: 16px; cursor: pointer; }
+  #toast { position: absolute; left: 40px; top: 340px; padding: 10px 16px; border-radius: 8px;
+           background: #2b8a3e; color: white; opacity: 0; transition: opacity .3s; }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+  <h1>Workspace settings</h1>
+  <label style="top: 96px">Display name</label>
+  <input id="name" autocomplete="off">
+  <label style="top: 176px">Dark mode</label>
+  <div class="toggle" id="toggle"></div>
+  <button id="save">Save</button>
+  <div id="toast">Saved</div>
+<script>
+  toggle.onclick = () => toggle.classList.toggle("on");
+  save.onclick = () => {
+    toast.textContent = `Saved "${document.getElementById("name").value}"`;
+    toast.classList.add("show");
+    fetch(`save?name=${encodeURIComponent(document.getElementById("name").value)}`).catch(() => {});
+  };
+</script>
+</body>
+</html>

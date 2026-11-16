@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Run a command inside a throwaway headless sway, then tear it down.
+# Usage: headless-sway [--size WxH] [--scale N] [--refresh HZ] -- command args...
+# --size is the output mode in physical pixels and --scale the output scale, so
+# 2880x1620 at 1.5 is a 1920x1080 logical desktop with sharper pixels.
+# Every cursor image is transparent: the renderer draws its own cursor from the
+# telemetry, and one baked into the capture would show twice.
+# The command gets WAYLAND_DISPLAY and SWAYSOCK of the headless instance.
+set -euo pipefail
+
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+size=1920x1080
+scale=1
+refresh=60
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --size) size=$2; shift 2 ;;
+    --scale) scale=$2; shift 2 ;;
+    --refresh) refresh=$2; shift 2 ;;
+    --) shift; break ;;
+    *) echo "headless-sway: unknown arg $1" >&2; exit 2 ;;
+  esac
+done
+[[ $# -gt 0 ]] || { echo "headless-sway: no command given" >&2; exit 2; }
+
+work=$(mktemp --directory --tmpdir headless-sway.XXXXXX)
+trap 'rm --recursive --force "$work"' EXIT
+
+python3 -I "$here/xcursor.py" "$work/icons"
+
+{
+  printf 'cd %q\n' "$PWD"
+  printf '%q ' "$@"
+  printf '> %q 2>&1\necho $? > %q\nswaymsg exit\n' "$work/log" "$work/rc"
+} > "$work/run"
+
+cat > "$work/sway.conf" <<EOF
+output HEADLESS-1 mode ${size}@${refresh}Hz scale ${scale} bg #1e1e2e solid_color
+seat seat0 xcursor_theme invisible 24
+default_border pixel 2
+gaps inner 12
+exec bash $work/run
+EOF
+
+# A separate D-Bus session keeps any portal this instance starts away from the
+# user's real one. The dedicated --config keeps the user's sway config (which
+# restarts the systemd portals) from running here. XCURSOR_* reach clients that
+# draw their own cursor instead of asking the compositor via cursor-shape-v1.
+env --unset=WAYLAND_DISPLAY --unset=DISPLAY --unset=SWAYSOCK \
+  WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_HEADLESS_OUTPUTS=1 \
+  WLR_RENDERER=gles2 WLR_RENDER_DRM_DEVICE=/dev/dri/renderD128 \
+  XDG_CURRENT_DESKTOP=sway-demo:sway \
+  XCURSOR_THEME=invisible XCURSOR_SIZE=24 XCURSOR_PATH="$work/icons:/usr/share/icons" \
+  dbus-run-session -- sway --config "$work/sway.conf" > "$work/sway.log" 2>&1 || true
+
+cat "$work/log" 2>/dev/null || true
+if [[ ! -f "$work/rc" ]]; then
+  echo "headless-sway: command never finished; sway log tail:" >&2
+  tail --lines=30 "$work/sway.log" >&2
+  exit 1
+fi
+exit "$(cat "$work/rc")"
