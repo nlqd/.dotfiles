@@ -11,6 +11,14 @@ export KEYTIMEOUT=1
 HISTSIZE=999999999
 SAVEHIST=$HISTSIZE
 
+# Agents paste long commands into tmux panes (base64 blobs, heredocs, curl payloads)
+# and sometimes forget the leading space. 500 chars sits above the 99th percentile
+# of this history (384); what's longer is almost all agent output. Return 2 keeps
+# the line in this shell's history but never writes it to $HISTFILE.
+autoload -Uz add-zsh-hook
+_history_skip_long() { (( ${#1} <= 500 )) || return 2 }
+add-zsh-hook zshaddhistory _history_skip_long
+
 export EDITOR=nvim
 export MANPAGER='nvim +Man!'
 
