@@ -27,3 +27,4 @@
 .config/tmux/resurrect/
 .claude/skills/synced
 /infra/
+/ansible/

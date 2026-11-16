@@ -1,0 +1,2 @@
+# Let btop read RAPL energy counters for CPU power draw (root-only since 5.10, CVE-2020-8694).
+ACTION=="add", SUBSYSTEM=="powercap", RUN+="/bin/chmod o+r /sys%p/energy_uj"
