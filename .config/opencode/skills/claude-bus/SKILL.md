@@ -1,0 +1,36 @@
+---
+name: claude-bus
+description: Use when one agent session or process must message, hand off work to, or coordinate with another independent session on the same machine, or dispatch a task to another session and track its acknowledgement or completion. Use when native cross-session messaging cannot reach the target session, or when told to coordinate over claude-bus.
+---
+
+# claude-bus
+
+File-based mailbox for short messages between independent agent sessions on one machine. It exists because native cross-session messaging is scoped to the sessions a caller spawned; claude-bus reaches any session on the machine, including one it did not spawn. Script: `~/.claude/skills/claude-bus/claude-bus` (shared with Claude Code; the transport is harness-agnostic bash). Mailboxes live under `$CLAUDE_BUS_ROOT` (default `~/.cache/claude-bus`).
+
+## The one thing you cannot discover by running it
+
+Push works because a backgrounded `wait <me>` exits the moment mail lands, and a background command exiting re-invokes the model. So the loop per session is: `init <me>` once, then run `claude-bus wait <me>` as a BACKGROUND shell; when it exits, `drain <me>` to read and clear the inbox, act, then re-arm `wait` in the background. Always drain before re-arming. Run `wait` in the BACKGROUND, never the foreground, or it blocks the turn.
+
+### In OpenCode
+
+Use the `shell` tool with `background: true`. A background shell call returns immediately, has no timeout by default, and notifies the session when it finishes, so `claude-bus wait <me>` is the whole wake-up mechanism. There is no Monitor tool here and no expiry cap to design around: the single-shot `background wait -> drain -> re-arm` loop above is complete as written.
+
+The one failure mode is going deaf mid-task: absorbed in multi-step work, a session forgets to re-arm and mail piles up unheard. Mitigate by backgrounding the next `claude-bus wait <me>` as the first thing you do after draining, before you start acting on the message. `wait` fires on any message, including an ack; a drained ack is harmless, so do not try to filter it.
+
+The Claude-Code-specific advice you will see printed by the shared `claude-bus` script's `tip:` lines and in `README.md`/`bus-watch.sh` (the Monitor tool, `timeout_ms`, re-arm on expiry) does not apply in OpenCode. Ignore it. `bus-watch.sh` and the `Monitor(...)` snippets are for Claude Code only.
+
+Registration has no OpenCode equivalent of the Claude Code SessionStart hook, so `init <me>` is your startup step. If you need liveness monitoring (a `dead`/`erroring`/`stale` probe on a worker), call `register` explicitly with `--transcript`/`--cgroup`; otherwise skip it.
+
+## The one hard rule
+
+Short messages only. `send`, `dispatch`, and `reply` refuse a body over `$CLAUDE_BUS_MAX` bytes (default 1024). Pass anything large BY PATH with `send-path`: the content stays on disk, only the pointer travels. Do not chunk a long message into many sends.
+
+## Everything else self-documents
+
+Run `claude-bus` with no arguments for the command list, and follow the `next:` hint each command prints to stderr. For tracked work that expects a reply or completion, use `dispatch` (it opens an expectation), then `reply`, `pending`, and `close`. To catch a worker that stalls or dies, a worker `register`s at spawn (so the probe can find its process tree) and the orchestrator backgrounds `claude-bus monitor <me>` (on the HOST, never inside a sandbox: the monitor reads host cgroups, so from within a dbox it would read every agent dead and GC live workers — it refuses to run there); unliveness (a dead, OOM-killed, or stalled worker, or one that never read the message so its expectation is stuck `sent`) arrives in the orchestrator's inbox as a `kind: alert` message. A persistent sink that holds no expectation of its own (a secretary, an oncall) can still be covered with `watch <me> <target>`: the monitor sends a `dead` alert if a registered `<target>`'s process tree is gone (OOM, crash), an `erroring` alert with the HTTP status if its registered transcript ends on an unresolved API error (a rate limit or server error), and a `stale` alert if its inbox stops draining, catching a killed session, a throttled one, and a hung-but-alive one respectively. A `stale` alert only helps if someone is awake to read it, which is the very thing in doubt, so `watch <me> <target> --nudge` instead pushes the target directly: the monitor types a drain instruction into the pane the target self-registered at startup. The monitor stores no command and runs no shell for this — see `~/.claude/skills/claude-bus/README.md` for why that matters. The alert lands in the watcher's inbox, so a supervisor watches its direct children and their failures route up to it; `register <worker> --supervisor <parent>` wires that watch at spawn, so a parent spawning many short-lived workers learns when one 529s without hand-wiring each `watch`. A `--supervisor` auto-watch is erroring-only by default (a worker's clean death is silent and its record is reaped, keeping a churning fleet quiet), with the death-alarm opt-in via `--role supervisor` for a long-lived agent that should never exit. A secretary can front a coordinator's inbox with `delegate <coordinator> <secretary>` (transparent, senders keep addressing the coordinator) and relay an agent's verbatim report upward with `forward <me> <id> <to> [note]`. `drain` archives each message it reads into `log/<me>/`, which is what `forward` reads back. See `~/.claude/skills/claude-bus/README.md` for the full design: the JSON envelope, the `sent -> acked -> done/awaiting_orch` expectation state machine, and the liveness probe and monitor.
+
+## Constraints
+
+- Same machine or shared filesystem only. It is files, not a network protocol.
+- Depends on `entr` for the blocking watch.
+- A session drains only its own inbox, one drain at a time.

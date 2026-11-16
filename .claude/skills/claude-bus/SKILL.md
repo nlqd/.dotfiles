@@ -11,23 +11,16 @@ File-based mailbox for short messages between independent Claude sessions on one
 
 Push works because a backgrounded `wait <me>` exits the moment mail lands, and a background command exiting re-invokes the model. So the loop per session is: `init <me>` once, then background `wait <me>`; when it exits, `drain <me>` to read and clear the inbox, act, then re-arm `wait` in the background. Always drain before re-arming. Run `wait` in the BACKGROUND, never the foreground, or it blocks the turn.
 
-### In Claude Code, prefer a persistent Monitor over hand-re-arming (the single-shot is brittle)
+### In Claude Code, watch your inbox with a Monitor (the single-shot wait is brittle)
 
-The `background wait -> drain -> re-arm` loop above makes you re-arm every single turn, and a busy session reliably forgets: it gets absorbed in a multi-step task, never re-arms, and goes silently DEAF while mail piles up. If you have the Monitor tool, use it instead — a `persistent: true` Monitor runs across turns with no manual re-arm.
-
-The catch that sank the naive attempt: a Monitor that emits one event PER MESSAGE floods the tool's too-many-events auto-stop (a bus-heavy session sends hundreds), and then it dies as silently as the manual loop. The fix is EDGE-TRIGGERED emission — emit ONE line when the inbox goes non-empty, then block until you've drained it, so events stay sparse (one per batch, matching how you actually drain):
+The `background wait -> drain -> re-arm` loop above makes you re-arm after every message, and a busy session reliably forgets: it gets absorbed in a multi-step task, never re-arms, and goes silently DEAF while mail piles up. If you have the Monitor tool, use the shared watch script instead:
 
 ```
-Monitor(persistent: true, description: "bus: undrained mail in <me> inbox", command:
-  'while true; do
-     if find ~/.cache/claude-bus/inbox/<me> -maxdepth 1 -name "*.msg" -print -quit | grep -q .; then
-       echo "bus-mail: <me> inbox has undrained message(s) — drain now"
-       while find ~/.cache/claude-bus/inbox/<me> -maxdepth 1 -name "*.msg" -print -quit | grep -q .; do sleep 3; done
-     fi; sleep 3
-   done')
+Monitor(description: "bus: real mail in <me> inbox", timeout_ms: 1800000,
+        command: "bash ~/.claude/skills/claude-bus/bus-watch.sh <me>")
 ```
 
-On each event, `drain <me>`, act, done — no re-arm. Optionally keep a host-side poke-loop as a wide-grace (>=120s) backstop that types a drain nudge into your pane if the Monitor itself ever dies, so a silent Monitor death still surfaces. The `wait`/`monitor` host commands below remain for non-Claude-Code processes and for cross-session liveness watching.
+It is edge-triggered so it never floods the too-many-events auto-stop: one line when a real (non-ack) message has sat undrained for 10 s, then quiet until you drain. Acks never wake you. On each event, `drain <me>` and act; no re-arm. The Claude Code build in use caps a Monitor at 30 minutes and has no persistent flag (10-15), so re-arm the same Monitor when its expiry notice arrives, and start it again after any restart or resume. The `wait`/`monitor` host commands below remain for non-Claude-Code processes and for cross-session liveness watching.
 
 ## The one hard rule
 
