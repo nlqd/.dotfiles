@@ -26,6 +26,29 @@ vim.o.scrolloff = 10
 vim.o.exrc = true
 vim.o.hlsearch = true
 vim.o.clipboard = 'unnamedplus'
+-- Copy over OSC 52 so yanks reach foot through tmux even in panes whose shell
+-- predates sway and lacks WAYLAND_DISPLAY. Without it, paste falls back to the last yank.
+local last_yank = {}
+local function osc52_copy(reg)
+    local copy = require('vim.ui.clipboard.osc52').copy(reg)
+    return function(lines)
+        last_yank = lines
+        copy(lines)
+    end
+end
+local function wl_paste(args)
+    return function()
+        if not vim.env.WAYLAND_DISPLAY then return last_yank end
+        local out = vim.system(vim.list_extend({ 'wl-paste', '--no-newline' }, args), { text = true }):wait()
+        if out.code ~= 0 then return last_yank end
+        return vim.split(out.stdout, '\n')
+    end
+end
+vim.g.clipboard = {
+    name = 'osc52-copy',
+    copy = { ['+'] = osc52_copy('+'), ['*'] = osc52_copy('*') },
+    paste = { ['+'] = wl_paste({}), ['*'] = wl_paste({ '--primary' }) },
+}
 
 -- Keymaps
 vim.keymap.set('v', '<leader>y', '"+y', { desc = '[Y]ank to system' })
