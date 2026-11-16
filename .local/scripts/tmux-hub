@@ -156,14 +156,16 @@ tmh_reorder() {
   declare -A widx srank
   while IFS=$'\t' read -r sess idx wid; do widx["${wid}|${sess}"]=${idx}; done \
     < <(tmux list-windows -a -F '#{session_name}'$'\t''#{window_index}'$'\t''#{window_id}' || true)
-  while read -r sess; do srank[${sess}]=${r}; r=$((r + 1)); done < <(tmux list-sessions -F '#{session_name}' || true)
+  # DN 10-27: the core roster's home session comes first, so its windows sit on the digit keys 0-9.
+  for sess in ${TMH_FIRST:-jenner-web}; do srank[${sess}]=${r}; r=$((r + 1)); done
+  while read -r sess; do [[ -n ${srank[${sess}]:-} ]] || { srank[${sess}]=${r}; r=$((r + 1)); }; done < <(tmux list-sessions -F '#{session_name}' || true)
 
   local landing; landing=$(tmux list-windows -t "=${HUB}" -F '#{?@hub_landing,#{window_id},}' | grep . | head -1)
   local -a sorted
   mapfile -t sorted < <(
     tmux list-windows -t "=${HUB}" -F '#{?@hub_landing,,#{window_id}'$'\t''#{@hub_home}}' | grep . \
       | while IFS=$'\t' read -r wid home; do
-          printf '%05d\t%05d\t%s\n' "${srank[${home}]:-99999}" "${widx["${wid}|${home}"]:-99999}" "${wid}"
+          printf '%05d\t%05d\t%s\n' "${srank[${home:-_}]:-99999}" "${widx["${wid}|${home}"]:-99999}" "${wid}"
         done | sort | cut -f3 || true
   )
   # shellcheck disable=SC2206
@@ -175,7 +177,8 @@ tmh_reorder() {
   # Move sources are named by current hub index (=$HUB:from), never by bare
   # window-id: a window linked to both the hub and its home session would let
   # tmux pick the home-session link and unlink it from home (data loss).
-  local tmp=$((base + 1000)) i=${base} k=0 from
+  # The landing takes index 0 (prefix 0) so the first nine agent windows get prefix 1-9.
+  local tmp=$((base + 1000)) i=${TMH_HUB_BASE:-0} k=0 from
   local -a tmps=()
   for wid in "${desired[@]}"; do
     from=${widx["${wid}|${HUB}"]}
