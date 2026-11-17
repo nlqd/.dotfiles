@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Convenience shim: expose the claude-bus skill CLI on PATH under its bare name.
+# The skill's own machinery (session-register, monitors) calls the binary by full
+# path or $CLAUDE_BUS_BIN; this shim just lets agents and humans type `claude-bus`.
+# It is host-local (~/.local/bin is a real dir, not tracked in dotfiles), which is
+# why losing it is silent and nothing restores it automatically. Restored
+# 2026-09-15 after the bare name vanished (exit 127 for onc on host + sandbox).
+# A wrapper, not a symlink: it honors $CLAUDE_BUS_BIN and can't dangle if a
+# sandbox happens not to bind the skill target.
+exec "${CLAUDE_BUS_BIN:-$HOME/.claude/skills/claude-bus/claude-bus}" "$@"
