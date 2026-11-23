@@ -14,8 +14,7 @@ exec --no-startup-id sh -c 'command -v mako >/dev/null && exec mako; exec dunst'
 exec --no-startup-id sh -c 'command -v fcitx5 >/dev/null && exec fcitx5 -d --replace; exec ibus-daemon --daemonize --replace'
 exec --no-startup-id sh -c 'command -v nm-applet >/dev/null && exec nm-applet'
 # Clipboard history: record text and images as they are copied; $mod+v opens the picker.
-exec --no-startup-id sh -c 'command -v cliphist >/dev/null && exec wl-paste --type text --watch cliphist store'
-exec --no-startup-id sh -c 'command -v cliphist >/dev/null && exec wl-paste --type image --watch cliphist store'
+exec --no-startup-id $HOME/.local/scripts/wl-clip-watch
 # Sync battery charge policy to saved server-mode state on boot (literal path:
 # $dot_local is defined further down, after this exec block).
 exec --no-startup-id $HOME/.local/scripts/battery-charge-mode sync
