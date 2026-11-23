@@ -1,26 +1,28 @@
 [push]
     autoSetupRemote = true
 
-[includeIf "gitdir:~/Dev/personal/"]
-    path = ~/Dev/personal/.gitconfig
-
-[includeIf "gitdir:~/Dev/sides/"]
-    path = ~/Dev/personal/.gitconfig
-
-[includeIf "gitdir:~/Documents/Obsidian-Vault/"]
-    path = ~/Dev/personal/.gitconfig
-
+# Identity: by directory first, then by remote owner (later includes win), so a
+# clone in the wrong folder still gets the identity its remote belongs to.
 [includeIf "gitdir:~/org/"]
-    path = ~/Dev/personal/.gitconfig
-
-[includeIf "gitdir:~/Dev/work/"]
-    path = ~/Dev/work/.gitconfig
-
-[includeIf "gitdir:~/dev/"]
-    path = ~/.gitconfig.work
-
+    path = ~/.gitconfig.personal
 [includeIf "gitdir:~/experiments/"]
     path = ~/.gitconfig.personal
+[includeIf "gitdir:~/dev/"]
+    path = ~/.gitconfig.work
+[includeIf "hasconfig:remote.*.url:git@github.com:nlqd/**"]
+    path = ~/.gitconfig.personal
+[includeIf "hasconfig:remote.*.url:git@github.com-code:**"]
+    path = ~/.gitconfig.personal
+[includeIf "hasconfig:remote.*.url:https://github.com/nlqd/**"]
+    path = ~/.gitconfig.personal
+[includeIf "hasconfig:remote.*.url:git@github.com:EastAgile/**"]
+    path = ~/.gitconfig.work
+[includeIf "hasconfig:remote.*.url:https://github.com/EastAgile/**"]
+    path = ~/.gitconfig.work
+
+# A repo outside every rule above refuses to commit instead of guessing a name and email.
+[user]
+    useConfigOnly = true
 
 [filter "lfs"]
     clean = git-lfs clean -- %f
@@ -29,7 +31,6 @@
     required = true
 
 [core]
-    excludesfile = ~/.gitignore
     pager = delta
 
 [init]
@@ -59,3 +60,9 @@
     line-numbers-plus-style       = green
     line-numbers-left-style       = blue
     line-numbers-right-style      = blue
+[credential "https://github.com"]
+	helper = 
+	helper = !/home/dungngo/.local/bin/gh auth git-credential
+[credential "https://gist.github.com"]
+	helper = 
+	helper = !/home/dungngo/.local/bin/gh auth git-credential

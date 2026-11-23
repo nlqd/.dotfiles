@@ -1,11 +1,10 @@
-# ~/work/.gitconfig.work
- 
+# GitHub account ea-dungn, key dungn_ed25519 (see includeIf in ~/.gitconfig)
 [user]
-email = dung.ngo@eastagile.com
-name = Dung Ngo
- 
+    email = dung.ngo@eastagile.com
+    name = Dung Ngo
+
 [github]
-user = ea-dungn
- 
-# [core]
-# sshCommand = ssh -i ~/.ssh/id_ea-dungn_ed25519
+    user = ea-dungn
+
+[core]
+    sshCommand = ssh -i ~/.ssh/dungn_ed25519 -o IdentitiesOnly=yes -o IdentityAgent=none

@@ -1,11 +1,10 @@
-# ~/Dev/personal/.gitconfig.personal
-
+# GitHub account nlqd, key id_code_ed25519 (see includeIf in ~/.gitconfig)
 [user]
-email = quocdungngole@gmail.com
-name = Dung Ngo
- 
+    email = quocdungngole@gmail.com
+    name = Dung Ngo
+
 [github]
-user = codeuntilcold
- 
+    user = nlqd
+
 [core]
-sshCommand = ssh -i ~/.ssh/id_code_ed25519
+    sshCommand = ssh -i ~/.ssh/id_code_ed25519 -o IdentitiesOnly=yes -o IdentityAgent=none
