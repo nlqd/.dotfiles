@@ -18,6 +18,8 @@ while [ "$n" -gt 0 ]; do
   case $opt in
     -fn) # Xft "Family-16" becomes pango "Family 16"
       font=$(printf '%s' "$1" | sed -E 's/-([0-9]+(\.[0-9]+)?)$/ \1/')
+      # wmenu draws a menu of zero height (an empty strip) when the font has no size
+      case $font in *[0-9]) ;; *) font="$font 11" ;; esac
       shift; n=$((n - 1)); set -- "$@" -f "$font" ;;
     -nb) set -- "$@" -N "$1"; shift; n=$((n - 1)) ;;
     -nf) set -- "$@" -n "$1"; shift; n=$((n - 1)) ;;

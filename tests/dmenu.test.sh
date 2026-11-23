@@ -25,8 +25,8 @@ check "Wayland: sway's dmenu flags become wmenu flags" \
   "WMENU|-i|-f|Iosevka NF 16|-N|#C4C6CD|-n|#07080D|-S|#004C63|-s|#FFFFFF" \
   "$(run WAYLAND_DISPLAY=wayland-1 sh "$SHIM" "${SWAY_FLAGS[@]}" </dev/null | head --lines=1)"
 
-check "Wayland: font without a size is passed through" \
-  "WMENU|-f|JetBrainsMono NF" \
+check "Wayland: font without a size gets one, or wmenu draws an empty strip" \
+  "WMENU|-f|JetBrainsMono NF 11" \
   "$(run WAYLAND_DISPLAY=wayland-1 sh "$SHIM" -fn "JetBrainsMono NF" </dev/null | head --lines=1)"
 
 check "Wayland: prompt and lines are kept, monitor and grab-keyboard dropped" \
