@@ -1,37 +1,52 @@
 #!/usr/bin/env bash
+
+# require: fd fzf
+
 set -euo pipefail
 
-# Search roots used when no PATH argument is given. Missing dirs are skipped.
-ROOTS=(
-  "$HOME/Downloads"
-  "$HOME/Desktop"
-  "$HOME/Documents"
-  "$HOME/Pictures"
-  "$HOME/Videos"
-  "$HOME/Music"
+# What counts as a candidate: documents and media, never code (code is opened from an editor).
+# Dot-directories (.cargo, .git, .venv, .cache) are skipped by fd itself, and so is whatever a
+# .gitignore lists inside a repo (node_modules, target, build output). EXCLUDES covers trees
+# that have no repo around them. fd matches extensions case-insensitively.
+EXTENSIONS=(
+  md markdown pdf epub djvu docx doc odt rtf xlsx xls ods pptx ppt odp
+  mp4 mkv webm mov avi m4v mp3 flac wav ogg m4a opus
+  png jpg jpeg gif webp heic avif
 )
 
-# Directory names pruned from the search at any depth.
+# Names pruned at any depth. The json entries are tool config that nobody opens by hand.
 EXCLUDES=(
-  .git
-  node_modules
-  target
-  .venv
-  venv
-  __pycache__
+  node_modules target venv .venv site-packages __pycache__ snap
+  package.json package-lock.json 'tsconfig*.json' composer.json
 )
 
-MAX_DEPTH=3
+# Data-like files (json, csv) are noise when they come in bulk: test fixtures, exports, simulation
+# output. They are searched on their own, skipping the usual fixture folders (DATA_EXCLUDES), and
+# a file is dropped when its folder holds more than DATA_DIR_CAP of its type, or when the same
+# file name turns up in more than DATA_NAME_CAP places (one data.csv per test case).
+# Documents and media are never capped.
+DATA_EXTENSIONS=(json csv)
+DATA_EXCLUDES=(tests test __tests__ fixtures testdata 'data_repro*' archive)
+DATA_DIR_CAP=25
+DATA_NAME_CAP=20
+
+# Walking a big home takes seconds, so the picker opens from a cached index and rebuilds it in the
+# background when it is older than REFRESH_MINUTES. What changed lately in FRESH_DIRS is read live
+# (FRESH_DAYS back), so a file you just downloaded is there before the index catches up.
+REFRESH_MINUTES=5
+FRESH_DIRS=(Downloads Desktop Documents Pictures Videos)
+FRESH_DAYS=2
 
 usage() {
   cat <<'EOF'
 Usage: quicklaunch [MODE] [PATH]
-  MODE: drag | open   (omit to dmenu-pick)
-  PATH: single search root (overrides the built-in ROOTS list)
+  MODE: drag | open   (omit to ask; with no drag tool installed it is always open)
+  PATH: search root (default: your home directory)
 
-Picks file(s) via fzf in a floating terminal, then either drags
-them (dragon/ripdrag) or opens them (xdg-open). Edit ROOTS and
-EXCLUDES at the top of this script to tune the default search.
+Lists documents and media under the root, newest first, in a floating terminal. Type to
+narrow, Enter to pick. open uses xdg-open, drag hands the files to ripdrag or dragon.
+The list comes from a cached index that refreshes in the background, so the first run is slow.
+Edit the lists at the top of this script to tune what shows up.
 EOF
 }
 
@@ -40,91 +55,192 @@ die() {
   exit 1
 }
 
+SELF=$(readlink --canonicalize -- "${BASH_SOURCE[0]}")
+
+# Files with the given extensions (the name of an array), then any extra fd arguments.
+find_files() {
+  local -n extensions=$1
+  local args=() item
+  for item in "${extensions[@]}"; do args+=(--extension "$item"); done
+  for item in "${EXCLUDES[@]}"; do args+=(--exclude "$item"); done
+  fd --type file "${args[@]}" "${@:2}"
+}
+
+drop_data_dumps() {
+  local data_re
+  data_re="[.]($(IFS='|'; echo "${DATA_EXTENSIONS[*]}"))\$"
+  awk -v dir_cap="$DATA_DIR_CAP" -v name_cap="$DATA_NAME_CAP" -v data_re="$data_re" '
+    function split_path(path) {
+      dir = path; sub(/[^\/]*$/, "", dir)
+      name = path; sub(/^.*\//, "", name)
+      ext = tolower(name); sub(/^.*[.]/, "", ext)
+    }
+    {
+      line[NR] = $0
+      if (tolower($0) ~ data_re) { split_path($0); per_dir[dir SUBSEP ext]++; per_name[name]++ }
+    }
+    END {
+      for (i = 1; i <= NR; i++) {
+        if (tolower(line[i]) ~ data_re) {
+          split_path(line[i])
+          if (per_dir[dir SUBSEP ext] > dir_cap || per_name[name] > name_cap) continue
+        }
+        print line[i]
+      }
+    }
+  '
+}
+
+newest_first() {
+  { xargs --delimiter='\n' --no-run-if-empty stat --format='%Y %n' -- 2>/dev/null || true; } \
+    | sort --reverse --numeric-sort \
+    | cut --delimiter=' ' --fields=2-
+}
+
+# Every candidate under the current directory, relative, most recently modified first.
+list_candidates() {
+  local data_args=() item
+  for item in "${DATA_EXCLUDES[@]}"; do data_args+=(--exclude "$item"); done
+  { find_files EXTENSIONS; find_files DATA_EXTENSIONS "${data_args[@]}" | drop_data_dumps; } | newest_first
+}
+
+# Recent files in the usual drop folders, when the current directory is home.
+fresh_candidates() {
+  [[ $PWD == "$HOME" ]] || return 0
+  local args=() dir
+  for dir in "${FRESH_DIRS[@]}"; do [[ -d $dir ]] && args+=(--search-path "$dir"); done
+  [[ ${#args[@]} -gt 0 ]] || return 0
+  find_files EXTENSIONS --changed-within "${FRESH_DAYS}d" "${args[@]}" | newest_first
+}
+
+cache_file() {
+  local dir=${XDG_CACHE_HOME:-$HOME/.cache}/quicklaunch
+  mkdir --parents "$dir"
+  echo "$dir/${1//\//_}.list"
+}
+
+refresh_cache() {
+  local cache tmp
+  cache=$(cache_file "$1")
+  tmp=$(mktemp "$cache.XXXXXX")
+  if (cd "$1" && list_candidates) >"$tmp"; then mv --force "$tmp" "$cache"; else rm --force "$tmp"; fi
+}
+
+cache_is_fresh() {
+  [[ -n $(find "$1" -maxdepth 0 -mmin "-$REFRESH_MINUTES" 2>/dev/null) ]]
+}
+
+# What the picker is fed: the fresh files first, then the index, each path once.
+candidates() {
+  { fresh_candidates; cat -- "$(cache_file "$PWD")"; } | awk '!seen[$0]++'
+}
+
+# "dir/name.md" becomes "name.md<TAB>dir", so the name is never what gets cut off.
+name_first() {
+  awk '{ i = match($0, /[^\/]*$/); print substr($0, i) "\t" (i > 1 ? substr($0, 1, i - 2) : ".") }'
+}
+
+preview() {
+  local file=$1
+  case $(file --brief --mime-type -- "$file") in
+    text/* | application/json)
+      if command -v bat >/dev/null; then bat --color=always --line-range :100 -- "$file"; else head --lines=100 -- "$file"; fi
+      ;;
+    image/*)
+      # chafa picks sixel in foot and coloured blocks elsewhere; fzf sets the pane size for us
+      if command -v chafa >/dev/null; then chafa --size="${FZF_PREVIEW_COLUMNS:-60}x${FZF_PREVIEW_LINES:-20}" -- "$file"; else file --brief -- "$file"; fi
+      ;;
+    video/*)
+      if command -v chafa >/dev/null && command -v ffmpeg >/dev/null; then
+        timeout 5 ffmpeg -v error -ss 1 -i "$file" -frames:v 1 -f image2pipe -vcodec png - \
+          | chafa --size="${FZF_PREVIEW_COLUMNS:-60}x${FZF_PREVIEW_LINES:-20}" - \
+          || file --brief -- "$file"
+      else
+        file --brief -- "$file"
+      fi
+      ;;
+    application/pdf)
+      if command -v pdftotext >/dev/null; then pdftotext -l 1 -layout -- "$file" - 2>/dev/null; else file --brief -- "$file"; fi
+      ;;
+    *) file --brief -- "$file" ;;
+  esac
+}
+
+# Runs inside the floating terminal. Writes the chosen absolute paths to $outfile.
+pick() {
+  local mode=$1 root=$2 outfile=$3 multi=() cache name dir
+  [[ $mode == drag ]] && multi=(--multi)
+  cd "$root"
+  cache=$(cache_file "$root")
+  if [[ ! -s $cache ]]; then
+    echo 'quicklaunch: building the file index, first run only...' >&2
+    refresh_cache "$root"
+  elif ! cache_is_fresh "$cache"; then
+    setsid "$SELF" --refresh "$root" </dev/null >/dev/null 2>&1 &
+  fi
+  candidates | name_first \
+    | fzf "${multi[@]}" --delimiter='\t' --tabstop=4 --tiebreak=index --prompt='quicklaunch> ' \
+      --preview="$SELF --preview {2}/{1}" --preview-window=right:40%:wrap \
+    | while IFS=$'\t' read -r name dir; do printf '%s/%s/%s\n' "$root" "$dir" "$name"; done >"$outfile" || true
+}
+
+# foot on Wayland, alacritty otherwise. Both get the same window class so one float rule fits.
+terminal() {
+  if [[ -n ${WAYLAND_DISPLAY:-} ]] && command -v foot >/dev/null; then
+    foot --app-id quicklaunch --title quicklaunch "$@"
+  else
+    alacritty --class quicklaunch --title quicklaunch -e "$@"
+  fi
+}
+
+drag_tool() {
+  local tool
+  for tool in ripdrag dragon; do
+    command -v "$tool" >/dev/null && { echo "$tool"; return; }
+  done
+  return 1
+}
+
 pick_mode() {
+  drag_tool >/dev/null || { echo open; return; }
   printf 'drag\nopen\n' | dmenu -i -p 'quicklaunch:' -fn 'JetBrainsMono NF'
 }
 
-# Spawn floating alacritty, run fzf over mtime-sorted files under the given
-# roots. Writes selected absolute paths to $1. $2 is "multi"|"single". Remaining
-# args are search roots (already filtered to existing dirs).
-pick_files() {
-  local outfile=$1 mode=$2
-  shift 2
-  local multi_flag=''
-  [[ $mode == multi ]] && multi_flag='--multi'
-
-  local roots_str exclude_str
-  roots_str=$(printf ' %q' "$@")
-  exclude_str=$(printf ' --exclude %q' "${EXCLUDES[@]}")
-
-  alacritty --class quicklaunch --title quicklaunch -e bash -c "
-    fd --type f --hidden --max-depth $MAX_DEPTH$exclude_str . $roots_str \
-        --exec-batch stat --format='%Y %n' -- \
-      | sort --reverse --numeric-sort \
-      | cut --delimiter=' ' --fields=2- \
-      | fzf $multi_flag \
-          --prompt='quicklaunch> ' \
-          --preview='bat --color=always --line-range :100 {} 2>/dev/null || file --brief {}' \
-          --preview-window=right:50%:wrap \
-      > $(printf %q "$outfile") || true
-  " || true
-}
-
-drag_files() {
-  local cmd
-  if [[ -n ${WAYLAND_DISPLAY:-} ]]; then
-    command -v ripdrag >/dev/null || die 'ripdrag not installed (Wayland)'
-    cmd=ripdrag
-  else
-    command -v dragon >/dev/null || die 'dragon not installed (X11)'
-    cmd=dragon
-  fi
-  "$cmd" --and-exit "$@" &
-  disown
-}
-
-open_file() {
-  xdg-open "$1" &
-  disown
-}
-
 main() {
-  local mode=${1:-} override=${2:-}
+  local mode=${1:-} root=${2:-$HOME} tool outfile files=()
 
   case $mode in
-    -h|--help) usage; exit 0 ;;
+    -h | --help) usage; exit 0 ;;
     '') mode=$(pick_mode) || exit 0 ;;
-    drag|open) ;;
+    drag | open) ;;
     *) usage >&2; exit 2 ;;
   esac
   [[ -z $mode ]] && exit 0
+  [[ -d $root ]] || die "Not a directory: $root"
+  root=$(readlink --canonicalize -- "$root")
 
-  local roots=() d
-  if [[ -n $override ]]; then
-    [[ -d $override ]] || die "Not a directory: $override"
-    roots=("$override")
-  else
-    for d in "${ROOTS[@]}"; do
-      [[ -d $d ]] && roots+=("$d")
-    done
-  fi
-  [[ ${#roots[@]} -gt 0 ]] || die 'No existing search roots — edit ROOTS or pass a PATH'
-
-  case $mode in
-    drag) pick_files "$outfile" multi  "${roots[@]}" ;;
-    open) pick_files "$outfile" single "${roots[@]}" ;;
-  esac
-
+  outfile=$(mktemp --tmpdir quicklaunch.XXXXXX)
+  trap 'rm --force "$outfile"' EXIT
+  terminal "$SELF" --pick "$mode" "$root" "$outfile" || true
   [[ -s $outfile ]] || exit 0
-  mapfile -t files < "$outfile"
+  mapfile -t files <"$outfile"
 
   case $mode in
-    drag) drag_files "${files[@]}" ;;
-    open) open_file "${files[0]}" ;;
+    drag)
+      tool=$(drag_tool) || die 'no drag tool installed (ripdrag on Wayland, dragon on X11)'
+      "$tool" --and-exit "${files[@]}" &
+      ;;
+    open) xdg-open "${files[0]}" & ;;
   esac
+  disown
 }
 
-outfile=$(mktemp --tmpdir quicklaunch.XXXXXX)
-trap 'rm --force "$outfile"' EXIT
-
-main "$@"
+# The first argument picks an internal step, so the pieces can run on their own (and be tested).
+case ${1:-} in
+  --list) cd "${2:-$HOME}" && list_candidates ;;
+  --refresh) refresh_cache "${2:-$HOME}" ;;
+  --candidates) cd "${2:-$HOME}" && candidates ;;
+  --preview) preview "$2" ;;
+  --pick) pick "$2" "$3" "$4" ;;
+  *) main "$@" ;;
+esac
